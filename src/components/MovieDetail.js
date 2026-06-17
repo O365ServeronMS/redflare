@@ -245,11 +245,6 @@ export async function renderMovieDetail(container, slug) {
     const descWrap = document.createElement('div');
     descWrap.className = 'detail__description-wrap';
 
-    const descLabel = document.createElement('h3');
-    descLabel.className = 'detail__section-label';
-    descLabel.textContent = 'Nội dung phim';
-    descWrap.appendChild(descLabel);
-
     const descBody = document.createElement('div');
     descBody.className = 'detail__description-body';
     descBody.innerHTML = movie.content;
@@ -275,6 +270,10 @@ export async function renderMovieDetail(container, slug) {
     info.appendChild(descWrap);
   }
 
+  // ---- Metadata Group (Cast, Director) ----
+  const metadataGroup = document.createElement('div');
+  metadataGroup.className = 'detail__metadata-group';
+
   // ---- Cast ----
   if (Array.isArray(movie.actor) && movie.actor.length > 0) {
     const castRow = document.createElement('div');
@@ -290,7 +289,7 @@ export async function renderMovieDetail(container, slug) {
     castValue.textContent = movie.actor.join(', ');
     castRow.appendChild(castValue);
 
-    info.appendChild(castRow);
+    metadataGroup.appendChild(castRow);
   }
 
   // ---- Director ----
@@ -308,7 +307,11 @@ export async function renderMovieDetail(container, slug) {
     dirValue.textContent = movie.director.join(', ');
     dirRow.appendChild(dirValue);
 
-    info.appendChild(dirRow);
+    metadataGroup.appendChild(dirRow);
+  }
+
+  if (metadataGroup.hasChildNodes()) {
+    info.appendChild(metadataGroup);
   }
   // Info is appended later after episodes
 

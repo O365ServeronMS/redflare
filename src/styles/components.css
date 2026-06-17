@@ -758,12 +758,20 @@
   color: #ffffff;
 }
 
+.detail__metadata-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .detail__crew {
-  font-size: 16px;
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .detail__crew-label {
-  color: #888888;
+  color: #777777;
 }
 
 .detail__crew-value {
