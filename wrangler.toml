@@ -1,4 +1,4 @@
-name = "phimmoi"
+name = "phim"
 compatibility_date = "2024-03-20"
 main = "worker.js"
 
