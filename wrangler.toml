@@ -1,7 +1,0 @@
-name = "phimmoi"
-pages_build_output_dir = "dist"
-compatibility_date = "2026-06-17"
-
-[[kv_namespaces]]
-binding = "MOVIES_KV"
-id = "10670a45ffa54b21bbb40cecc47ae1c5"
