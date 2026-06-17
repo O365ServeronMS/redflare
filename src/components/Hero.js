@@ -19,9 +19,8 @@ function getScore(movie) {
   const rawScore =
     movie.imdb?.vote_average ??
     movie.imdb?.rating ??
-    movie.tmdb?.vote_average ??
-    movie.imdb ??
-    movie.tmdb;
+    movie.imdb?.score ??
+    movie.imdb;
 
   const score = Number(rawScore);
   if (!Number.isFinite(score) || score <= 0) return '';
@@ -166,12 +165,16 @@ export function renderHero(container, movies) {
     item.className = 'hero__rail-item';
     if (index === 0) item.classList.add('hero__rail-item--active');
     item.setAttribute('aria-label', `Chọn phim thứ ${index + 1}: ${movie.name}`);
+    const score = getScore(movie);
     item.innerHTML = `
       <span class="hero__rail-rank">${index + 1}</span>
       <span class="hero__rail-poster">
         <img src="${getPosterUrl(movie)}" alt="${movie.name}">
       </span>
-      <span class="hero__rail-title">${movie.name}</span>
+      <span class="hero__rail-copy">
+        <span class="hero__rail-title">${movie.name}</span>
+        ${score ? `<span class="hero__rail-score"><span>IMDb</span> ${score}</span>` : ''}
+      </span>
     `;
     item.addEventListener('click', () => {
       goToSlide(index);

@@ -76,6 +76,34 @@ const app = document.getElementById('app');
 let headerCleanup = null;
 let searchCleanup = null;
 
+function getImdbScore(movie) {
+  const rawScore =
+    movie.imdb?.vote_average ??
+    movie.imdb?.rating ??
+    movie.imdb?.score ??
+    movie.imdb;
+
+  const score = Number(rawScore);
+  return Number.isFinite(score) && score > 0 ? score : 0;
+}
+
+function isAuMyMovie(movie) {
+  return (movie.country || []).some((country) => {
+    const slug = String(country.slug || '').toLowerCase();
+    const name = String(country.name || '').toLowerCase();
+    return slug === 'au-my' || name.includes('âu mỹ') || name.includes('au my');
+  });
+}
+
+function isHeroCandidate(movie, fromAuMyEndpoint = false) {
+  return (
+    movie.type === 'single' &&
+    Boolean(movie.poster_url && movie.thumb_url) &&
+    getImdbScore(movie) > 0 &&
+    (fromAuMyEndpoint || isAuMyMovie(movie))
+  );
+}
+
 function mountGlobalUI() {
   // Header
   if (!document.querySelector('.header')) {
@@ -147,7 +175,7 @@ async function renderHomePage() {
     const uniqueMap = new Map();
     auMy.items.forEach(m => {
       // Only consider single movies (Phim Lẻ) with images
-      if (m.type === 'single' && m.poster_url && m.thumb_url) {
+      if (isHeroCandidate(m, true)) {
         uniqueMap.set(m.slug, m);
       }
     });
@@ -155,15 +183,15 @@ async function renderHomePage() {
     // Fallback if not enough Phim Lẻ Âu Mỹ are found
     if (uniqueMap.size < 5) {
       phimLe.items.forEach(m => {
-        if (m.poster_url && m.thumb_url) uniqueMap.set(m.slug, m);
+        if (isHeroCandidate(m)) uniqueMap.set(m.slug, m);
       });
     }
 
     const allItems = Array.from(uniqueMap.values());
     
     const topMovies = allItems.sort((a, b) => {
-      const scoreA = a.imdb?.vote_average || a.tmdb?.vote_average || 0;
-      const scoreB = b.imdb?.vote_average || b.tmdb?.vote_average || 0;
+      const scoreA = getImdbScore(a);
+      const scoreB = getImdbScore(b);
       if (scoreB !== scoreA) return scoreB - scoreA;
       return (b.year || 0) - (a.year || 0);
     });

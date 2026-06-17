@@ -26,7 +26,7 @@ export default {
 
 async function handleHomeData(request, env, ctx) {
   const KV = env.MOVIES_KV;
-  const CACHE_KEY = "home_data";
+  const CACHE_KEY = "home_data_v2";
   const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
   const corsHeaders = {
@@ -48,13 +48,19 @@ async function handleHomeData(request, env, ctx) {
 
     const fetchFreshData = async () => {
       try {
-        const [newRes, leRes, boRes, hhRes, amRes] = await Promise.all([
+        const [newRes, leRes, boRes, hhRes, ...amPages] = await Promise.all([
           fetch('https://ophim1.com/danh-sach/phim-moi-cap-nhat?page=1').then(r => r.json()),
           fetch('https://ophim1.com/v1/api/danh-sach/phim-le?page=1').then(r => r.json()),
           fetch('https://ophim1.com/v1/api/danh-sach/phim-bo?page=1').then(r => r.json()),
           fetch('https://ophim1.com/v1/api/danh-sach/hoat-hinh?page=1').then(r => r.json()),
           fetch('https://ophim1.com/v1/api/quoc-gia/au-my?page=1').then(r => r.json()),
+          fetch('https://ophim1.com/v1/api/quoc-gia/au-my?page=2').then(r => r.json()),
+          fetch('https://ophim1.com/v1/api/quoc-gia/au-my?page=3').then(r => r.json()),
+          fetch('https://ophim1.com/v1/api/quoc-gia/au-my?page=4').then(r => r.json()),
+          fetch('https://ophim1.com/v1/api/quoc-gia/au-my?page=5').then(r => r.json()),
         ]);
+
+        const auMyItems = amPages.flatMap(page => page.data?.items || page.items || []);
 
         const freshData = {
           timestamp: Date.now(),
@@ -66,7 +72,7 @@ async function handleHomeData(request, env, ctx) {
           phimLe: { items: (leRes.data?.items || leRes.items || []) },
           phimBo: { items: (boRes.data?.items || boRes.items || []) },
           hoatHinh: { items: (hhRes.data?.items || hhRes.items || []) },
-          auMy: { items: (amRes.data?.items || amRes.items || []) },
+          auMy: { items: auMyItems },
         };
 
         if (KV) {
