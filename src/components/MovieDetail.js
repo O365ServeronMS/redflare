@@ -130,20 +130,6 @@ export async function renderMovieDetail(container, slug) {
   const content = document.createElement('div');
   content.className = 'hero__content hero__content--active';
 
-  // Back Button
-  const backBtn = document.createElement('button');
-  backBtn.className = 'detail__back-btn';
-  backBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>`;
-  backBtn.setAttribute('aria-label', 'Quay lại');
-  backBtn.addEventListener('click', () => {
-    if (window.history.length > 2) {
-      window.history.back();
-    } else {
-      navigate('/');
-    }
-  });
-  content.appendChild(backBtn);
-
   // Title
   const title = document.createElement('h1');
   title.className = 'hero__title';

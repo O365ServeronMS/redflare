@@ -20,6 +20,25 @@ export function renderHeader(container) {
   const header = document.createElement('header');
   header.className = 'header';
 
+  // ── Back Button ──
+  const backBtn = document.createElement('button');
+  backBtn.className = 'header__back-btn';
+  backBtn.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="15 18 9 12 15 6"></polyline>
+    </svg>
+    <span class="header__back-text">Quay lại</span>
+  `;
+  backBtn.setAttribute('aria-label', 'Quay lại');
+  backBtn.addEventListener('click', () => {
+    if (window.history.length > 2) {
+      window.history.back();
+    } else {
+      navigate('/');
+    }
+  });
+  header.appendChild(backBtn);
+
   // ── Logo ──
   const logo = document.createElement('a');
   logo.className = 'header__logo';
@@ -104,6 +123,13 @@ export function renderHeader(container) {
   const updateActiveLinks = () => {
     const { path } = getCurrentRoute();
     
+    // Manage back button visibility
+    if (path === '/' || path === '') {
+      backBtn.classList.remove('header__back-btn--visible');
+    } else {
+      backBtn.classList.add('header__back-btn--visible');
+    }
+
     desktopLinks.forEach(link => {
       if (link.dataset.path === path) {
         link.classList.add('header__nav-link--active');

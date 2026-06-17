@@ -26,6 +26,51 @@
   background: rgba(0, 0, 0, 0.95);
 }
 
+.header__back-btn {
+  display: flex;
+  align-items: center;
+  background: none;
+  border: none;
+  color: #ffffff;
+  cursor: pointer;
+  padding: 8px 12px 8px 0;
+  margin-right: 16px;
+  opacity: 0;
+  visibility: hidden;
+  width: 0;
+  overflow: hidden;
+  transition: all 0.3s ease;
+  flex-shrink: 0;
+}
+
+.header__back-btn--visible {
+  opacity: 1;
+  visibility: visible;
+  width: auto;
+}
+
+.header__back-text {
+  font-size: 16px;
+  font-weight: 600;
+  margin-left: 4px;
+  transition: opacity 0.2s ease;
+  white-space: nowrap;
+}
+
+.header__back-btn:hover {
+  color: #e50914;
+}
+
+.header__back-btn:hover svg {
+  transform: translateX(-4px);
+}
+
+.header__back-btn svg {
+  width: 24px;
+  height: 24px;
+  transition: transform 0.2s ease;
+}
+
 .header__logo {
   font-size: 28px;
   font-weight: 900;
@@ -137,6 +182,38 @@
 
   .header__mobile-toggle {
     display: block;
+  }
+
+  .header__back-text {
+    display: none;
+  }
+
+  .header__back-btn {
+    margin-right: 8px;
+    padding: 4px;
+  }
+
+  .header__back-btn svg {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+@media (max-height: 500px) and (orientation: landscape) {
+  .header {
+    height: 48px;
+  }
+  .header__mobile-menu {
+    top: 48px;
+  }
+  .header__logo img {
+    height: 24px !important;
+  }
+  .header__back-btn svg,
+  .header__search-btn svg,
+  .header__mobile-toggle svg {
+    width: 20px !important;
+    height: 20px !important;
   }
 }
 
@@ -602,31 +679,7 @@
   height: 85vh; /* Slightly shorter than home hero */
 }
 
-.detail__back-btn {
-  position: absolute;
-  top: 90px;
-  left: 4%;
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.5);
-  color: #fff;
-  font-size: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  cursor: pointer;
-  z-index: 10;
-  transition: background 0.3s ease;
-}
-
-.detail__back-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
 .hero--detail .hero__content {
-  padding-top: 80px; /* Push content below back button */
 }
 
 .detail__body {
@@ -721,14 +774,7 @@
   .hero--detail {
     height: 70vh;
   }
-  .detail__back-btn {
-    top: 80px;
-    width: 40px;
-    height: 40px;
-  }
-  .hero--detail .hero__content {
-    padding-top: 60px;
-  }
+
 }
 
 /* ==========================================================================
