@@ -75,17 +75,17 @@ export function renderHeader(container) {
   const searchBtn = document.createElement('button');
   searchBtn.className = 'header__search-btn';
   searchBtn.setAttribute('aria-label', 'Tìm kiếm');
-  searchBtn.textContent = '🔍';
+  searchBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`;
   searchBtn.addEventListener('click', () => {
-    window.dispatchEvent(new CustomEvent('open-search'));
+    document.dispatchEvent(new CustomEvent('open-search'));
   });
   actions.appendChild(searchBtn);
 
   // Hamburger (mobile)
   const hamburger = document.createElement('button');
-  hamburger.className = 'header__hamburger';
+  hamburger.className = 'header__mobile-toggle';
   hamburger.setAttribute('aria-label', 'Menu');
-  hamburger.textContent = '☰';
+  hamburger.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>`;
   actions.appendChild(hamburger);
 
   header.appendChild(actions);

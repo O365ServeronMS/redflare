@@ -34,7 +34,17 @@ export function renderMovieCard(container, movie, rank = null) {
 
   // ── Status/Quality Badge ──
   let badgeText = '';
-  const epCurrent = movie.episode_current || '';
+  let epCurrent = movie.episode_current || '';
+  
+  // Format episode string to be shorter for mobile
+  if (epCurrent.includes('Hoàn tất') || epCurrent.includes('hoàn tất')) {
+    const match = epCurrent.match(/\((.*?)\)/);
+    if (match) {
+      epCurrent = `Full ${match[1]}`; // e.g., "Full 36/36"
+    } else {
+      epCurrent = 'Full';
+    }
+  }
   
   if (movie.type === 'single') {
     if (epCurrent.toLowerCase().includes('trailer') || movie.status === 'trailer') {
