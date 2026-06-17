@@ -1,5 +1,6 @@
 export default {
   async fetch(request, env, ctx) {
+    console.log("Worker intercepted:", request.url);
     const url = new URL(request.url);
 
     // 1. API Routes
@@ -11,9 +12,11 @@ export default {
     // Try to fetch the requested asset
     let response = await env.ASSETS.fetch(request);
     
-    // If asset not found (e.g. /phim/slug), serve index.html for SPA router
-    if (response.status === 404) {
-      const indexReq = new Request(url.origin + "/index.html", request);
+    // If asset not found, serve index.html ONLY for SPA navigation routes
+    // Do NOT serve index.html for missing .js or .css files (which breaks the browser cache)
+    if (response.status === 404 && request.headers.get('accept')?.includes('text/html')) {
+      // Fetching "/" instead of "/index.html" prevents Cloudflare ASSETS from issuing a 307 canonical redirect
+      const indexReq = new Request(url.origin + "/", request);
       response = await env.ASSETS.fetch(indexReq);
     }
 
