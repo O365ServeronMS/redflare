@@ -9,3 +9,7 @@ binding = "ASSETS"
 [[kv_namespaces]]
 binding = "MOVIES_KV"
 id = "10670a45ffa54b21bbb40cecc47ae1c5"
+
+[observability.logs]
+enabled = false
+invocation_logs = true
