@@ -401,16 +401,18 @@
 
 .carousel__track-wrapper {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .carousel__track {
   display: flex;
   gap: 8px;
   overflow-x: auto;
+  overflow-y: hidden;
   scroll-snap-type: x mandatory;
   scroll-behavior: smooth;
-  padding: 0 4%;
+  padding: 24px 4%;
+  margin: -24px 0;
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
