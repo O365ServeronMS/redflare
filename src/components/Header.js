@@ -43,7 +43,12 @@ export function renderHeader(container) {
   const logo = document.createElement('a');
   logo.className = 'header__logo';
   logo.href = '/';
-  logo.innerHTML = '<img src="/logo-dark.png" alt="Film Bluesia" style="height: 36px; display: block;" />';
+  logo.innerHTML = `
+    <picture>
+      <source srcset="/logo-dark.webp" type="image/webp">
+      <img src="/logo-dark.png" alt="Film Bluesia" style="height: 36px; display: block;" />
+    </picture>
+  `;
   logo.addEventListener('click', (e) => {
     e.preventDefault();
     navigate('/');
