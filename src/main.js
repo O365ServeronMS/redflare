@@ -43,12 +43,30 @@ function showRuntimeError(message) {
   document.body.appendChild(errorEl);
 }
 
+function getRuntimeErrorMessage(event) {
+  return `${event.message} - ${event.filename}:${event.lineno}`;
+}
+
+function getPromiseErrorMessage(event) {
+  return `Promise: ${event.reason?.stack || event.reason}`;
+}
+
 window.addEventListener('error', (event) => {
-  showRuntimeError(`${event.message} - ${event.filename}:${event.lineno}`);
+  const message = getRuntimeErrorMessage(event);
+  if (import.meta.env.DEV) {
+    showRuntimeError(message);
+    return;
+  }
+  console.error(message);
 });
 
 window.addEventListener('unhandledrejection', (event) => {
-  showRuntimeError(`Promise: ${event.reason?.stack || event.reason}`);
+  const message = getPromiseErrorMessage(event);
+  if (import.meta.env.DEV) {
+    showRuntimeError(message);
+    return;
+  }
+  console.error(message);
 });
 
 // ─── App Root ──────────────────────────────────────────
