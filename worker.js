@@ -13,7 +13,9 @@ export default {
     
     // If asset not found (e.g. /phim/slug), serve index.html for SPA router
     if (response.status === 404) {
-      const indexReq = new Request(url.origin + "/index.html", request);
+      // Cloudflare Assets automatically redirects /index.html to / to normalize URLs.
+      // Fetching / directly avoids this 301/302 redirect and returns the HTML content cleanly.
+      const indexReq = new Request(url.origin + "/", request);
       response = await env.ASSETS.fetch(indexReq);
     }
 
