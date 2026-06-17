@@ -85,60 +85,123 @@ export async function renderMovieDetail(container, slug) {
   const detail = document.createElement('article');
   detail.className = 'detail';
 
-  // ==== Backdrop ====
-  const backdropContainer = document.createElement('div');
-  backdropContainer.className = 'detail__backdrop-container';
+  // ==== Hero-style Banner ====
+  const banner = document.createElement('section');
+  banner.className = 'hero hero--detail';
 
-  const backdropImg = document.createElement('img');
-  backdropImg.className = 'detail__backdrop';
-  backdropImg.loading = 'lazy';
-  backdropImg.alt = movie.name || '';
-  backdropImg.src = posterUrl(movie.poster_url);
-  backdropContainer.appendChild(backdropImg);
+  // Backdrop
+  const backdrop = document.createElement('div');
+  backdrop.className = 'hero__backdrop hero__backdrop--active';
+  backdrop.style.backgroundImage = `url(${posterUrl(movie.poster_url)})`;
+  banner.appendChild(backdrop);
 
-  // Gradient overlay
-  const gradient = document.createElement('div');
-  gradient.className = 'detail__backdrop-gradient';
-  backdropContainer.appendChild(gradient);
+  // Overlay
+  const overlay = document.createElement('div');
+  overlay.className = 'hero__overlay hero__overlay--active';
+  banner.appendChild(overlay);
 
-  detail.appendChild(backdropContainer);
+  // Content
+  const content = document.createElement('div');
+  content.className = 'hero__content hero__content--active';
 
-  // ==== Body (poster + info) ====
-  const body = document.createElement('div');
-  body.className = 'detail__body';
-
-  // ---- Poster ----
-  const posterWrap = document.createElement('div');
-  posterWrap.className = 'detail__poster';
-
-  const posterImg = document.createElement('img');
-  posterImg.className = 'detail__poster-img';
-  posterImg.loading = 'lazy';
-  posterImg.alt = movie.name || '';
-  posterImg.src = thumbUrl(movie.thumb_url);
-  posterWrap.appendChild(posterImg);
-  body.appendChild(posterWrap);
-
-  // ---- Info column ----
-  const info = document.createElement('div');
-  info.className = 'detail__info';
+  // Back Button
+  const backBtn = document.createElement('button');
+  backBtn.className = 'detail__back-btn';
+  backBtn.innerHTML = '&#10094;'; // <
+  backBtn.setAttribute('aria-label', 'Quay lại');
+  backBtn.addEventListener('click', () => {
+    if (window.history.length > 2) {
+      window.history.back();
+    } else {
+      navigate('/');
+    }
+  });
+  content.appendChild(backBtn);
 
   // Title
   const title = document.createElement('h1');
-  title.className = 'detail__title';
+  title.className = 'hero__title';
   title.textContent = movie.name || '';
-  info.appendChild(title);
+  content.appendChild(title);
 
-  // Origin name + year
-  if (movie.origin_name || movie.year) {
-    const sub = document.createElement('p');
-    sub.className = 'detail__origin';
-    const parts = [];
-    if (movie.origin_name) parts.push(movie.origin_name);
-    if (movie.year) parts.push(`(${movie.year})`);
-    sub.textContent = parts.join(' ');
-    info.appendChild(sub);
+  // Meta row
+  const meta = document.createElement('div');
+  meta.className = 'hero__meta';
+
+  if (movie.origin_name) {
+    const originName = document.createElement('span');
+    originName.className = 'hero__origin-name';
+    originName.textContent = movie.origin_name;
+    meta.appendChild(originName);
   }
+
+  if (movie.year) {
+    const year = document.createElement('span');
+    year.className = 'hero__year';
+    year.textContent = movie.year;
+    meta.appendChild(year);
+  }
+
+  if (movie.quality) {
+    const quality = document.createElement('span');
+    quality.className = 'hero__badge hero__badge--quality';
+    quality.textContent = movie.quality;
+    meta.appendChild(quality);
+  }
+
+  if (movie.lang) {
+    const lang = document.createElement('span');
+    lang.className = 'hero__badge hero__badge--lang';
+    lang.textContent = movie.lang;
+    meta.appendChild(lang);
+  }
+
+  content.appendChild(meta);
+
+  // Description
+  const desc = document.createElement('p');
+  desc.className = 'hero__description';
+  const descText = [movie.name, movie.origin_name].filter(Boolean).join(' — ');
+  desc.textContent = descText;
+  content.appendChild(desc);
+
+  // Action buttons
+  const btnGroup = document.createElement('div');
+  btnGroup.className = 'hero__buttons';
+
+  // We need the episodeSection reference early
+  const episodeSection = document.createElement('section');
+  episodeSection.className = 'detail__episodes';
+  episodeSection.id = 'episodes';
+
+  const playBtn = document.createElement('button');
+  playBtn.className = 'hero__btn hero__btn--primary';
+  playBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M6 4l15 8-15 8z"></path></svg><span>Xem Phim</span>`;
+  playBtn.addEventListener('click', () => {
+    episodeSection.scrollIntoView({ behavior: 'smooth' });
+  });
+  btnGroup.appendChild(playBtn);
+
+  if (movie.trailer_url) {
+    const trailerBtn = document.createElement('button');
+    trailerBtn.className = 'hero__btn hero__btn--secondary';
+    trailerBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M4 4h16v16H4z" fill="none"/><path d="M10 8v8l6-4z"/></svg><span>Trailer</span>`;
+    trailerBtn.addEventListener('click', () => {
+      window.open(movie.trailer_url, '_blank', 'noopener');
+    });
+    btnGroup.appendChild(trailerBtn);
+  }
+
+  content.appendChild(btnGroup);
+  banner.appendChild(content);
+  detail.appendChild(banner);
+
+  // ==== Body (Below the fold) ====
+  const body = document.createElement('div');
+  body.className = 'detail__body';
+
+  const info = document.createElement('div');
+  info.className = 'detail__info';
 
   // ---- Tags: genres + countries ----
   const tags = document.createElement('div');
@@ -146,79 +209,22 @@ export async function renderMovieDetail(container, slug) {
 
   if (Array.isArray(movie.category)) {
     movie.category.forEach((cat) => {
-      tags.appendChild(createPill(cat.name, `#/the-loai/${cat.slug}`));
+      tags.appendChild(createPill(cat.name, `/the-loai/${cat.slug}`));
     });
   }
 
   if (Array.isArray(movie.country)) {
     movie.country.forEach((c) => {
-      tags.appendChild(createPill(c.name, `#/quoc-gia/${c.slug}`));
+      tags.appendChild(createPill(c.name, `/quoc-gia/${c.slug}`));
     });
   }
 
   info.appendChild(tags);
 
-  // ---- Meta row ----
-  const meta = document.createElement('div');
-  meta.className = 'detail__meta';
-
-  const metaItems = [
-    movie.time,
-    movie.quality,
-    movie.lang,
-    movie.episode_current,
-    movie.year ? String(movie.year) : null,
-  ].filter(Boolean);
-
-  metaItems.forEach((text, idx) => {
-    const span = document.createElement('span');
-    span.className = 'detail__meta-item';
-    span.textContent = text;
-    meta.appendChild(span);
-
-    if (idx < metaItems.length - 1) {
-      const sep = document.createElement('span');
-      sep.className = 'detail__meta-sep';
-      sep.textContent = '•';
-      meta.appendChild(sep);
-    }
-  });
-
-  info.appendChild(meta);
-
-  // ---- Action buttons ----
-  const actions = document.createElement('div');
-  actions.className = 'detail__actions';
-
-  // Player / episode section ref (created later)
-  const episodeSection = document.createElement('section');
-  episodeSection.className = 'detail__episodes';
-  episodeSection.id = 'episodes';
-
-  const playBtn = document.createElement('button');
-  playBtn.className = 'detail__btn detail__btn--primary';
-  playBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M6 4l15 8-15 8z"></path></svg><span>Xem Phim</span>`;
-  playBtn.addEventListener('click', () => {
-    episodeSection.scrollIntoView({ behavior: 'smooth' });
-  });
-  actions.appendChild(playBtn);
-
-  if (movie.trailer_url) {
-    const trailerBtn = document.createElement('button');
-    trailerBtn.className = 'detail__btn detail__btn--secondary';
-    trailerBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M4 4h16v16H4z" fill="none"/><path d="M10 8v8l6-4z"/></svg><span>Trailer</span>`;
-    trailerBtn.addEventListener('click', () => {
-      window.open(movie.trailer_url, '_blank', 'noopener');
-    });
-    actions.appendChild(trailerBtn);
-  }
-
-  info.appendChild(actions);
-
   // ---- Description ----
   if (movie.content) {
     const descWrap = document.createElement('div');
-    descWrap.className = 'detail__description';
+    descWrap.className = 'detail__description-wrap';
 
     const descLabel = document.createElement('h3');
     descLabel.className = 'detail__section-label';
@@ -227,7 +233,6 @@ export async function renderMovieDetail(container, slug) {
 
     const descBody = document.createElement('div');
     descBody.className = 'detail__description-body';
-    // movie.content is HTML from the API — render it in a contained element
     descBody.innerHTML = movie.content;
     descWrap.appendChild(descBody);
 

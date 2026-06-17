@@ -24,7 +24,7 @@ export function renderHeader(container) {
   const logo = document.createElement('a');
   logo.className = 'header__logo';
   logo.href = '#/';
-  logo.innerHTML = '<img src="/logo.png" alt="Film Bluesia" style="height: 36px; display: block;" />';
+  logo.innerHTML = '<img src="/logo-dark.png" alt="Film Bluesia" style="height: 36px; display: block;" />';
   logo.addEventListener('click', (e) => {
     e.preventDefault();
     navigate('#/');

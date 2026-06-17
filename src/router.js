@@ -1,6 +1,6 @@
 /**
- * Minimal hash-based SPA router
- * Routes: #/ , #/phim/:slug , #/danh-sach/:type , #/the-loai/:slug , #/quoc-gia/:slug , #/tim-kiem
+ * Minimal History API-based SPA router
+ * Routes: / , /phim/:slug , /danh-sach/:type , /the-loai/:slug , /quoc-gia/:slug , /tim-kiem
  */
 
 let routes = [];
@@ -28,24 +28,46 @@ export function initRouter(routeDefs) {
     };
   });
 
-  window.addEventListener('hashchange', () => handleRoute());
+  window.addEventListener('popstate', () => handleRoute());
+  
+  // Intercept local links globally
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('a');
+    if (link) {
+      const href = link.getAttribute('href');
+      // If the link is an internal link (e.g. starts with / or #/)
+      if (href && (href.startsWith('/') || href.startsWith('#/'))) {
+        e.preventDefault();
+        navigate(href);
+      }
+    }
+  });
+
   handleRoute();
 }
 
 /**
- * Navigate to a hash route programmatically
- * @param {string} hash - e.g. '#/phim/toy-story-5'
+ * Navigate to a route programmatically
+ * @param {string} path - e.g. '/phim/toy-story-5' or '#/phim/toy-story-5'
  */
-export function navigate(hash) {
-  window.location.hash = hash;
+export function navigate(path) {
+  // Normalize legacy hash paths
+  if (path.startsWith('#/')) {
+    path = path.slice(1);
+  } else if (path === '#') {
+    path = '/';
+  }
+  
+  history.pushState(null, '', path);
+  handleRoute();
 }
 
 /**
  * Get the current route info
  */
 export function getCurrentRoute() {
-  const hash = window.location.hash.slice(1) || '/';
-  const [path, queryStr] = hash.split('?');
+  const path = window.location.pathname || '/';
+  const queryStr = window.location.search;
   const query = Object.fromEntries(new URLSearchParams(queryStr || ''));
   return { path, query };
 }
@@ -80,5 +102,5 @@ function handleRoute() {
   }
 
   // 404 fallback — redirect to home
-  navigate('#/');
+  navigate('/');
 }

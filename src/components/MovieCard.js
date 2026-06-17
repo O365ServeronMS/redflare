@@ -13,7 +13,7 @@ import { navigate } from '../router.js';
 export function renderMovieCard(container, movie, rank = null) {
   const card = document.createElement('div');
   card.className = 'movie-card';
-  card.addEventListener('click', () => navigate(`#/phim/${movie.slug}`));
+  card.addEventListener('click', () => navigate(`/phim/${movie.slug}`));
 
   // ── Poster image ──
   const img = document.createElement('img');
@@ -31,22 +31,6 @@ export function renderMovieCard(container, movie, rank = null) {
   });
 
   card.appendChild(img);
-
-  // ── Quality badge (top-left) ──
-  if (movie.quality) {
-    const qualityBadge = document.createElement('span');
-    qualityBadge.className = 'movie-card__badge movie-card__badge--quality';
-    qualityBadge.textContent = movie.quality;
-    card.appendChild(qualityBadge);
-  }
-
-  // ── Episode badge (top-right) ──
-  if (movie.episode_current) {
-    const epBadge = document.createElement('span');
-    epBadge.className = 'movie-card__badge movie-card__badge--episode';
-    epBadge.textContent = `Tập ${movie.episode_current}`;
-    card.appendChild(epBadge);
-  }
 
   // ── Hover overlay ──
   const overlay = document.createElement('div');

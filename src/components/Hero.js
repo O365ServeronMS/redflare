@@ -101,13 +101,13 @@ export function renderHero(container, movies) {
     const watchBtn = document.createElement('button');
     watchBtn.className = 'hero__btn hero__btn--primary';
     watchBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M6 4l15 8-15 8z"></path></svg><span>Xem Phim</span>`;
-    watchBtn.addEventListener('click', () => navigate(`#/phim/${movie.slug}`));
+    watchBtn.addEventListener('click', () => navigate(`/phim/${movie.slug}`));
     btnGroup.appendChild(watchBtn);
 
     const detailBtn = document.createElement('button');
     detailBtn.className = 'hero__btn hero__btn--secondary';
     detailBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg><span>Chi Tiết</span>`;
-    detailBtn.addEventListener('click', () => navigate(`#/phim/${movie.slug}`));
+    detailBtn.addEventListener('click', () => navigate(`/phim/${movie.slug}`));
     btnGroup.appendChild(detailBtn);
 
     content.appendChild(btnGroup);
