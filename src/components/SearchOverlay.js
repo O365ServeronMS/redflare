@@ -93,7 +93,7 @@ export function renderSearchOverlay(container) {
 
   // Results grid
   const resultsGrid = document.createElement('div');
-  resultsGrid.className = 'search-overlay__grid';
+  resultsGrid.className = 'search-overlay__results';
 
   // Empty state
   const emptyState = document.createElement('div');
@@ -233,7 +233,7 @@ export function renderSearchOverlay(container) {
     if (debounceTimer) clearTimeout(debounceTimer);
     const keyword = input.value;
 
-    if (!keyword.trim()) {
+    if (keyword.trim().length < 2) {
       showRecent();
       return;
     }
