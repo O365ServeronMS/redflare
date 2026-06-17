@@ -197,7 +197,7 @@ export async function renderMovieDetail(container, slug) {
 
   const playBtn = document.createElement('button');
   playBtn.className = 'detail__btn detail__btn--primary';
-  playBtn.textContent = '▶ Xem Phim';
+  playBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M6 4l15 8-15 8z"></path></svg><span>Xem Phim</span>`;
   playBtn.addEventListener('click', () => {
     episodeSection.scrollIntoView({ behavior: 'smooth' });
   });
@@ -206,7 +206,7 @@ export async function renderMovieDetail(container, slug) {
   if (movie.trailer_url) {
     const trailerBtn = document.createElement('button');
     trailerBtn.className = 'detail__btn detail__btn--secondary';
-    trailerBtn.textContent = '🎬 Trailer';
+    trailerBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M4 4h16v16H4z" fill="none"/><path d="M10 8v8l6-4z"/></svg><span>Trailer</span>`;
     trailerBtn.addEventListener('click', () => {
       window.open(movie.trailer_url, '_blank', 'noopener');
     });
