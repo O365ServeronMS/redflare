@@ -1,17 +1,48 @@
 /**
- * Hero banner — auto-rotating featured movies with crossfade
+ * Hero banner - auto-rotating top 5 trending movies with crossfade.
  */
-import { posterUrl } from '../api/ophim.js';
+import { posterUrl, thumbUrl } from '../api/ophim.js';
 import { navigate } from '../router.js';
 
 const ROTATE_INTERVAL = 8000;
 const MAX_SLIDES = 5;
 
+function getBackdropUrl(movie) {
+  return thumbUrl(movie.thumb_url || movie.poster_url);
+}
+
+function getPosterUrl(movie) {
+  return posterUrl(movie.poster_url || movie.thumb_url);
+}
+
+function getScore(movie) {
+  const rawScore =
+    movie.imdb?.vote_average ??
+    movie.imdb?.rating ??
+    movie.tmdb?.vote_average ??
+    movie.imdb ??
+    movie.tmdb;
+
+  const score = Number(rawScore);
+  if (!Number.isFinite(score) || score <= 0) return '';
+  return score.toFixed(1);
+}
+
+function chevronIcon(direction) {
+  const path = direction === 'left' ? 'M15 18l-6-6 6-6' : 'M9 6l6 6-6 6';
+
+  return `
+    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" aria-hidden="true">
+      <path d="${path}" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `;
+}
+
 /**
  * Render the hero banner into the given container.
  * @param {HTMLElement} container
- * @param {Array} movies - Array of movie items from API
- * @returns {Function} cleanup — clears the auto-rotation interval
+ * @param {Array} movies - Array of movie items from API.
+ * @returns {Function} cleanup - clears the auto-rotation interval.
  */
 export function renderHero(container, movies) {
   const slides = movies.slice(0, MAX_SLIDES);
@@ -22,38 +53,32 @@ export function renderHero(container, movies) {
 
   const hero = document.createElement('section');
   hero.className = 'hero';
+  hero.setAttribute('aria-label', 'Top 5 phim thịnh hành');
 
-  // ── Backdrop layers (one per slide, stacked) ──
-  const backdropElements = [];
   const contentElements = [];
+  const railButtons = [];
 
-  slides.forEach((movie, i) => {
-    // Backdrop
+  slides.forEach((movie, index) => {
     const backdrop = document.createElement('div');
     backdrop.className = 'hero__backdrop';
-    if (i === 0) backdrop.classList.add('hero__backdrop--active');
-    backdrop.style.backgroundImage = `url(${posterUrl(movie.poster_url)})`;
+    if (index === 0) backdrop.classList.add('hero__backdrop--active');
+    backdrop.style.backgroundImage = `url(${getBackdropUrl(movie)})`;
     hero.appendChild(backdrop);
-    backdropElements.push(backdrop);
 
-    // Overlay
     const overlay = document.createElement('div');
     overlay.className = 'hero__overlay';
-    if (i === 0) overlay.classList.add('hero__overlay--active');
+    if (index === 0) overlay.classList.add('hero__overlay--active');
     hero.appendChild(overlay);
 
-    // Content
     const content = document.createElement('div');
     content.className = 'hero__content';
-    if (i === 0) content.classList.add('hero__content--active');
+    if (index === 0) content.classList.add('hero__content--active');
 
-    // Title
     const title = document.createElement('h1');
     title.className = 'hero__title';
     title.textContent = movie.name;
     content.appendChild(title);
 
-    // Meta row
     const meta = document.createElement('div');
     meta.className = 'hero__meta';
 
@@ -69,6 +94,14 @@ export function renderHero(container, movies) {
       year.className = 'hero__year';
       year.textContent = movie.year;
       meta.appendChild(year);
+    }
+
+    const score = getScore(movie);
+    if (score) {
+      const rating = document.createElement('span');
+      rating.className = 'hero__rating';
+      rating.innerHTML = `<span>IMDb</span> ${score}`;
+      meta.appendChild(rating);
     }
 
     if (movie.quality) {
@@ -87,26 +120,36 @@ export function renderHero(container, movies) {
 
     content.appendChild(meta);
 
-    // Description (truncated combination of name + origin_name)
     const desc = document.createElement('p');
     desc.className = 'hero__description';
-    const descText = [movie.name, movie.origin_name].filter(Boolean).join(' — ');
-    desc.textContent = descText.length > 150 ? descText.slice(0, 147) + '...' : descText;
+    const descText = [movie.name, movie.origin_name].filter(Boolean).join(' - ');
+    desc.textContent = descText.length > 150 ? `${descText.slice(0, 147)}...` : descText;
     content.appendChild(desc);
 
-    // Action buttons
     const btnGroup = document.createElement('div');
     btnGroup.className = 'hero__buttons';
 
     const watchBtn = document.createElement('button');
     watchBtn.className = 'hero__btn hero__btn--primary';
-    watchBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M6 4l15 8-15 8z"></path></svg><span>Xem Phim</span>`;
+    watchBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">
+        <path d="M6 4l15 8-15 8z"></path>
+      </svg>
+      <span>Xem Phim</span>
+    `;
     watchBtn.addEventListener('click', () => navigate(`/phim/${movie.slug}`));
     btnGroup.appendChild(watchBtn);
 
     const detailBtn = document.createElement('button');
     detailBtn.className = 'hero__btn hero__btn--secondary';
-    detailBtn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg><span>Chi Tiết</span>`;
+    detailBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"></circle>
+        <path d="M12 16v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+        <path d="M12 8h.01" stroke="currentColor" stroke-width="3" stroke-linecap="round"></path>
+      </svg>
+      <span>Chi tiết</span>
+    `;
     detailBtn.addEventListener('click', () => navigate(`/phim/${movie.slug}`));
     btnGroup.appendChild(detailBtn);
 
@@ -115,28 +158,34 @@ export function renderHero(container, movies) {
     contentElements.push({ backdrop, overlay, content });
   });
 
-  // ── Dot indicators ──
-  const dots = document.createElement('div');
-  dots.className = 'hero__dots';
+  const rail = document.createElement('div');
+  rail.className = 'hero__rail';
 
-  slides.forEach((_, i) => {
-    const dot = document.createElement('button');
-    dot.className = 'hero__dot';
-    if (i === 0) dot.classList.add('hero__dot--active');
-    dot.setAttribute('aria-label', `Slide ${i + 1}`);
-    dot.addEventListener('click', () => {
-      goToSlide(i);
+  slides.forEach((movie, index) => {
+    const item = document.createElement('button');
+    item.className = 'hero__rail-item';
+    if (index === 0) item.classList.add('hero__rail-item--active');
+    item.setAttribute('aria-label', `Chọn phim thứ ${index + 1}: ${movie.name}`);
+    item.innerHTML = `
+      <span class="hero__rail-rank">${index + 1}</span>
+      <span class="hero__rail-poster">
+        <img src="${getPosterUrl(movie)}" alt="${movie.name}">
+      </span>
+      <span class="hero__rail-title">${movie.name}</span>
+    `;
+    item.addEventListener('click', () => {
+      goToSlide(index);
       resetAutoRotate();
     });
-    dots.appendChild(dot);
+    rail.appendChild(item);
+    railButtons.push(item);
   });
 
-  hero.appendChild(dots);
+  hero.appendChild(rail);
 
-  // ── Navigation Arrows ──
   const prevBtn = document.createElement('button');
   prevBtn.className = 'hero__arrow hero__arrow--prev';
-  prevBtn.innerHTML = '&#10094;'; // Left-pointing angle quotation mark
+  prevBtn.innerHTML = chevronIcon('left');
   prevBtn.setAttribute('aria-label', 'Phim trước');
   prevBtn.addEventListener('click', () => {
     goToSlide((currentIndex - 1 + slides.length) % slides.length);
@@ -145,7 +194,7 @@ export function renderHero(container, movies) {
 
   const nextBtn = document.createElement('button');
   nextBtn.className = 'hero__arrow hero__arrow--next';
-  nextBtn.innerHTML = '&#10095;'; // Right-pointing angle quotation mark
+  nextBtn.innerHTML = chevronIcon('right');
   nextBtn.setAttribute('aria-label', 'Phim tiếp theo');
   nextBtn.addEventListener('click', () => {
     nextSlide();
@@ -155,22 +204,22 @@ export function renderHero(container, movies) {
   hero.appendChild(prevBtn);
   hero.appendChild(nextBtn);
 
-  // ── Slide transition logic ──
   function goToSlide(index) {
-    // Deactivate current
+    if (index === currentIndex) return;
+
     const cur = contentElements[currentIndex];
     cur.backdrop.classList.remove('hero__backdrop--active');
     cur.overlay.classList.remove('hero__overlay--active');
     cur.content.classList.remove('hero__content--active');
-    dots.children[currentIndex].classList.remove('hero__dot--active');
+    railButtons[currentIndex].classList.remove('hero__rail-item--active');
 
-    // Activate new
     currentIndex = index;
+
     const next = contentElements[currentIndex];
     next.backdrop.classList.add('hero__backdrop--active');
     next.overlay.classList.add('hero__overlay--active');
     next.content.classList.add('hero__content--active');
-    dots.children[currentIndex].classList.add('hero__dot--active');
+    railButtons[currentIndex].classList.add('hero__rail-item--active');
   }
 
   function nextSlide() {
@@ -182,12 +231,9 @@ export function renderHero(container, movies) {
     intervalId = setInterval(nextSlide, ROTATE_INTERVAL);
   }
 
-  // Start auto-rotation
   intervalId = setInterval(nextSlide, ROTATE_INTERVAL);
-
   container.appendChild(hero);
 
-  // Cleanup
   return function cleanup() {
     clearInterval(intervalId);
   };
