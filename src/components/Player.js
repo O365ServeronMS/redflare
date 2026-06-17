@@ -8,7 +8,10 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
   const section = document.createElement('section');
   section.className = 'player';
 
-  // ---- Back / close button ----
+  // ---- Header (Back button + Info) ----
+  const header = document.createElement('div');
+  header.className = 'player__header';
+
   const backBtn = document.createElement('button');
   backBtn.className = 'player__back';
   backBtn.textContent = '← Quay lại';
@@ -21,15 +24,19 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
     }
     section.remove();
   });
-  section.appendChild(backBtn);
+  header.appendChild(backBtn);
 
-  // ---- Player container (16:9 aspect ratio) ----
+  const infoText = document.createElement('h3');
+  infoText.className = 'player__title';
+  infoText.innerHTML = `Đang phát: <span>${episodeName} (${serverName})</span>`;
+  header.appendChild(infoText);
+
+  section.appendChild(header);
+
+  // ---- Player container (16:9 aspect ratio, max height) ----
   const playerContainer = document.createElement('div');
   playerContainer.className = 'player__container';
-  // Use inline style to enforce 16:9 aspect ratio
-  playerContainer.style.position = 'relative';
-  playerContainer.style.paddingTop = '56.25%'; // 16:9
-  playerContainer.style.background = '#000';
+  // CSS handles aspect-ratio and max-height now
 
   if (embedUrl) {
     const iframe = document.createElement('iframe');
@@ -89,12 +96,6 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
   }
 
   section.appendChild(playerContainer);
-
-  // ---- Server / episode info ----
-  const infoText = document.createElement('p');
-  infoText.className = 'player__info';
-  infoText.textContent = `Server: ${serverName} — ${episodeName}`;
-  section.appendChild(infoText);
 
   container.appendChild(section);
 }
