@@ -1111,11 +1111,15 @@
   z-index: 1;
 }
 
-/* Shift hero content right when thumb is present */
+/* Align hero content under the thumb (same left edge) */
 .hero--has-thumb .hero__content {
-  left: calc(4% + 185px + 24px);
+  left: 4%;
   padding: 0;
-  max-width: 560px;
+  max-width: 500px;
+}
+
+.hero--has-thumb .hero__title {
+  font-size: 32px;
 }
 
 .detail__body {
@@ -1233,9 +1237,13 @@
   }
 
   .hero--has-thumb .hero__content {
-    left: unset;
+    left: 0;
     padding: 0 4%;
     max-width: 600px;
+  }
+
+  .hero--has-thumb .hero__title {
+    font-size: 28px;
   }
 }
 
