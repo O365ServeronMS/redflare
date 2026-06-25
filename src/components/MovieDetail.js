@@ -126,6 +126,17 @@ export async function renderMovieDetail(container, slug) {
   overlay.className = 'hero__overlay hero__overlay--active';
   banner.appendChild(overlay);
 
+  // Portrait thumb (appended before content to sit under it in z-stack)
+  if (movie.thumb_url) {
+    const thumb = document.createElement('img');
+    thumb.className = 'detail__thumb';
+    thumb.src = thumbUrl(movie.thumb_url);
+    thumb.alt = movie.name || '';
+    thumb.loading = 'lazy';
+    banner.appendChild(thumb);
+    banner.classList.add('hero--has-thumb');
+  }
+
   // Content
   const content = document.createElement('div');
   content.className = 'hero__content hero__content--active';

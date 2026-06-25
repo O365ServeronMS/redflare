@@ -1098,6 +1098,26 @@
   line-height: 1.1;
 }
 
+/* Portrait thumb pinned to bottom-left of hero */
+.detail__thumb {
+  position: absolute;
+  bottom: 0;
+  left: 4%;
+  width: 185px;
+  height: 278px; /* 2:3 ratio */
+  object-fit: cover;
+  border-radius: 4px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+  z-index: 1;
+}
+
+/* Shift hero content right when thumb is present */
+.hero--has-thumb .hero__content {
+  left: calc(4% + 185px + 24px);
+  padding: 0;
+  max-width: 560px;
+}
+
 .detail__body {
   position: relative;
   z-index: 2;
@@ -1206,6 +1226,16 @@
 
   .hero--detail .hero__title {
     font-size: 28px;
+  }
+
+  .detail__thumb {
+    display: none;
+  }
+
+  .hero--has-thumb .hero__content {
+    left: unset;
+    padding: 0 4%;
+    max-width: 600px;
   }
 }
 
