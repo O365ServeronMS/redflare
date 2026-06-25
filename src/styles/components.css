@@ -1120,7 +1120,10 @@
 
 /* Thumb present: lay thumb + content out in normal flow so they can never
    overlap, regardless of viewport aspect ratio (fixes landscape collision). */
-.hero--has-thumb {
+/* Compound selector (0,2,0) so it beats the fixed .hero--detail heights
+   declared later inside the media queries — otherwise the hero stays locked
+   to 70vh/85vh and the content overflows into the body below. */
+.hero--detail.hero--has-thumb {
   height: auto; /* allow the hero to grow on short/landscape viewports */
 }
 
@@ -1134,7 +1137,7 @@
   min-height: 85vh;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 24px;
   padding: 88px 4% 56px; /* top clears fixed header; sides match body gutter */
   box-sizing: border-box;
@@ -1267,7 +1270,6 @@
 
   .hero--has-thumb .hero__inner {
     min-height: 70vh;
-    justify-content: flex-end; /* compact stack near the bottom on phones */
     gap: 18px;
     padding: 80px 4% 40px;
   }
