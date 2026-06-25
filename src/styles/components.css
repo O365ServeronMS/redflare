@@ -1098,10 +1098,10 @@
   line-height: 1.1;
 }
 
-/* Portrait thumb pinned to bottom-left of hero */
+/* Portrait thumb pinned to top-left of hero, below fixed header */
 .detail__thumb {
   position: absolute;
-  bottom: 0;
+  top: 68px;
   left: 4%;
   width: 185px;
   height: 278px; /* 2:3 ratio */
