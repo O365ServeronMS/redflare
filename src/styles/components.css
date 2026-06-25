@@ -1098,6 +1098,17 @@
   line-height: 1.1;
 }
 
+/* Centered shell — mirrors .detail__body so thumb/content align with body below */
+.hero__inner {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 1280px;
+}
+
 /* Portrait thumb pinned to top-left of hero, below fixed header */
 .detail__thumb {
   position: absolute;

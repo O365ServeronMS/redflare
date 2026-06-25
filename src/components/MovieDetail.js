@@ -126,6 +126,11 @@ export async function renderMovieDetail(container, slug) {
   overlay.className = 'hero__overlay hero__overlay--active';
   banner.appendChild(overlay);
 
+  // Shell mirrors .detail__body centering so thumb/content align with body below
+  const heroInner = document.createElement('div');
+  heroInner.className = 'hero__inner';
+  banner.appendChild(heroInner);
+
   // Portrait thumb (appended before content to sit under it in z-stack)
   if (movie.thumb_url) {
     const thumb = document.createElement('img');
@@ -133,7 +138,7 @@ export async function renderMovieDetail(container, slug) {
     thumb.src = thumbUrl(movie.thumb_url);
     thumb.alt = movie.name || '';
     thumb.loading = 'lazy';
-    banner.appendChild(thumb);
+    heroInner.appendChild(thumb);
     banner.classList.add('hero--has-thumb');
   }
 
@@ -216,7 +221,7 @@ export async function renderMovieDetail(container, slug) {
   }
 
   content.appendChild(btnGroup);
-  banner.appendChild(content);
+  heroInner.appendChild(content);
   detail.appendChild(banner);
 
   // ==== Body (Below the fold) ====
