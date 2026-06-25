@@ -139,6 +139,7 @@ async function renderHomePage() {
     const phimLe = { items: (data.phimLe?.items || []).map(normalizeListItem) };
     const phimBo = { items: (data.phimBo?.items || []).map(normalizeListItem) };
     const hoatHinh = { items: (data.hoatHinh?.items || []).map(normalizeListItem) };
+    const trending = { items: (data.trending?.items || []).map(normalizeListItem) };
     const heroMovies = { items: (data.heroMovies || []).map(normalizeListItem) };
 
     // Clear skeleton
@@ -154,6 +155,14 @@ async function renderHomePage() {
       seeAllLink: '/danh-sach/phim-moi-cap-nhat',
       showRank: true,
     });
+
+    if (trending.items.length) {
+      renderCarousel(page, {
+        title: 'Phim Trending',
+        items: trending.items,
+        seeAllLink: '/danh-sach/phim-moi-cap-nhat',
+      });
+    }
 
     renderCarousel(page, {
       title: 'Phim Lẻ',

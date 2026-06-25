@@ -1,3 +1,5 @@
+import { refreshTrendingMovies, getTrendingTmdbIds } from './trending.js';
+
 const API_BASE = 'https://ophim1.com';
 const CACHE_KEY = 'home_data_v4';
 const CACHE_TTL_MS = 30 * 60 * 1000;
@@ -66,13 +68,13 @@ async function handleHomeData(env, ctx) {
         // Bump timestamp before firing background refresh to debounce concurrent triggers
         const bumped = { ...cachedData, timestamp: Date.now() };
         await KV?.put(CACHE_KEY, JSON.stringify(bumped), { expirationTtl: 7200 });
-        const refresh = fetchFreshData().then(data => data && KV?.put(CACHE_KEY, JSON.stringify(data), { expirationTtl: 7200 }));
+        const refresh = fetchFreshData(env).then(data => data && KV?.put(CACHE_KEY, JSON.stringify(data), { expirationTtl: 7200 }));
         if (ctx?.waitUntil) ctx.waitUntil(refresh);
       }
       return new Response(JSON.stringify(cachedData), { headers: corsHeaders });
     }
 
-    const freshData = await fetchFreshData();
+    const freshData = await fetchFreshData(env);
     if (!freshData) {
       return new Response(JSON.stringify({ error: 'Failed to fetch data from OPhim' }), {
         status: 500,
@@ -133,7 +135,7 @@ async function handleListProxy(request, ctx, upstreamUrl) {
   }
 }
 
-async function fetchFreshData() {
+async function fetchFreshData(env) {
   try {
     const urls = [
       `${API_BASE}/danh-sach/phim-moi-cap-nhat?page=1`,
@@ -165,6 +167,19 @@ async function fetchFreshData() {
     const cinemaItems = [cinemaPage1, cinemaPage2, cinemaPage3].flatMap(getItems);
     const heroMovies = rankHeroMovies(auMyItems, cinemaItems);
 
+    // Refresh TMDB trending ids (non-fatal), then match against the catalog we just fetched.
+    try {
+      const r = await refreshTrendingMovies(env, env?.TMDB_API_TOKEN);
+      console.log('[cache] TMDB_TRENDING_REFRESH', r);
+    } catch (e) {
+      console.error('[cache] TMDB_TRENDING_REFRESH_FAIL', { error: e?.message });
+    }
+    const trendingIds = await getTrendingTmdbIds(env).catch(() => new Set());
+    const trendingItems = buildTrendingItems(
+      [newRes?.items || [], getItems(leRes), getItems(boRes), getItems(hhRes), auMyItems, cinemaItems],
+      trendingIds
+    );
+
     return {
       timestamp: Date.now(),
       heroMovies,
@@ -176,6 +191,7 @@ async function fetchFreshData() {
       phimLe: { items: getItems(leRes) },
       phimBo: { items: getItems(boRes) },
       hoatHinh: { items: getItems(hhRes) },
+      trending: { items: trendingItems },
     };
   } catch (err) {
     console.error('Error fetching fresh data:', err);
@@ -196,6 +212,19 @@ function getItems(payload) {
   return payload?.data?.items || payload?.items || [];
 }
 
+function buildTrendingItems(itemGroups, trendingIds) {
+  if (!trendingIds || trendingIds.size === 0) return [];
+  const bySlug = new Map();
+  for (const group of itemGroups) {
+    for (const item of group) {
+      if (!item?.slug || bySlug.has(item.slug)) continue;
+      const id = item.tmdb?.id;
+      if (id != null && trendingIds.has(String(id))) bySlug.set(item.slug, item);
+    }
+  }
+  return Array.from(bySlug.values()).slice(0, 12);
+}
+
 function rankHeroMovies(auMyItems, cinemaItems) {
   const auMySlugs = new Set(auMyItems.map(item => item.slug).filter(Boolean));
   const cinemaSlugs = new Set(cinemaItems.map(item => item.slug).filter(Boolean));
@@ -207,12 +236,13 @@ function rankHeroMovies(auMyItems, cinemaItems) {
     candidates.set(item.slug, {
       ...existing,
       ...item,
+      _order: existing._order ?? candidates.size,
       _isAuMySource: existing._isAuMySource || auMySlugs.has(item.slug),
       _isCinemaSource: existing._isCinemaSource || cinemaSlugs.has(item.slug),
     });
   }
 
-  return Array.from(candidates.values())
+  const scored = Array.from(candidates.values())
     .filter(isHeroCandidate)
     .slice(0, MAX_CANDIDATES_TO_SCORE)
     .map(movie => ({
@@ -224,8 +254,27 @@ function rankHeroMovies(auMyItems, cinemaItems) {
       const imdbDiff = getImdbScore(b) - getImdbScore(a);
       if (imdbDiff !== 0) return imdbDiff;
       return getYear(b) - getYear(a);
-    })
-    .slice(0, HERO_COUNT);
+    });
+
+  // Pin the highest-rated Âu Mỹ single film into slot #1; fall back to pure score order.
+  const pinned = pickPinnedAuMy(scored);
+  const ordered = pinned ? [pinned, ...scored.filter(movie => movie !== pinned)] : scored;
+  return ordered.slice(0, HERO_COUNT);
+}
+
+function pickPinnedAuMy(entries) {
+  let best;
+  let bestRating = -Infinity;
+  for (const movie of entries) {
+    if (movie.type !== 'single' || !movie._isAuMySource) continue;
+    if (!(movie.poster_url || movie.thumb_url)) continue;
+    const rating = Math.max(getImdbScore(movie), getTmdbScore(movie));
+    if (rating > bestRating || (rating === bestRating && best && movie._order < best._order)) {
+      bestRating = rating;
+      best = movie;
+    }
+  }
+  return best;
 }
 
 function isHeroCandidate(movie) {
@@ -269,6 +318,11 @@ function getImdbScore(movie) {
     movie.imdb;
 
   const score = Number(rawScore);
+  return Number.isFinite(score) && score > 0 ? score : 0;
+}
+
+function getTmdbScore(movie) {
+  const score = Number(movie.tmdb?.vote_average);
   return Number.isFinite(score) && score > 0 ? score : 0;
 }
 
