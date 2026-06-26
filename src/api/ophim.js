@@ -156,6 +156,18 @@ export async function getMoviesByCountry(countrySlug, page = 1) {
   };
 }
 
+/**
+ * Get related movies ("Bạn cũng có thể thích") for a TMDB id.
+ * Resolved + cached 30 days on the VPS via TMDB recommendations.
+ * @param {string|number} tmdbId
+ * @returns {Promise<Array>}
+ */
+export async function getRelatedMovies(tmdbId) {
+  if (!tmdbId) return [];
+  const data = await fetchJson(`${CATALOG_BASE}/api/related/${tmdbId}`);
+  return (data.items || []).map(normalizeListItem);
+}
+
 // --- Image URL helpers ---
 // Worker signs all image URLs before they reach the client.
 // These functions are now pass-throughs — URLs are always full https:// signed URLs.
