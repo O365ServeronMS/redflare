@@ -1,25 +1,10 @@
 name = "phim"
 compatibility_date = "2024-03-20"
-main = "worker.js"
 
+# Static-assets-only deployment — no Worker. All catalog data (home/list/genre/
+# country/detail) is served by the VPS catalog-api at img.bluesia.net/api/*.
+# The asset layer serves the SPA shell and falls back to index.html for client
+# routes, so phim.bluesia.net never invokes a Worker.
 [assets]
 directory = "dist"
-binding = "ASSETS"
-# Serve the SPA shell + 404 fallback from the free asset layer, so HTML
-# navigations/reloads/deep-links don't invoke the Worker. The Worker runs only
-# for /api/* (home-data); all catalog data is served by the VPS catalog-api.
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*"]
-
-[[kv_namespaces]]
-binding = "MOVIES_KV"
-id = "10670a45ffa54b21bbb40cecc47ae1c5"
-
-[vars]
-IMAGE_CACHE_BASE = "https://img.bluesia.net"
-# IMAGE_CACHE_SIGNING_SECRET → set via: npx wrangler secret put IMAGE_CACHE_SIGNING_SECRET
-# or put in .dev.vars for local dev (never commit .dev.vars)
-
-[observability.logs]
-enabled = false
-invocation_logs = true

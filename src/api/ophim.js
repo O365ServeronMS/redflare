@@ -70,6 +70,14 @@ export async function getMoviesByType(type, page = 1) {
 }
 
 /**
+ * Get home-page data (hero ranking + carousels), built and signed by catalog-api.
+ * @returns {Promise<Object>}
+ */
+export async function getHomeData() {
+  return fetchJson(`${CATALOG_BASE}/api/home-data`);
+}
+
+/**
  * Get full movie detail by slug
  * @param {string} slug
  * @returns {Promise<Object>}

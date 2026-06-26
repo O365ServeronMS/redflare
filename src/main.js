@@ -8,6 +8,7 @@ import './styles/components.css';
 
 import { initRouter, navigate } from './router.js';
 import {
+  getHomeData,
   getNewMovies,
   getMoviesByType,
   getMoviesByGenre,
@@ -129,10 +130,8 @@ async function renderHomePage() {
   page.appendChild(skeleton);
 
   try {
-    // Fetch data from our local SWR Edge Cache API
-    const res = await fetch('/api/home-data');
-    if (!res.ok) throw new Error('API Error: ' + res.status);
-    const data = await res.json();
+    // Fetch home-data from catalog-api (VPS) — built, ranked, and image-signed there
+    const data = await getHomeData();
 
     const newMovies = { items: (data.newMovies?.items || []) };
     // We normalize the items so they match what the UI expects
