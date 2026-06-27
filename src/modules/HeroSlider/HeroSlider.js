@@ -1,12 +1,12 @@
 /**
- * Heroslider - auto-rotating top 8 weekly-trending movies with crossfade.
+ * Heroslider - auto-rotating top 20 weekly-trending movies with crossfade.
  * Code name: "Heroslider". Visible label: "Phim Hot Trong Tuần".
  */
 import { posterUrl, thumbUrl } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
 
 const ROTATE_INTERVAL = 8000;
-const MAX_SLIDES = 8;
+const MAX_SLIDES = 20;
 const SLIDER_TITLE = 'Phim Hot Trong Tuần';
 
 // Desktop (>768px) gets the landscape /d poster_url; mobile gets the portrait
