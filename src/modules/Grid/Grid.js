@@ -1,10 +1,10 @@
 /**
- * CategoryGrid - paginated grid of movie cards.
+ * Grid - paginated grid of movie cards.
  * Used for danh-sach, the-loai, and quoc-gia listing pages.
  */
 
-import { renderMovieCard } from './MovieCard.js';
-import { navigate } from '../router.js';
+import { renderPosterCard } from '../PosterCard/PosterCard.js';
+import { navigate } from '../../router.js';
 
 function createSkeletonGrid(count = 10) {
   const grid = document.createElement('div');
@@ -28,7 +28,7 @@ function createSkeletonGrid(count = 10) {
   return grid;
 }
 
-export async function renderCategoryGrid(container, { type, fetchFn, title, currentPage = 1 }) {
+export async function renderGrid(container, { type, fetchFn, title, currentPage = 1 }) {
   const wrapper = document.createElement('section');
   wrapper.className = 'category-grid';
 
@@ -140,7 +140,7 @@ export async function renderCategoryGrid(container, { type, fetchFn, title, curr
       errorEl.style.display = '';
     } else {
       items.forEach((movie, index) => {
-        renderMovieCard(grid, movie);
+        renderPosterCard(grid, movie);
         const card = grid.lastElementChild;
         if (card) {
           card.classList.add('fade-up');

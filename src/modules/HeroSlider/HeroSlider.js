@@ -2,8 +2,8 @@
  * Heroslider - auto-rotating top 8 weekly-trending movies with crossfade.
  * Code name: "Heroslider". Visible label: "Phim Hot Trong Tuần".
  */
-import { posterUrl, thumbUrl } from '../api/ophim.js';
-import { navigate } from '../router.js';
+import { posterUrl, thumbUrl } from '../../api/ophim.js';
+import { navigate } from '../../router.js';
 
 const ROTATE_INTERVAL = 8000;
 const MAX_SLIDES = 8;
@@ -52,7 +52,7 @@ function chevronIcon(direction) {
  * @param {Array} movies - Array of movie items from API.
  * @returns {Function} cleanup - clears the auto-rotation interval.
  */
-export function renderHero(container, movies) {
+export function renderHeroSlider(container, movies) {
   const slides = movies.slice(0, MAX_SLIDES);
   if (slides.length === 0) return () => {};
 

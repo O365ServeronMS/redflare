@@ -3,10 +3,10 @@
  * Fetches and renders all movie metadata, episodes, and player integration.
  */
 
-import { getMovieDetail, getRelatedMovies, posterUrl, thumbUrl } from '../api/ophim.js';
+import { getMovieDetail, posterUrl, thumbUrl } from '../api/ophim.js';
 import { navigate } from '../router.js';
-import { renderPlayer } from './Player.js';
-import { renderCarousel } from './Carousel.js';
+import { renderPlayer } from '../modules/Player/Player.js';
+import { renderRecommendation } from '../modules/Recommendation/Recommendation.js';
 
 function getEpisodeRank(ep) {
   const name = String(ep?.name || '').trim().toLowerCase();
@@ -83,24 +83,6 @@ function createPill(text, href) {
     });
   }
   return pill;
-}
-
-// ---------------------------------------------------------------------------
-// Related movies — "Bạn cũng có thể thích" (TMDB recommendations via VPS)
-// Fire-and-forget: loads async after the main detail is already on screen.
-// ---------------------------------------------------------------------------
-
-async function renderRelated(container, movie) {
-  const tmdbId = movie.tmdb?.id;
-  if (!tmdbId) return;
-
-  const items = await getRelatedMovies(tmdbId, movie.tmdb?.type).catch(() => []);
-  if (!items.length) return;
-
-  renderCarousel(container, {
-    title: 'Bạn cũng có thể thích',
-    items,
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -465,9 +447,9 @@ export async function renderMovieDetail(container, slug) {
   body.appendChild(info);
   detail.appendChild(body);
 
-  // Fire-and-forget — appends a "Bạn cũng có thể thích" carousel at the bottom
-  // once resolved; must NOT block the main render.
-  renderRelated(detail, movie);
+  // Fire-and-forget — appends the Recommendation ("Bạn cũng có thể thích") block
+  // at the bottom once resolved; must NOT block the main render.
+  renderRecommendation(detail, movie);
 
   container.appendChild(detail);
 }

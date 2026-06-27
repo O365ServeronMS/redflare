@@ -1,8 +1,8 @@
 /**
- * MovieCard — individual movie poster card
+ * PosterCard — individual movie poster card
  */
-import { thumbUrl, posterUrl } from '../api/ophim.js';
-import { navigate } from '../router.js';
+import { thumbUrl, posterUrl } from '../../api/ophim.js';
+import { navigate } from '../../router.js';
 
 function getImdbScore(movie) {
   const rawScore =
@@ -29,7 +29,7 @@ function getImdbScore(movie) {
  * @param {Object} movie - Movie item from API
  * @param {number|null} rank - If not null, display rank+1 as a large overlay number
  */
-export function renderMovieCard(container, movie, rank = null) {
+export function renderPosterCard(container, movie, rank = null) {
   const card = document.createElement('div');
   card.className = 'movie-card';
   card.addEventListener('click', () => navigate(`/phim/${movie.slug}`));

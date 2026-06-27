@@ -1,7 +1,7 @@
 /**
  * Header component — fixed navigation bar
  */
-import { navigate, getCurrentRoute } from '../router.js';
+import { navigate, getCurrentRoute } from '../../router.js';
 
 const NAV_LINKS = [
   { label: 'Trang Chủ', path: '/' },

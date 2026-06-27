@@ -1,7 +1,7 @@
 /**
  * Carousel — horizontal scrollable row of movie cards
  */
-import { renderMovieCard } from './MovieCard.js';
+import { renderPosterCard } from '../PosterCard/PosterCard.js';
 
 /**
  * Render a movie carousel section.
@@ -52,7 +52,7 @@ export function renderCarousel(container, { title, items, seeAllLink, showRank }
 
   items.forEach((movie, index) => {
     const rank = showRank ? index : null;
-    renderMovieCard(track, movie, rank);
+    renderPosterCard(track, movie, rank);
   });
 
   wrapper.appendChild(track);

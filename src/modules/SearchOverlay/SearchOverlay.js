@@ -4,8 +4,8 @@
  * Closes via ✕ button or Escape key.
  */
 
-import { searchMovies } from '../api/ophim.js';
-import { renderMovieCard } from './MovieCard.js';
+import { searchMovies } from '../../api/ophim.js';
+import { renderPosterCard } from '../PosterCard/PosterCard.js';
 
 const RECENT_SEARCHES_KEY = 'bluesia-recent-searches';
 const MAX_RECENT = 8; // Increased slightly for pills layout
@@ -264,7 +264,7 @@ export function renderSearchOverlay(container) {
         const cardWrapper = document.createElement('div');
         cardWrapper.className = 'search-overlay__result-item fade-up';
         cardWrapper.style.animationDelay = `${Math.min(index * 0.05, 0.5)}s`;
-        renderMovieCard(cardWrapper, movie);
+        renderPosterCard(cardWrapper, movie);
         resultsGrid.appendChild(cardWrapper);
       });
 

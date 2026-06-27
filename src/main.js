@@ -17,14 +17,14 @@ import {
   normalizeListItem
 } from './api/ophim.js';
 
-import { renderHeader } from './components/Header.js';
-import { renderHero } from './components/Hero.js';
-import { renderCarousel } from './components/Carousel.js';
-import { renderFooter } from './components/Footer.js';
+import { renderHeader } from './modules/Header/Header.js';
+import { renderHeroSlider } from './modules/HeroSlider/HeroSlider.js';
+import { renderCarousel } from './modules/Carousel/Carousel.js';
+import { renderFooter } from './modules/Footer/Footer.js';
 import { renderMovieDetail } from './components/MovieDetail.js';
-import { renderCategoryGrid } from './components/CategoryGrid.js';
-import { renderSearchOverlay } from './components/SearchOverlay.js';
-import { createSkeletonCards, createSkeletonHero } from './components/Skeleton.js';
+import { renderGrid } from './modules/Grid/Grid.js';
+import { renderSearchOverlay } from './modules/SearchOverlay/SearchOverlay.js';
+import { createSkeletonCards, createSkeletonHero } from './modules/Skeleton/Skeleton.js';
 
 function showRuntimeError(message) {
   const errorEl = document.createElement('div');
@@ -145,7 +145,7 @@ async function renderHomePage() {
     page.innerHTML = '';
 
 
-    const heroCleanup = renderHero(page, heroMovies.items);
+    const heroCleanup = renderHeroSlider(page, heroMovies.items);
 
     // Carousels
     renderCarousel(page, {
@@ -226,14 +226,14 @@ async function renderListPage({ params, query }) {
   };
 
   if (type === 'phim-moi-cap-nhat') {
-    await renderCategoryGrid(page, {
+    await renderGrid(page, {
       type: 'danh-sach',
       fetchFn: (p) => getNewMovies(p),
       title: typeNames[type] || type,
       currentPage,
     });
   } else {
-    await renderCategoryGrid(page, {
+    await renderGrid(page, {
       type: 'danh-sach',
       fetchFn: (p) => getMoviesByType(type, p),
       title: typeNames[type] || type,
@@ -248,7 +248,7 @@ async function renderListPage({ params, query }) {
 async function renderGenrePage({ params, query }) {
   const page = getPageContainer();
   const currentPage = query.page ? parseInt(query.page, 10) : 1;
-  await renderCategoryGrid(page, {
+  await renderGrid(page, {
     type: 'the-loai',
     fetchFn: (p) => getMoviesByGenre(params.slug, p),
     title: params.slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
@@ -261,7 +261,7 @@ async function renderGenrePage({ params, query }) {
 async function renderCountryPage({ params, query }) {
   const page = getPageContainer();
   const currentPage = query.page ? parseInt(query.page, 10) : 1;
-  await renderCategoryGrid(page, {
+  await renderGrid(page, {
     type: 'quoc-gia',
     fetchFn: (p) => getMoviesByCountry(params.slug, p),
     title: params.slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
