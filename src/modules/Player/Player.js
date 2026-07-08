@@ -1,6 +1,7 @@
 /**
  * Player - embedded video player section.
- * Desktop and Android prefer the OPhim embed player; iOS uses native HLS.
+ * OPhim source: desktop and Android prefer the OPhim embed player; iOS uses
+ * native HLS. VIP source (stream.bluesia.net): ArtPlayer + hls.js everywhere.
  */
 
 function isIOSDevice() {
@@ -62,7 +63,57 @@ function playWhenReady(video) {
   });
 }
 
-export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episodeName, backdropUrl }) {
+async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl }) {
+  const { default: Artplayer } = await import('artplayer');
+
+  const mount = document.createElement('div');
+  mount.className = 'player__art';
+  mount.style.position = 'absolute';
+  mount.style.top = '0';
+  mount.style.left = '0';
+  mount.style.width = '100%';
+  mount.style.height = '100%';
+  playerContainer.appendChild(mount);
+
+  return new Artplayer({
+    container: mount,
+    url: m3u8Url,
+    type: 'm3u8',
+    customType: {
+      m3u8: async (video, url, art) => {
+        if (canUseNativeHls(video)) {
+          video.src = url;
+          return;
+        }
+        const { default: Hls } = await import('hls.js/light');
+        if (!Hls.isSupported()) {
+          art.notice.show = 'Trình duyệt không hỗ trợ phát HLS.';
+          return;
+        }
+        const hls = new Hls({
+          capLevelToPlayerSize: true,
+          maxBufferLength: 30,
+        });
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        art.on('destroy', () => hls.destroy());
+      },
+    },
+    poster: backdropUrl || '',
+    theme: '#d4af37',
+    autoplay: true,
+    playsInline: true,
+    setting: true,
+    playbackRate: true,
+    fullscreen: true,
+    fullscreenWeb: true,
+    pip: true,
+    hotkey: true,
+    autoOrientation: true,
+  });
+}
+
+export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episodeName, backdropUrl, vip = false }) {
   const section = document.createElement('section');
   section.className = 'player';
 
@@ -74,9 +125,13 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
   backBtn.innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg><span>Quay lại</span>`;
 
   let hlsInstance = null;
+  let artInstance = null;
   backBtn.addEventListener('click', () => {
     if (hlsInstance) {
       hlsInstance.destroy();
+    }
+    if (artInstance) {
+      artInstance.destroy(false);
     }
     section.remove();
   });
@@ -106,6 +161,17 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
 
   const startPlayback = async () => {
     playerContainer.innerHTML = '';
+
+    if (vip && m3u8Url) {
+      try {
+        artInstance = await mountArtPlayer(playerContainer, { m3u8Url, backdropUrl });
+        return;
+      } catch (err) {
+        console.warn('ArtPlayer could not be loaded:', err);
+        showFallback(playerContainer);
+        return;
+      }
+    }
 
     if (!isIOSDevice() && embedUrl) {
       playerContainer.appendChild(createIframe(embedUrl));

@@ -4,6 +4,7 @@
  */
 
 import { getMovieDetail, posterUrl, thumbUrl } from '../api/ophim.js';
+import { getVipSource } from '../api/stream.js';
 import { navigate } from '../router.js';
 import { renderPlayer } from '../modules/Player/Player.js';
 import { renderRecommendation } from '../modules/Recommendation/Recommendation.js';
@@ -322,20 +323,57 @@ export async function renderMovieDetail(container, slug) {
       (srv) => Array.isArray(srv.server_data) && srv.server_data.length > 0
     );
 
-  if (hasEpisodes) {
-    // Player mount point (filled when user clicks an episode)
-    const playerMount = document.createElement('div');
-    playerMount.className = 'detail__player-mount';
-    episodeSection.appendChild(playerMount);
+  // Shared by both sources (VIP on top, Ophim below)
+  const playerMount = document.createElement('div');
+  playerMount.className = 'detail__player-mount';
+  episodeSection.appendChild(playerMount);
 
-    // Episode Header (Title + Server Select inline)
+  const sectionHeading = document.createElement('h2');
+  sectionHeading.className = 'detail__section-label';
+  sectionHeading.textContent = 'Danh sách tập';
+  episodeSection.appendChild(sectionHeading);
+
+  // VIP source block — filled asynchronously when the title exists on
+  // stream.bluesia.net (see getVipSource call below)
+  const vipBlock = document.createElement('div');
+  vipBlock.className = 'episodes__source episodes__source--vip';
+  episodeSection.appendChild(vipBlock);
+
+  const clearActiveEpisodes = () => {
+    episodeSection
+      .querySelectorAll('.episodes__ep-btn--active')
+      .forEach((b) => {
+        b.classList.remove('episodes__ep-btn--active');
+        b.setAttribute('aria-pressed', 'false');
+      });
+  };
+
+  const selectVipEpisode = (epBtn, ep) => {
+    clearActiveEpisodes();
+    epBtn.classList.add('episodes__ep-btn--active');
+    epBtn.setAttribute('aria-pressed', 'true');
+
+    playerMount.innerHTML = '';
+    renderPlayer(playerMount, {
+      m3u8Url: ep.url,
+      serverName: 'VIP',
+      episodeName: ep.name,
+      backdropUrl: posterUrl(movie.poster_url),
+      vip: true,
+    });
+
+    playerMount.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+
+  if (hasEpisodes) {
+    // Episode Header (source badge + Server Select inline)
     const epHeader = document.createElement('div');
     epHeader.className = 'episodes__header';
 
-    const epHeading = document.createElement('h2');
-    epHeading.className = 'detail__section-label';
-    epHeading.textContent = 'Danh sách tập';
-    epHeader.appendChild(epHeading);
+    const ophimBadge = document.createElement('span');
+    ophimBadge.className = 'episodes__source-badge episodes__source-badge--ophim';
+    ophimBadge.textContent = 'Ophim';
+    epHeader.appendChild(ophimBadge);
 
     // Server select dropdown
     const serverSelect = document.createElement('select');
@@ -348,12 +386,7 @@ export async function renderMovieDetail(container, slug) {
     const episodeButtons = [];
 
     const selectEpisode = (epBtn, ep, server, sIdx) => {
-      episodeSection
-        .querySelectorAll('.episodes__ep-btn--active')
-        .forEach((b) => {
-          b.classList.remove('episodes__ep-btn--active');
-          b.setAttribute('aria-pressed', 'false');
-        });
+      clearActiveEpisodes();
       epBtn.classList.add('episodes__ep-btn--active');
       epBtn.setAttribute('aria-pressed', 'true');
 
@@ -431,6 +464,48 @@ export async function renderMovieDetail(container, slug) {
 
     preferredEpisodeButton = findPreferredEpisodeButton(movie, episodeButtons);
   }
+
+  // Resolve the VIP source (stream.bluesia.net) without blocking the render.
+  // When available, the VIP block appears above the Ophim block and becomes
+  // the preferred target for the hero "Xem Phim" button.
+  getVipSource(movie.tmdb).then((vip) => {
+    if (!vip) return;
+
+    const vipHeader = document.createElement('div');
+    vipHeader.className = 'episodes__header';
+
+    const vipBadge = document.createElement('span');
+    vipBadge.className = 'episodes__source-badge episodes__source-badge--vip';
+    vipBadge.textContent = 'VIP';
+    vipHeader.appendChild(vipBadge);
+    vipBlock.appendChild(vipHeader);
+
+    const vipGrid = document.createElement('div');
+    vipGrid.className = 'episodes__grid';
+
+    let firstVipButton = null;
+    vip.episodes.forEach((ep) => {
+      const epBtn = document.createElement('button');
+      epBtn.className = 'episodes__ep-btn';
+      epBtn.textContent = ep.name;
+      epBtn.setAttribute('aria-pressed', 'false');
+      epBtn.addEventListener('click', () => {
+        selectVipEpisode(epBtn, ep);
+      });
+      if (!firstVipButton) firstVipButton = epBtn;
+      vipGrid.appendChild(epBtn);
+    });
+
+    vipBlock.appendChild(vipGrid);
+
+    // Title only on VIP (no OPhim episodes): episode section isn't in the
+    // body yet — insert it above the info block.
+    if (!episodeSection.isConnected) {
+      body.insertBefore(episodeSection, info);
+    }
+
+    preferredEpisodeButton = firstVipButton;
+  });
 
   // Append info below episodes
   body.appendChild(info);

@@ -1393,6 +1393,34 @@
   opacity: 0.9;
 }
 
+/* Source blocks — VIP (stream.bluesia.net) stacked above Ophim */
+.episodes__source--vip {
+  margin-bottom: 28px;
+}
+
+.episodes__source--vip:empty {
+  margin-bottom: 0;
+}
+
+.episodes__source-badge {
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* VIP — luxury gold, same tone as the TMDB rating */
+.episodes__source-badge--vip {
+  background: linear-gradient(135deg, #d4af37, #f1d27a);
+  color: #141414;
+}
+
+.episodes__source-badge--ophim {
+  background: rgba(255, 255, 255, 0.13);
+  color: #ffffff;
+}
+
 .episodes__list {
   margin-top: 20px;
 }
