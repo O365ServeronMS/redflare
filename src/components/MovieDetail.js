@@ -361,7 +361,7 @@ export async function renderMovieDetail(container, slug) {
       backdropUrl: posterUrl(movie.poster_url),
       vip: true,
       extras: {
-        subtitles: { subs: ep.subs, base: ep.base, subsApiUrl: ep.subsApiUrl },
+        subtitles: { subs: ep.subs, base: ep.base },
         spritesUrl: ep.spritesUrl,
         skipIntro: { metaUrl, epKey: ep.epKey },
       },

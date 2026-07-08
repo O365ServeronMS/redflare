@@ -66,10 +66,14 @@ function playWhenReady(video) {
 // VIP feature plugins — each is optional and self-contained; a failing plugin
 // must never break playback, hence the individual catch per attach call.
 import { attachSubtitles } from './plugins/subtitles.js';
+import { attachLocalSubtitle } from './plugins/localSubtitle.js';
 import { attachSprites } from './plugins/sprites.js';
 import { attachSkipIntro } from './plugins/skipIntro.js';
 
 function attachVipPlugins(art, extras) {
+  attachLocalSubtitle(art).catch((e) =>
+    console.warn('local-subtitle plugin failed:', e)
+  );
   if (!extras) return;
   attachSubtitles(art, extras.subtitles).catch((e) =>
     console.warn('subtitles plugin failed:', e)

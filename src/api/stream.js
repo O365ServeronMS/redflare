@@ -39,12 +39,11 @@ function variantUrl(basePath, entry) {
 
 // Extras carried per playable entry, consumed by the Player plugin modules
 // (subtitles / sprites / skip-intro).
-function entryExtras(base, entry, subsApiUrl) {
+function entryExtras(base, entry) {
   return {
     base,
     subs: entry.subs || [],
     spritesUrl: entry.sprites ? `${base}/sprites/preview.vtt` : null,
-    subsApiUrl,
   };
 }
 
@@ -53,7 +52,7 @@ function entryExtras(base, entry, subsApiUrl) {
  * @param {Object} tmdb OPhim `movie.tmdb` — { type, id, season }
  * @returns {Promise<{
  *   episodes: Array<{name: string, url: string, base: string, epKey: string|null,
- *                    subs: string[], spritesUrl: string|null, subsApiUrl: string}>,
+ *                    subs: string[], spritesUrl: string|null}>,
  *   metaUrl: string|null
  * } | null>} null when the title is not available on stream.bluesia.net.
  */
@@ -81,7 +80,7 @@ export async function getVipSource(tmdb) {
             name: `Tập ${epNum}`,
             url,
             epKey: `${season}/${key}`,
-            ...entryExtras(base, eps[key], `${STREAM_BASE}/subs/tv/${id}/${seasonNum}/${epNum}`),
+            ...entryExtras(base, eps[key]),
           };
         })
         .filter(Boolean);
@@ -104,7 +103,7 @@ export async function getVipSource(tmdb) {
           name: 'Full',
           url,
           epKey: null,
-          ...entryExtras(base, entry, `${STREAM_BASE}/subs/movie/${id}`),
+          ...entryExtras(base, entry),
         },
       ],
       metaUrl: entry.meta ? `${base}/meta.json` : null,

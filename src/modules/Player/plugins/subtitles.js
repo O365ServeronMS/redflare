@@ -1,51 +1,28 @@
 /**
  * Player plugin — subtitles (VIP source).
- * Tracks come from two places, merged with folder subs taking priority:
- *   1. Folder subs uploaded alongside the stream ({base}/subs/{lang}.vtt),
- *      known from the index flags.
- *   2. subtitle-api (SubDL/OpenSubtitles → .vtt) via {subsApiUrl}.
- * Adds a "Phụ đề" selector to the ArtPlayer settings menu; Vietnamese is the
- * default track when available.
+ * Tracks are the folder subs uploaded alongside the stream
+ * ({base}/subs/{lang}.vtt), known from the index flags. Adds a "Phụ đề"
+ * selector to the ArtPlayer settings menu; Vietnamese is the default track.
+ * (User-provided files are handled by the localSubtitle plugin.)
  *
  * Self-contained module — safe to detach by removing its attach call.
  */
 
-import { STREAM_BASE } from '../../../api/stream.js';
-
 const LABELS = { vi: 'Tiếng Việt', en: 'English' };
 
-async function collectTracks({ subs, base, subsApiUrl }) {
-  const tracks = (subs || []).map((lang) => ({
-    lang,
-    label: LABELS[lang] || lang,
-    url: `${base}/subs/${lang}.vtt`,
-  }));
-
-  if (subsApiUrl) {
-    try {
-      const res = await fetch(subsApiUrl);
-      if (res.ok) {
-        const data = await res.json();
-        (data.items || []).forEach((item) => {
-          if (tracks.some((t) => t.lang === item.lang)) return;
-          tracks.push({
-            lang: item.lang,
-            label: item.label || LABELS[item.lang] || item.lang,
-            url: `${STREAM_BASE}${item.url}`,
-          });
-        });
-      }
-    } catch (err) {
-      console.warn('subtitle-api unavailable:', err);
-    }
-  }
-
-  return tracks;
-}
+// Only these languages appear in the player selector. To offer English again,
+// add 'en' here.
+const ALLOWED_LANGS = ['vi'];
 
 export async function attachSubtitles(art, opts) {
   if (!opts) return;
-  const tracks = await collectTracks(opts);
+  const tracks = (opts.subs || [])
+    .filter((lang) => ALLOWED_LANGS.includes(lang))
+    .map((lang) => ({
+      lang,
+      label: LABELS[lang] || lang,
+      url: `${opts.base}/subs/${lang}.vtt`,
+    }));
   if (tracks.length === 0 || art.destroyed) return;
 
   const defaultTrack = tracks.find((t) => t.lang === 'vi') || tracks[0];
