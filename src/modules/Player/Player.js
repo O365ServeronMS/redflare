@@ -63,7 +63,26 @@ function playWhenReady(video) {
   });
 }
 
-async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl }) {
+// VIP feature plugins — each is optional and self-contained; a failing plugin
+// must never break playback, hence the individual catch per attach call.
+import { attachSubtitles } from './plugins/subtitles.js';
+import { attachSprites } from './plugins/sprites.js';
+import { attachSkipIntro } from './plugins/skipIntro.js';
+
+function attachVipPlugins(art, extras) {
+  if (!extras) return;
+  attachSubtitles(art, extras.subtitles).catch((e) =>
+    console.warn('subtitles plugin failed:', e)
+  );
+  attachSprites(art, extras.spritesUrl).catch((e) =>
+    console.warn('sprites plugin failed:', e)
+  );
+  attachSkipIntro(art, extras.skipIntro).catch((e) =>
+    console.warn('skip-intro plugin failed:', e)
+  );
+}
+
+async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl, extras }) {
   const { default: Artplayer } = await import('artplayer');
 
   const mount = document.createElement('div');
@@ -75,7 +94,7 @@ async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl }) {
   mount.style.height = '100%';
   playerContainer.appendChild(mount);
 
-  return new Artplayer({
+  const art = new Artplayer({
     container: mount,
     url: m3u8Url,
     type: 'm3u8',
@@ -111,9 +130,12 @@ async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl }) {
     hotkey: true,
     autoOrientation: true,
   });
+
+  attachVipPlugins(art, extras);
+  return art;
 }
 
-export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episodeName, backdropUrl, vip = false }) {
+export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episodeName, backdropUrl, vip = false, extras = null }) {
   const section = document.createElement('section');
   section.className = 'player';
 
@@ -164,7 +186,7 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
 
     if (vip && m3u8Url) {
       try {
-        artInstance = await mountArtPlayer(playerContainer, { m3u8Url, backdropUrl });
+        artInstance = await mountArtPlayer(playerContainer, { m3u8Url, backdropUrl, extras });
         return;
       } catch (err) {
         console.warn('ArtPlayer could not be loaded:', err);

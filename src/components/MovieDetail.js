@@ -348,7 +348,7 @@ export async function renderMovieDetail(container, slug) {
       });
   };
 
-  const selectVipEpisode = (epBtn, ep) => {
+  const selectVipEpisode = (epBtn, ep, metaUrl) => {
     clearActiveEpisodes();
     epBtn.classList.add('episodes__ep-btn--active');
     epBtn.setAttribute('aria-pressed', 'true');
@@ -360,6 +360,11 @@ export async function renderMovieDetail(container, slug) {
       episodeName: ep.name,
       backdropUrl: posterUrl(movie.poster_url),
       vip: true,
+      extras: {
+        subtitles: { subs: ep.subs, base: ep.base, subsApiUrl: ep.subsApiUrl },
+        spritesUrl: ep.spritesUrl,
+        skipIntro: { metaUrl, epKey: ep.epKey },
+      },
     });
 
     playerMount.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -490,7 +495,7 @@ export async function renderMovieDetail(container, slug) {
       epBtn.textContent = ep.name;
       epBtn.setAttribute('aria-pressed', 'false');
       epBtn.addEventListener('click', () => {
-        selectVipEpisode(epBtn, ep);
+        selectVipEpisode(epBtn, ep, vip.metaUrl);
       });
       if (!firstVipButton) firstVipButton = epBtn;
       vipGrid.appendChild(epBtn);

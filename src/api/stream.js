@@ -2,6 +2,7 @@
  * Stream (VIP) source client
  * Index files (movies.json / tvshows.json) are rebuilt every 30 minutes on the
  * VPS from the SharePoint mount and served by Caddy at stream.bluesia.net.
+ * The same host also proxies subtitle-api under /subs/*.
  */
 
 const STREAM_BASE = 'https://stream.bluesia.net';
@@ -36,11 +37,25 @@ function variantUrl(basePath, entry) {
   return best ? `${basePath}/${best}/index.m3u8` : null;
 }
 
+// Extras carried per playable entry, consumed by the Player plugin modules
+// (subtitles / sprites / skip-intro).
+function entryExtras(base, entry, subsApiUrl) {
+  return {
+    base,
+    subs: entry.subs || [],
+    spritesUrl: entry.sprites ? `${base}/sprites/preview.vtt` : null,
+    subsApiUrl,
+  };
+}
+
 /**
  * Resolve the VIP source for an OPhim title.
  * @param {Object} tmdb OPhim `movie.tmdb` — { type, id, season }
- * @returns {Promise<{episodes: Array<{name: string, url: string}>} | null>}
- *          null when the title is not available on stream.bluesia.net.
+ * @returns {Promise<{
+ *   episodes: Array<{name: string, url: string, base: string, epKey: string|null,
+ *                    subs: string[], spritesUrl: string|null, subsApiUrl: string}>,
+ *   metaUrl: string|null
+ * } | null>} null when the title is not available on stream.bluesia.net.
  */
 export async function getVipSource(tmdb) {
   const id = tmdb?.id;
@@ -50,31 +65,55 @@ export async function getVipSource(tmdb) {
     if (tmdb.type === 'tv') {
       const items = await getIndex('tvshows');
       const show = items[String(id)];
-      const season = 's' + String(tmdb.season || 1).padStart(2, '0');
+      const seasonNum = Number(tmdb.season || 1);
+      const season = 's' + String(seasonNum).padStart(2, '0');
       const eps = show?.seasons?.[season];
       if (!eps) return null;
 
       const episodes = Object.keys(eps)
         .sort((a, b) => parseInt(a.slice(1), 10) - parseInt(b.slice(1), 10))
         .map((key) => {
-          const url = variantUrl(
-            `${STREAM_BASE}/tvshows/${id}/${season}/${key}`,
-            eps[key]
-          );
-          return url ? { name: `Tập ${parseInt(key.slice(1), 10)}`, url } : null;
+          const base = `${STREAM_BASE}/tvshows/${id}/${season}/${key}`;
+          const url = variantUrl(base, eps[key]);
+          if (!url) return null;
+          const epNum = parseInt(key.slice(1), 10);
+          return {
+            name: `Tập ${epNum}`,
+            url,
+            epKey: `${season}/${key}`,
+            ...entryExtras(base, eps[key], `${STREAM_BASE}/subs/tv/${id}/${seasonNum}/${epNum}`),
+          };
         })
         .filter(Boolean);
-      return episodes.length ? { episodes } : null;
+      if (episodes.length === 0) return null;
+      return {
+        episodes,
+        metaUrl: show.meta ? `${STREAM_BASE}/tvshows/${id}/meta.json` : null,
+      };
     }
 
     const items = await getIndex('movies');
     const entry = items[String(id)];
     if (!entry) return null;
-    const url = variantUrl(`${STREAM_BASE}/movies/${id}`, entry);
-    return url ? { episodes: [{ name: 'Full', url }] } : null;
+    const base = `${STREAM_BASE}/movies/${id}`;
+    const url = variantUrl(base, entry);
+    if (!url) return null;
+    return {
+      episodes: [
+        {
+          name: 'Full',
+          url,
+          epKey: null,
+          ...entryExtras(base, entry, `${STREAM_BASE}/subs/movie/${id}`),
+        },
+      ],
+      metaUrl: entry.meta ? `${base}/meta.json` : null,
+    };
   } catch (err) {
     // Index unreachable — treat as "not on VIP" so the page still renders OPhim.
     console.warn('VIP index unavailable:', err);
     return null;
   }
 }
+
+export { STREAM_BASE };
