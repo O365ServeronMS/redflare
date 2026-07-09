@@ -125,6 +125,9 @@ async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl, extras })
           capLevelToPlayerSize: true,
           maxBufferLength: 120,
           maxBufferSize: 150 * 1000 * 1000,
+          manifestLoadingTimeOut: 60000,
+          levelLoadingTimeOut: 60000,
+          fragLoadingTimeOut: 60000,
         });
 
         // Fatal-error recovery: without this hls.js gives up silently after a
@@ -270,6 +273,9 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
           capLevelToPlayerSize: true,
           maxBufferLength: 120,
           maxBufferSize: 150 * 1000 * 1000,
+          manifestLoadingTimeOut: 60000,
+          levelLoadingTimeOut: 60000,
+          fragLoadingTimeOut: 60000,
         });
         hlsInstance.loadSource(m3u8Url);
         hlsInstance.attachMedia(video);
