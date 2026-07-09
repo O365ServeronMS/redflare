@@ -67,10 +67,14 @@ function playWhenReady(video) {
 // must never break playback, hence the individual catch per attach call.
 import { attachSubtitles } from './plugins/subtitles.js';
 import { attachLocalSubtitle } from './plugins/localSubtitle.js';
+import { attachSubtitleStyle } from './plugins/subtitleStyle.js';
 import { attachSprites } from './plugins/sprites.js';
 import { attachSkipIntro } from './plugins/skipIntro.js';
 
 function attachVipPlugins(art, extras) {
+  attachSubtitleStyle(art).catch((e) =>
+    console.warn('subtitle-style plugin failed:', e)
+  );
   attachLocalSubtitle(art).catch((e) =>
     console.warn('local-subtitle plugin failed:', e)
   );
@@ -104,12 +108,16 @@ async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl, extras })
     type: 'm3u8',
     customType: {
       m3u8: async (video, url, art) => {
-        if (canUseNativeHls(video)) {
-          video.src = url;
-          return;
-        }
+        // Prefer hls.js over native HLS: with native playback a missing
+        // segment fires a video error and ArtPlayer's auto-reconnect restarts
+        // from 0 (the "plays one segment then loops" bug). hls.js lets us
+        // recover in place via the ERROR handler below.
         const { default: Hls } = await import('hls.js/light');
         if (!Hls.isSupported()) {
+          if (canUseNativeHls(video)) {
+            video.src = url;
+            return;
+          }
           art.notice.show = 'Trình duyệt không hỗ trợ phát HLS.';
           return;
         }
@@ -117,6 +125,31 @@ async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl, extras })
           capLevelToPlayerSize: true,
           maxBufferLength: 30,
         });
+
+        // Fatal-error recovery: without this hls.js gives up silently after a
+        // bad segment (missing .ts, decode error) and the player misbehaves.
+        let mediaRetries = 0;
+        let networkRetries = 0;
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (!data.fatal) return;
+          console.warn('hls fatal error:', data.type, data.details);
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetries < 2) {
+            mediaRetries += 1;
+            art.notice.show = 'Đang khôi phục luồng phát…';
+            hls.recoverMediaError();
+            return;
+          }
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetries < 3) {
+            networkRetries += 1;
+            art.notice.show = 'Nguồn phát gặp lỗi, đang thử lại…';
+            setTimeout(() => hls.startLoad(video.currentTime), 1000 * networkRetries);
+            return;
+          }
+          hls.stopLoad();
+          art.notice.show =
+            'Nguồn VIP lỗi ở đoạn này — thử lại sau hoặc chọn nguồn Ophim.';
+        });
+
         hls.loadSource(url);
         hls.attachMedia(video);
         art.on('destroy', () => hls.destroy());
@@ -133,6 +166,17 @@ async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl, extras })
     pip: true,
     hotkey: true,
     autoOrientation: true,
+  });
+
+  // Native-HLS fallback (no MSE, e.g. iPhone Safari): a video error makes
+  // ArtPlayer auto-reconnect from 0 — restore the last playback position.
+  let lastPos = 0;
+  art.on('video:timeupdate', () => {
+    if (art.video.currentTime > 1) lastPos = art.video.currentTime;
+  });
+  art.on('video:error', () => {
+    const pos = lastPos;
+    if (pos > 1) art.once('video:loadedmetadata', () => { art.currentTime = pos; });
   });
 
   attachVipPlugins(art, extras);
