@@ -1,13 +1,9 @@
 /**
  * Player - embedded video player section.
- * Desktop and Android prefer the OPhim embed player; iOS uses native HLS.
+ * All devices prefer direct m3u8 playback (ArtPlayer + hls.js) for a uniform
+ * UI and in-place error recovery; the OPhim embed iframe is the fallback when
+ * a server has no link_m3u8 (or ArtPlayer fails to load).
  */
-
-function isIOSDevice() {
-  const ua = navigator.userAgent || '';
-  const platform = navigator.platform || '';
-  return /iPad|iPhone|iPod/.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-}
 
 function canUseNativeHls(video) {
   return video.canPlayType('application/vnd.apple.mpegurl') !== '';
@@ -29,20 +25,6 @@ function createIframe(embedUrl) {
   return iframe;
 }
 
-function createVideo() {
-  const video = document.createElement('video');
-  video.className = 'player__video';
-  video.controls = true;
-  video.autoplay = true;
-  video.playsInline = true;
-  video.style.position = 'absolute';
-  video.style.top = '0';
-  video.style.left = '0';
-  video.style.width = '100%';
-  video.style.height = '100%';
-  return video;
-}
-
 function showFallback(playerContainer) {
   playerContainer.innerHTML = '';
   const fallback = document.createElement('p');
@@ -56,13 +38,117 @@ function showFallback(playerContainer) {
   playerContainer.appendChild(fallback);
 }
 
-function playWhenReady(video) {
-  video.addEventListener('loadedmetadata', function () {
-    video.play().catch(e => console.warn('Autoplay prevented:', e));
+async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl }) {
+  const { default: Artplayer } = await import('artplayer');
+
+  const mount = document.createElement('div');
+  mount.className = 'player__art';
+  mount.style.position = 'absolute';
+  mount.style.top = '0';
+  mount.style.left = '0';
+  mount.style.width = '100%';
+  mount.style.height = '100%';
+  playerContainer.appendChild(mount);
+
+  const art = new Artplayer({
+    container: mount,
+    url: m3u8Url,
+    type: 'm3u8',
+    customType: {
+      m3u8: async (video, url, art) => {
+        // Prefer hls.js over native HLS: with native playback a missing
+        // segment fires a video error and ArtPlayer's auto-reconnect restarts
+        // from 0 (the "plays one segment then loops" bug). hls.js lets us
+        // recover in place via the ERROR handler below.
+        const { default: Hls } = await import('hls.js/light');
+        if (!Hls.isSupported()) {
+          if (canUseNativeHls(video)) {
+            video.src = url;
+            return;
+          }
+          art.notice.show = 'Trình duyệt không hỗ trợ phát HLS.';
+          return;
+        }
+        const hls = new Hls({
+          capLevelToPlayerSize: true,
+          maxBufferLength: 120,
+          maxBufferSize: 150 * 1000 * 1000,
+          manifestLoadingTimeOut: 60000,
+          levelLoadingTimeOut: 60000,
+          fragLoadingTimeOut: 60000,
+        });
+
+        // Fatal-error recovery: without this hls.js gives up silently after a
+        // bad segment (missing .ts, decode error) and the player misbehaves.
+        let mediaRetries = 0;
+        let networkRetries = 0;
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (!data.fatal) return;
+          console.warn('hls fatal error:', data.type, data.details);
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetries < 2) {
+            mediaRetries += 1;
+            art.notice.show = 'Đang khôi phục luồng phát…';
+            hls.recoverMediaError();
+            return;
+          }
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetries < 3) {
+            networkRetries += 1;
+            art.notice.show = 'Nguồn phát gặp lỗi, đang thử lại…';
+            setTimeout(() => hls.startLoad(video.currentTime), 1000 * networkRetries);
+            return;
+          }
+          hls.stopLoad();
+          art.notice.show =
+            'Nguồn phát lỗi ở đoạn này — thử lại sau hoặc chọn server khác.';
+        });
+
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        art.on('destroy', () => hls.destroy());
+      },
+    },
+    poster: backdropUrl || '',
+    theme: '#d4af37',
+    autoplay: true,
+    playsInline: true,
+    setting: true,
+    playbackRate: true,
+    fullscreen: true,
+    fullscreenWeb: true,
+    pip: true,
+    hotkey: true,
+    autoOrientation: true,
   });
+
+  // Native-HLS fallback (no MSE, e.g. iPhone Safari): a video error makes
+  // ArtPlayer auto-reconnect from 0 — restore the last playback position.
+  let lastPos = 0;
+  art.on('video:timeupdate', () => {
+    if (art.video.currentTime > 1) lastPos = art.video.currentTime;
+  });
+  art.on('video:error', () => {
+    const pos = lastPos;
+    if (pos > 1) art.once('video:loadedmetadata', () => { art.currentTime = pos; });
+  });
+
+  return art;
+}
+
+// The detail page replaces the player by wiping its mount (innerHTML = '');
+// an orphaned ArtPlayer/hls.js instance would keep downloading segments in the
+// background, so destroy the previous one whenever a new player is rendered.
+let currentArt = null;
+
+function destroyCurrentArt() {
+  if (currentArt) {
+    currentArt.destroy(false);
+    currentArt = null;
+  }
 }
 
 export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episodeName, backdropUrl }) {
+  destroyCurrentArt();
+
   const section = document.createElement('section');
   section.className = 'player';
 
@@ -73,11 +159,8 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
   backBtn.className = 'player__back';
   backBtn.innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg><span>Quay lại</span>`;
 
-  let hlsInstance = null;
   backBtn.addEventListener('click', () => {
-    if (hlsInstance) {
-      hlsInstance.destroy();
-    }
+    destroyCurrentArt();
     section.remove();
   });
   header.appendChild(backBtn);
@@ -107,46 +190,16 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
   const startPlayback = async () => {
     playerContainer.innerHTML = '';
 
-    if (!isIOSDevice() && embedUrl) {
-      playerContainer.appendChild(createIframe(embedUrl));
-      return;
-    }
-
     if (m3u8Url) {
-      const video = createVideo();
-      playerContainer.appendChild(video);
-
-      if (canUseNativeHls(video)) {
-        video.src = m3u8Url;
-        playWhenReady(video);
-        return;
-      }
-
       try {
-        const { default: Hls } = await import('hls.js/light');
-        if (!Hls.isSupported()) {
-          showFallback(playerContainer);
-          return;
-        }
-
-        hlsInstance = new Hls({
-          capLevelToPlayerSize: true,
-          maxBufferLength: 120,
-          maxBufferSize: 150 * 1000 * 1000,
-          manifestLoadingTimeOut: 60000,
-          levelLoadingTimeOut: 60000,
-          fragLoadingTimeOut: 60000,
-        });
-        hlsInstance.loadSource(m3u8Url);
-        hlsInstance.attachMedia(video);
-        hlsInstance.on(Hls.Events.MANIFEST_PARSED, function () {
-          video.play().catch(e => console.warn('Autoplay prevented:', e));
-        });
+        currentArt = await mountArtPlayer(playerContainer, { m3u8Url, backdropUrl });
+        return;
       } catch (err) {
-        console.warn('HLS player could not be loaded:', err);
-        showFallback(playerContainer);
+        // ArtPlayer failed to load (e.g. chunk fetch error) — fall back to
+        // the embed player below rather than dying.
+        console.warn('ArtPlayer could not be loaded:', err);
+        playerContainer.innerHTML = '';
       }
-      return;
     }
 
     if (embedUrl) {
