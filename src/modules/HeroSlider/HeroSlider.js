@@ -20,8 +20,10 @@ function getBackdropUrl(movie) {
     : thumbUrl(movie.thumb_url || movie.poster_url);
 }
 
-function getPosterUrl(movie) {
-  return posterUrl(movie.poster_url || movie.thumb_url);
+// Rail slot is portrait (aspect-ratio 2/3) — use the /m thumb_url, not the
+// landscape poster_url.
+function getRailThumbUrl(movie) {
+  return thumbUrl(movie.thumb_url || movie.poster_url);
 }
 
 function getScore(movie) {
@@ -190,7 +192,7 @@ export function renderHeroSlider(container, movies) {
     item.innerHTML = `
       <span class="hero__rail-rank">${index + 1}</span>
       <span class="hero__rail-poster">
-        <img src="${getPosterUrl(movie)}" alt="${movie.name}">
+        <img src="${getRailThumbUrl(movie)}" alt="${movie.name}">
       </span>
       <span class="hero__rail-copy">
         <span class="hero__rail-title">${movie.name}</span>
