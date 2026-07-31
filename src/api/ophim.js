@@ -1,14 +1,14 @@
 /**
  * Catalog API client
- * Base: https://img.bluesia.net/api/* — the VPS catalog-api, which proxies
- * OPhim, HMAC-signs image URLs, and caches in Valkey.
+ * Base: same-origin /api/* — the Worker (worker/index.js) caches responses in
+ * KV and proxies to the VPS catalog-api (img.bluesia.net) on a miss, falling
+ * back to the last-known-good KV copy if the VPS is unreachable.
  */
 
 const IMAGE_CACHE_BASE = 'https://img.bluesia.net';
-// Catalog data and images share one origin: the VPS catalog-api. The frontend
-// never calls OPhim directly, so phim.bluesia.net stays a zero-Worker static
-// deployment (no Cloudflare compute in the per-request path).
-const CATALOG_BASE = IMAGE_CACHE_BASE;
+// Empty on purpose: every call site below already prefixes its path with
+// '/api/...', so this just makes the fetch same-origin relative.
+const CATALOG_BASE = '';
 
 // Simple in-memory cache with TTL (5 minutes)
 const cache = new Map();
