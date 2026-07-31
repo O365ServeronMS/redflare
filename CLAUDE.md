@@ -161,6 +161,56 @@ All defined in `src/api/ophim.js`. Keep this table in sync when adding one.
 | `searchMovies` | `GET /api/search?keyword=&page=` | |
 | `getRecommendation` | `GET /api/recommendation/:mediaType/:tmdbId` | `mediaType` must be `movie`/`tv` — TMDB ids collide across the two. Legacy `/api/related` alias still served |
 
+### Field ownership: OPhim vs TMDB
+
+A recurring misreading: *"OPhim only tells us which titles exist + their TMDB id,
+TMDB supplies the metadata."* Not how it works. catalog-api fetches the **whole
+OPhim record**, then **overrides a fixed set of fields** with TMDB
+(`catalog-api/src/tmdb-enrich.js`). OPhim is the per-field fallback, so a title
+that TMDB can't resolve still renders — just with OPhim values.
+
+| Field | Owner | Notes |
+|---|---|---|
+| `name` | TMDB vi-VN title → OPhim | See readability rule below |
+| `origin_name` | TMDB `original_title` → OPhim | Same rule; OPhim's is reliably English |
+| `poster_url` | TMDB `w1280` backdrop → OPhim | Wide image. Signed after enrich |
+| `thumb_url` | TMDB `w780` poster → OPhim | Portrait image |
+| `vote_average` | TMDB (1 dp) → OPhim | Detail badge is hardcoded "TMDB" even on fallback |
+| `content` | TMDB `overview` vi-VN → OPhim | **Detail only** — cards never carry it |
+| `year` | TMDB release/first-air → OPhim | Detail only |
+| `actor` | TMDB credits, top 15 by `order` → OPhim | Detail only. Names come back in the original script (Korean, Chinese …) |
+| `trailer_url` | TMDB YouTube trailer → OPhim | Detail only |
+| `director` | **OPhim** | TMDB deliberately not read; no UI renders it either |
+| `category`, `country` | **OPhim** | The taxonomy behind `/the-loai/*` and `/quoc-gia/*`. TMDB genres are never used |
+| `slug`, `_id` | **OPhim** | URL identity — never touch |
+| `episodes[]` (`link_m3u8`, `link_embed`, `server_name`) | **OPhim** | Playback. TMDB has no part in it |
+| `type`, `status`, `quality`, `lang`, `episode_current`, `time` | **OPhim** | Card badges |
+| `tmdb.{id,type,season}`, `imdb.id` | **OPhim** | The join keys that make enrichment possible at all |
+
+Two enrich levels, deliberately different: **detail** (`enrichItem`) takes the
+full set above; **cards / hero / list / search** (`enrichItemCard`) take only
+`name`, `origin_name`, `poster_url`, `thumb_url`, `vote_average` — overview,
+cast and trailer would be wasted bytes on a poster.
+
+**Readability rule (`readableTitle`).** TMDB returns the *original* title when a
+vi-VN translation is missing, which once put Chinese and Thai titles in the
+headline `name` on cards. Any title carrying non-Latin script (Hangul, CJK,
+Thai, Cyrillic …) is dropped so the OPhim value wins — OPhim's `name` is
+always Vietnamese and its `origin_name` is Latin/English. Vietnamese
+diacritics are Latin script, so they pass. Applied inside `mapTmdb`, i.e.
+*before* the 14-day `catalog:c1:meta:*` cache — changing the rule means
+purging those keys.
+
+**Ranking is TMDB, availability is OPhim.** Hero + "Phim Trending" take their
+order from TMDB trending (week / day), but only titles present in the fetched
+OPhim pool can appear — hero often lands short of its 20 slots for that reason.
+Recommendations work the same way: TMDB `/recommendations` (then `/similar`),
+matched back to OPhim by `tmdb.id` + media type.
+
+**Search queries OPhim, displays TMDB.** The keyword goes straight to OPhim's
+index, so a title is findable under OPhim's naming while the card shows the TMDB
+name. Expect the two to disagree occasionally.
+
 ### Caching layers
 
 1. **In-page** — `src/api/ophim.js` memoizes every response by URL for **5 min**
@@ -173,7 +223,11 @@ All defined in `src/api/ophim.js`. Keep this table in sync when adding one.
 
 **To force fresh data:** restart the `catalog-api` container (drops the warm home
 build), `DEL catalog:c1:home` in Valkey for just the home page, or bump `CACHE_NS`
-in catalog-api `server.js` to invalidate *everything* at once.
+in catalog-api `server.js` to invalidate *everything* at once. Changing anything
+in the enrichment table above needs more than that: the TMDB values are frozen in
+`catalog:c1:meta:*` for 14 days, and *already-enriched* items sit inside
+`catalog:c1:idx:*` (45 d) and `catalog:c1:related:*` (30 d) — purge those too or
+stale titles keep resurfacing in "Bạn cũng có thể thích".
 
 **Why this shape:** each SPA data fetch used to bill a Cloudflare Worker request.
 Moving catalog + signing to the VPS — which holds the HMAC secret and isn't
