@@ -9,10 +9,17 @@ routes = [
   { pattern = "phim.bluesia.net", custom_domain = true },
 ]
 
-# Static-assets-only deployment — no Worker code. All catalog data (home/list/
-# genre/country/detail) is served by the VPS catalog-api at img.bluesia.net/api/*.
-# The asset layer serves the SPA shell and falls back to index.html for client
-# routes, so phim.bluesia.net never invokes Worker code.
+# worker/index.js fronts /api/* with a KV cache-aside in front of the VPS
+# catalog-api (img.bluesia.net) — see state.md Phase 3. Everything that isn't
+# /api/* and isn't a literal file in dist/ falls through to the assets layer,
+# which applies not_found_handling below (SPA fallback for client routes).
+main = "worker/index.js"
+
 [assets]
 directory = "dist"
+binding = "ASSETS"
 not_found_handling = "single-page-application"
+
+[[kv_namespaces]]
+binding = "CATALOG_KV"
+id = "a4a69489a7da49d3895c9ed2389b7055"
