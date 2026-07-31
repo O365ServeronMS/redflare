@@ -20,10 +20,6 @@ directory = "dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 
-# TODO(Phase 3 cutover): replace with the real namespace id before this is
-# pushed to main — Cloudflare Workers Builds runs `wrangler deploy`, which
-# fails if this id doesn't exist in the account. `wrangler dev` (local) works
-# fine with a placeholder since local KV is simulated regardless of the id.
 [[kv_namespaces]]
 binding = "CATALOG_KV"
-id = "REPLACE_WITH_REAL_KV_NAMESPACE_ID"
+id = "a4a69489a7da49d3895c9ed2389b7055"
