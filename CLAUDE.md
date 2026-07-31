@@ -84,22 +84,32 @@ implementation rather than after mistakes.
 
 `phim.bluesia.net` — a Vietnamese movie-streaming front-end. **Vanilla JS SPA**
 (no framework), built with Vite, deployed to Cloudflare as **static assets only
-(no Worker)**. All catalog data (home/list/genre/country/detail) is fetched from
-the **VPS `catalog-api`** at `img.bluesia.net/api/*`, which proxies the OPhim
-catalog API, HMAC-signs image URLs, and caches in Valkey. `hls.js` handles playback.
+— there is no Worker script in this repo** (`wrangler.toml` has no `main`, only
+`[assets]`). Every request that needs CPU (catalog proxying, hero ranking, TMDB
+trending, HMAC image signing, caching) is handled by the **VPS `catalog-api`** at
+`img.bluesia.net/api/*`. `hls.js` + `artplayer` handle playback.
 
-There are **no tests** and **no TypeScript**. Plain ES modules + imperative DOM.
+There are **no tests**, **no TypeScript**, and **no linter/CI**. Plain ES modules
++ imperative DOM.
 
 ## Stack & commands
 
+Node **26** (pinned in `.nvmrc` — Cloudflare's build image reads it too).
+
 | Command | What it does |
 |---|---|
-| `npm run dev` | Vite dev server (frontend only, hits deployed `/api/*`) |
-| `npm start` | `wrangler dev` — serves the built assets locally (no Worker) |
+| `npm run dev` | Vite dev server on `:3000`. Default loop. Hits the **live** `img.bluesia.net/api/*` — there is no local backend, so the VPS must be up. |
 | `npm run build` | Vite build → `dist/` |
+| `npm run preview` | Vite's own static preview of `dist/` (no SPA fallback config) |
+| `npm start` | `wrangler dev` — serves `dist/` through Cloudflare's asset layer. Use this (not `preview`) to verify `not_found_handling = "single-page-application"`, i.e. that a deep link like `/phim/<slug>` reloads correctly. Requires `npm run build` first. |
 
-**Deploy = `git push origin main`** (Cloudflare auto-deploys). Confirm before
-committing/pushing unless told otherwise.
+**Deploy = `git push origin main`.** Cloudflare Workers Builds picks it up, runs
+`npm run build`, and publishes `dist/` as static assets. No `wrangler deploy` by
+hand. Confirm before committing/pushing unless told otherwise.
+
+`wrangler.toml` pins the custom domain (`routes` with `custom_domain = true`) on
+purpose — each deploy re-attaches `phim.bluesia.net` so the site doesn't go down
+if the Git integration is disconnected/reconnected. Don't remove it.
 
 ## Architecture
 
@@ -108,37 +118,72 @@ committing/pushing unless told otherwise.
 - **`src/router.js`** — History API SPA router. `:param` patterns. A handler may
   return a cleanup fn (sync or a Promise resolving to one); the router calls it
   on navigation. Internal `<a href="/...">` clicks are intercepted globally.
-- **`src/api/ophim.js`** — catalog client. Exports `getHomeData`, `getMovieDetail`,
-  list fetchers (all hitting `CATALOG_BASE` = `img.bluesia.net/api/*`),
-  `posterUrl`/`thumbUrl` (now pass-throughs — URLs arrive pre-signed), and
-  `normalizeListItem` (smooths over OPhim's `/api/list` vs `/v1/api/*` shapes).
-- **`src/components/*.js`** — each exports `renderX(container, ...)` that builds
-  DOM imperatively and appends it. No virtual DOM, no templating lib.
+- **`src/api/ophim.js`** — the **only** module that talks to the network. Every
+  fetch goes to `CATALOG_BASE` (= `img.bluesia.net`); nothing here calls OPhim
+  directly. Also exports `posterUrl`/`thumbUrl` (pass-throughs — URLs arrive
+  pre-signed) and `normalizeListItem` (smooths over OPhim's two list shapes).
+- **`src/modules/<Name>/<Name>.js`** — UI modules, each exporting
+  `renderX(container, ...)` that builds DOM imperatively and appends it. No
+  virtual DOM, no templating lib. Naming rules + migration status live in
+  [`MODULES.md`](MODULES.md) — read it before adding or renaming a module.
+- **`src/components/MovieDetail.js`** — the last legacy resident; it is
+  page-level, so it moves to `pages/DetailPage.js` in the planned `pages/` step,
+  not into `modules/`.
 - **`src/styles/`** — `variables.css` (CSS custom props), `global.css`,
-  `components.css` (the bulk). Class naming is BEM-ish:
+  `components.css` (the bulk, still monolithic). Class naming is BEM-ish:
   `block__element--modifier`.
-- **`catalog-api`** (separate VPS service, *not* in this repo) — proxies OPhim,
-  HMAC-signs images, runs the hero-ranking algorithm + TMDB trending, caches in
-  Valkey. Served at `img.bluesia.net/api/*`. This is where `worker.js` and
-  `trending.js` logic moved to.
+- **`docs/DESIGN.md` + `docs/tokens.json`** — the Netflix-style design reference
+  the tokens in `variables.css` derive from. Reference only, not built.
+- **`catalog-api`** (separate Node service on the VPS, *not* in this repo) —
+  proxies OPhim, HMAC-signs images, runs the hero-ranking algorithm + TMDB
+  trending/enrichment, caches in Valkey. Served at `img.bluesia.net/api/*`.
+  Source: `/srv/filmbluesia/catalog-api`. The old `worker.js` and `trending.js`
+  were deleted from this repo when that logic moved there (commit `81e498a`).
 
 ## Data flow & caching (important)
 
-All catalog data flows through the **VPS `catalog-api`** (`img.bluesia.net/api/*`),
-which proxies OPhim, signs images, and caches in **Valkey**. The frontend never
-touches OPhim or a Cloudflare Worker for data.
+Every network call the SPA makes goes to **one origin**: `img.bluesia.net` (VPS
+`catalog-api`) — data *and* images. Cloudflare only serves the static bundle; it
+runs **zero** compute per request.
 
-1. **Home page** → `GET img.bluesia.net/api/home-data`. Built by catalog-api
-   (hero ranking + TMDB trending), kept warm by a background refresh (~20 min) and
-   stored in Valkey under `catalog:c1:home`. To force a refresh: restart the
-   `catalog-api` container, or `DEL catalog:c1:home` in Valkey.
-2. **List / genre / country / detail** → `img.bluesia.net/api/{list,genre,country,movie}`.
-   catalog-api caches each signed payload in Valkey (`catalog:c1:*`, 30-min lists /
-   60-min detail). Bump `CACHE_NS` in catalog-api `server.js` to invalidate all.
-3. **Why this shape:** the SPA bills a Cloudflare Worker request per data fetch.
-   Moving catalog+signing to the VPS (which holds the HMAC secret and isn't
-   quota-limited) keeps `phim.bluesia.net` a zero-Worker static deployment. See the
-   `catalog-api` README on the VPS (`/srv/filmbluesia/catalog-api`).
+### Endpoints the frontend calls
+
+All defined in `src/api/ophim.js`. Keep this table in sync when adding one.
+
+| Client fn | Endpoint | Notes |
+|---|---|---|
+| `getHomeData` | `GET /api/home-data` | Whole home page in one shot: hero ranking + all rails |
+| `getNewMovies` | `GET /api/list?type=phim-moi-cap-nhat&page=` | |
+| `getMoviesByType` | `GET /api/list?type=&page=` | `phim-le`, `phim-bo`, `hoat-hinh`, `tv-shows` |
+| `getMoviesByGenre` | `GET /api/genre?slug=&page=` | |
+| `getMoviesByCountry` | `GET /api/country?slug=&page=` | |
+| `getMovieDetail` | `GET /api/movie/:slug` | |
+| `searchMovies` | `GET /api/search?keyword=&page=` | |
+| `getRecommendation` | `GET /api/recommendation/:mediaType/:tmdbId` | `mediaType` must be `movie`/`tv` — TMDB ids collide across the two. Legacy `/api/related` alias still served |
+
+### Caching layers
+
+1. **In-page** — `src/api/ophim.js` memoizes every response by URL for **5 min**
+   (`CACHE_TTL`). Cleared on hard reload; nothing else invalidates it.
+2. **Valkey on the VPS** — `catalog:c1:*`. `home` is kept warm by a background
+   refresh (~20 min); lists 30 min; detail 60 min; recommendations 30 days
+   (`catalog:c1:related:*` + reverse index `catalog:c1:idx:*` — key names kept
+   legacy on purpose, renaming would orphan a warm 30-day cache).
+3. **Cloudflare** — assets only. Never caches `/api/*`, which is a different host.
+
+**To force fresh data:** restart the `catalog-api` container (drops the warm home
+build), `DEL catalog:c1:home` in Valkey for just the home page, or bump `CACHE_NS`
+in catalog-api `server.js` to invalidate *everything* at once.
+
+**Why this shape:** each SPA data fetch used to bill a Cloudflare Worker request.
+Moving catalog + signing to the VPS — which holds the HMAC secret and isn't
+quota-limited — keeps `phim.bluesia.net` a zero-Worker static deployment. Full
+backend docs: the `catalog-api` README on the VPS (`/srv/filmbluesia/catalog-api`).
+
+**Debugging a data problem:** hit the endpoint directly first
+(`curl -s https://img.bluesia.net/api/home-data | head -c 400`). If that's stale
+or broken, it's a VPS/Valkey problem, not a frontend one — nothing in this repo
+can fix it.
 
 ## Conventions & gotchas
 

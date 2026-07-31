@@ -1,14 +1,13 @@
 /**
- * OPhim API Client
- * Base: https://ophim1.com
- * Images: signed URLs via https://img.bluesia.net (signed by Worker)
+ * Catalog API client
+ * Base: https://img.bluesia.net/api/* — the VPS catalog-api, which proxies
+ * OPhim, HMAC-signs image URLs, and caches in Valkey.
  */
 
-const API_BASE = 'https://ophim1.com';
 const IMAGE_CACHE_BASE = 'https://img.bluesia.net';
-// Catalog data (list/genre/country/detail) is fetched from the VPS catalog-api,
-// which signs image URLs and caches in Valkey — keeping the phim Worker out of
-// the per-request path. Home-data still comes from the Worker (see main.js).
+// Catalog data and images share one origin: the VPS catalog-api. The frontend
+// never calls OPhim directly, so phim.bluesia.net stays a zero-Worker static
+// deployment (no Cloudflare compute in the per-request path).
 const CATALOG_BASE = IMAGE_CACHE_BASE;
 
 // Simple in-memory cache with TTL (5 minutes)
@@ -111,24 +110,6 @@ export async function searchMovies(keyword, page = 1) {
 }
 
 /**
- * Get all genres
- * @returns {Promise<Array<{_id: string, name: string, slug: string}>>}
- */
-export async function getGenres() {
-  const data = await fetchJson(`${API_BASE}/v1/api/the-loai`);
-  return data.data?.items || data.items || [];
-}
-
-/**
- * Get all countries
- * @returns {Promise<Array<{_id: string, name: string, slug: string}>>}
- */
-export async function getCountries() {
-  const data = await fetchJson(`${API_BASE}/v1/api/quoc-gia`);
-  return data.data?.items || data.items || [];
-}
-
-/**
  * Get movies by genre slug
  */
 export async function getMoviesByGenre(genreSlug, page = 1) {
@@ -173,7 +154,7 @@ export async function getRecommendation(tmdbId, type = 'movie') {
 }
 
 // --- Image URL helpers ---
-// Worker signs all image URLs before they reach the client.
+// catalog-api signs all image URLs before they reach the client.
 // These functions are now pass-throughs — URLs are always full https:// signed URLs.
 
 export function posterUrl(path) {
@@ -211,4 +192,4 @@ export function normalizeListItem(item) {
   };
 }
 
-export { API_BASE, IMAGE_CACHE_BASE };
+export { IMAGE_CACHE_BASE };
