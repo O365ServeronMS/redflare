@@ -2,7 +2,7 @@
  * Heroslider - auto-rotating top 20 weekly-trending movies with crossfade.
  * Code name: "Heroslider". Visible label: "Phim Hot Trong Tuần".
  */
-import { posterUrl, thumbUrl } from '../../api/ophim.js';
+import { posterUrl, thumbUrl, upstreamFallback, attachImageFallback } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
 
 const ROTATE_INTERVAL = 8000;
@@ -24,6 +24,21 @@ function getBackdropUrl(movie) {
 // landscape poster_url.
 function getRailThumbUrl(movie) {
   return thumbUrl(movie.thumb_url || movie.poster_url);
+}
+
+// A background-image has no error event, so probe the URL and swap to the
+// upstream origin if the R2 copy is missing (see upstreamFallback). The probe
+// and the CSS background share one request — the browser dedupes them.
+function setBackdrop(el, movie) {
+  const url = getBackdropUrl(movie);
+  el.style.backgroundImage = `url(${url})`;
+  const upstream = upstreamFallback(url);
+  if (!upstream) return;
+  const probe = new Image();
+  probe.addEventListener('error', () => {
+    el.style.backgroundImage = `url(${upstream})`;
+  });
+  probe.src = url;
 }
 
 function getScore(movie) {
@@ -80,7 +95,7 @@ export function renderHeroSlider(container, movies) {
     const backdrop = document.createElement('div');
     backdrop.className = 'hero__backdrop';
     if (index === 0) backdrop.classList.add('hero__backdrop--active');
-    backdrop.style.backgroundImage = `url(${getBackdropUrl(movie)})`;
+    setBackdrop(backdrop, movie);
     hero.appendChild(backdrop);
 
     const overlay = document.createElement('div');
@@ -203,6 +218,7 @@ export function renderHeroSlider(container, movies) {
       goToSlide(index);
       resetAutoRotate();
     });
+    attachImageFallback(item.querySelector('img'));
     rail.appendChild(item);
     railButtons.push(item);
   });
@@ -269,7 +285,7 @@ export function renderHeroSlider(container, movies) {
   // Swap each backdrop to the correct variant when crossing the breakpoint.
   function applyBackdrops() {
     contentElements.forEach((el, i) => {
-      el.backdrop.style.backgroundImage = `url(${getBackdropUrl(slides[i])})`;
+      setBackdrop(el.backdrop, slides[i]);
     });
   }
   DESKTOP_MQ.addEventListener('change', applyBackdrops);

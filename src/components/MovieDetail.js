@@ -3,7 +3,7 @@
  * Fetches and renders all movie metadata, episodes, and player integration.
  */
 
-import { getMovieDetail, posterUrl, thumbUrl } from '../api/ophim.js';
+import { getMovieDetail, posterUrl, thumbUrl, attachImageFallback } from '../api/ophim.js';
 import { navigate } from '../router.js';
 import { renderPlayer } from '../modules/Player/Player.js';
 import { renderRecommendation } from '../modules/Recommendation/Recommendation.js';
@@ -139,6 +139,7 @@ export async function renderMovieDetail(container, slug) {
     thumb.src = thumbUrl(movie.thumb_url);
     thumb.alt = movie.name || '';
     thumb.loading = 'lazy';
+    attachImageFallback(thumb);
     heroInner.appendChild(thumb);
     banner.classList.add('hero--has-thumb');
     detail.classList.add('detail--has-thumb');

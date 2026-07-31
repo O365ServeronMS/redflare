@@ -1,7 +1,7 @@
 /**
  * PosterCard — individual movie poster card
  */
-import { thumbUrl, posterUrl } from '../../api/ophim.js';
+import { thumbUrl, posterUrl, upstreamFallback } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
 
 function getImdbScore(movie) {
@@ -49,8 +49,14 @@ export function renderPosterCard(container, movie, rank = null) {
   img.alt = movie.name;
   img.loading = 'lazy';
 
-  // Fallback on error
+  // Fallback on error: retry the upstream origin if the R2 copy is not there
+  // yet, then fall back to the wide artwork.
   img.addEventListener('error', () => {
+    const upstream = upstreamFallback(img.src);
+    if (upstream) {
+      img.src = upstream;
+      return;
+    }
     const fallback = posterUrl(movie.poster_url);
     if (img.src !== fallback) {
       img.src = fallback;

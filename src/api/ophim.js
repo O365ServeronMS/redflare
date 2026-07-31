@@ -165,6 +165,29 @@ export function thumbUrl(path) {
   return path || '';
 }
 
+// Artwork lives in R2 (redflarer2.bluesia.net), mirrored there by catalog-api.
+// The copy is made in the background, so the first viewer of a new title can
+// arrive before it lands; the bucket also expires objects after 150 days to stay
+// inside TMDB's 6-month caching limit. Object keys mirror the upstream path, so
+// the origin URL is rebuildable from the R2 URL alone — that is the fallback.
+const R2_BASE = 'https://redflarer2.bluesia.net/';
+
+export function upstreamFallback(url) {
+  if (!url || !url.startsWith(R2_BASE)) return '';
+  const key = url.slice(R2_BASE.length);
+  return key.startsWith('ophim/')
+    ? `https://img.ophim.live/${key.slice(6)}`
+    : `https://image.tmdb.org/${key}`;
+}
+
+// Point an <img> at its upstream origin if the R2 copy is not there yet.
+export function attachImageFallback(img) {
+  img.addEventListener('error', () => {
+    const upstream = upstreamFallback(img.src);
+    if (upstream) img.src = upstream;
+  });
+}
+
 // --- Normalize list item ---
 // The v1/api endpoints return slightly different shapes; normalize them
 
