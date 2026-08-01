@@ -6,17 +6,30 @@
 //              → built HERE: fetch OPhim directly, enrich with TMDB
 //              (worker/lib/enrich.js), map images to R2 (worker/lib/images.js).
 //              No VPS involved on a cache miss (Phase 3).
-//   /api/home-data, /api/recommendation/*, /api/related/*
+//   /api/home-data
+//              → built HERE too, but NOT per-request (Phase 4). A Cron
+//              Trigger (scheduled() below) rebuilds it hourly across 6
+//              sharded invocations (worker/lib/home.js) and stores the
+//              result in KV; this route just reads that KV key. See
+//              worker/lib/home.js for why home-data can't be built
+//              synchronously per-request the way list/genre/etc. are.
+//   /api/recommendation/*, /api/related/*
 //              → still proxied to the VPS catalog-api (img.bluesia.net) —
-//              Phase 4 (home) and Phase 5 (recommendation) move these later.
+//              Phase 5 moves these.
+//   /__cron/shard/:n, /__cron/refresh-home
+//              → internal, gated by the CRON_KEY secret. Not part of the
+//              public API surface — see worker/lib/home.js.
 //   anything else that isn't a static asset → env.ASSETS.fetch(request),
 //              which applies wrangler.toml's not_found_handling (SPA fallback)
 //
 // Every /api/* response (built here or proxied) goes through the SAME
 // caching shell: Cache API (hot tier, no daily write quota — see the Phase 2
-// note below) in front, with a durable last-known-good fallback (KV for
-// home-data, D1 for everything else except search) for when the origin
-// (OPhim/TMDB directly, or the VPS) is unreachable.
+// note below) in front, with a durable last-known-good fallback (D1 for
+// list/genre/country/movie/recommendation, nothing for search) for when the
+// origin (OPhim/TMDB directly, or the VPS) is unreachable. /api/home-data no
+// longer goes through that generic fallback — see handleHomeData() below,
+// its durable copy IS the KV value the cron maintains, there's no separate
+// "upstream fetch failed" case to fall back from anymore.
 //
 // Why Cache API and not KV for the hot tier: KV's free-plan write quota is
 // 1,000/day, and /api/search has effectively unbounded keyword cardinality —
@@ -28,25 +41,24 @@
 // per-request control over the x-catalog-cache header (hit/miss/stale-vps-down
 // is a documented debugging contract in redflare/CLAUDE.md), which Workers
 // Caching's transparent replay wouldn't give us.
-//
-// KV is used for exactly one thing: a single durable copy of /api/home-data.
-// D1 holds the durable fallback for list/genre/country/movie/recommendation
-// (table `stale`, migrations/0001_stale.sql). /api/search intentionally gets
-// NO durable fallback: with unbounded keyword cardinality, persisting every
-// query forever isn't safe on any quota, and a search miss during an outage
-// degrading to empty results is an acceptable trade-off.
 
 import { createEnrich } from './lib/enrich.js';
 import { mapItemsImages, mapItemImages } from './lib/images.js';
+import {
+  HOME_KV_KEY,
+  CRON_SHARD_BUILDERS,
+  runHomeRefresh,
+  buildHomeFallback,
+} from './lib/home.js';
 
 const UPSTREAM = 'https://img.bluesia.net';
 const OPHIM_BASE = 'https://ophim1.com';
 
 // Mirrors catalog-api's own Valkey TTLs (catalog-api/src/server.js) — no
 // reason to diverge, OPhim/TMDB freshness expectations haven't changed just
-// because the fetch now happens here instead of on the VPS.
+// because the fetch now happens here instead of on the VPS. home-data isn't
+// in this table any more — handleHomeData() sets its own Cache-Control.
 const TTL = {
-  home: 30 * 60,
   movie: 60 * 60,
   search: 10 * 60,
   recommendation: 30 * 24 * 60 * 60,
@@ -54,7 +66,6 @@ const TTL = {
 };
 
 function ttlFor(pathname) {
-  if (pathname === '/api/home-data') return TTL.home;
   if (pathname.startsWith('/api/movie/')) return TTL.movie;
   if (pathname.startsWith('/api/search')) return TTL.search;
   if (pathname.startsWith('/api/recommendation/') || pathname.startsWith('/api/related/')) {
@@ -64,7 +75,6 @@ function ttlFor(pathname) {
 }
 
 const HOME_PATH = '/api/home-data';
-const HOME_KV_KEY = 'home:last-known-good';
 
 function isSearch(pathname) {
   return pathname.startsWith('/api/search');
@@ -122,7 +132,8 @@ async function buildEnrichedList(enrich, upstreamUrl) {
 
 // Resolve a request the Worker now builds itself. Returns a zero-arg async
 // builder function, or null if this path should still be proxied to the VPS
-// (home-data, recommendation, related — untouched in this phase).
+// (recommendation, related — untouched in this phase; home-data is
+// intercepted before this function is ever called, see handleApi()).
 function localBuilder(env, url) {
   const pathname = url.pathname;
 
@@ -174,20 +185,20 @@ function localBuilder(env, url) {
     };
   }
 
-  return null; // home-data, recommendation, related -> proxy to VPS
+  return null; // recommendation, related -> proxy to VPS
 }
 
-// --- Durable last-known-good read/write, split by path (unchanged from Phase 2) ---
+// --- Durable last-known-good read/write for list/genre/country/movie/
+// recommendation (unchanged from Phase 2/3). home-data no longer flows
+// through this — see handleHomeData(). ---
 
 async function readStale(env, pathname, cacheKey) {
-  if (pathname === HOME_PATH) return env.CATALOG_KV.get(HOME_KV_KEY);
   if (isSearch(pathname)) return null;
   const row = await env.DB.prepare('SELECT body FROM stale WHERE path = ?1').bind(cacheKey).first();
   return row ? row.body : null;
 }
 
 function writeStale(env, pathname, cacheKey, body) {
-  if (pathname === HOME_PATH) return env.CATALOG_KV.put(HOME_KV_KEY, body);
   if (isSearch(pathname)) return Promise.resolve();
   return env.DB.prepare(
     'INSERT INTO stale (path, body, updated_at) VALUES (?1, ?2, ?3) ' +
@@ -197,17 +208,84 @@ function writeStale(env, pathname, cacheKey, body) {
     .run();
 }
 
+// --- /api/home-data (Phase 4) ------------------------------------------------
+// Reads the KV value the cron (worker/lib/home.js's runHomeRefresh) already
+// maintains — no per-request OPhim/TMDB fetch, no JSON.parse of the ~150KB
+// payload. Still goes through the Cache API hot tier below it (cheaper than
+// a KV read on every request, and free of any daily quota). The only case
+// that does real work here is a KV miss, which should only ever happen once
+// per Worker deployment, before the first cron cycle completes.
+
+async function handleHomeData(env, ctx, cache, cacheReq, method) {
+  let body = await env.CATALOG_KV.get(HOME_KV_KEY);
+  let cacheStatus = 'miss';
+  if (body == null) {
+    const payload = await buildHomeFallback(env);
+    body = JSON.stringify(payload);
+    cacheStatus = 'miss-fallback';
+    // Warms KV so concurrent/subsequent requests during this bootstrap
+    // window don't each redo the same OPhim fetch; the next successful cron
+    // cycle overwrites this with the real trending-matched build regardless.
+    ctx.waitUntil(env.CATALOG_KV.put(HOME_KV_KEY, body));
+  }
+
+  const cacheableRes = new Response(body, {
+    headers: {
+      'content-type': 'application/json',
+      'x-catalog-cache': cacheStatus,
+      'cache-control': 'public, s-maxage=1800',
+    },
+  });
+  ctx.waitUntil(cache.put(cacheReq, cacheableRes.clone()));
+
+  return new Response(method === 'HEAD' ? null : body, {
+    headers: { 'content-type': 'application/json', 'x-catalog-cache': cacheStatus },
+  });
+}
+
+// --- /__cron/* (Phase 4) -----------------------------------------------------
+// Internal-only. A wrong/missing x-cron-key returns 404, not 403 — a 403
+// would confirm to a prober that this path exists at all.
+
+function checkCronKey(request, env) {
+  const key = request.headers.get('x-cron-key');
+  return Boolean(env.CRON_KEY) && key === env.CRON_KEY;
+}
+
+async function handleCronShard(request, env, n) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const builder = CRON_SHARD_BUILDERS[n];
+  if (!builder) return new Response('Not found', { status: 404 });
+  try {
+    const items = await builder(env);
+    return new Response(JSON.stringify(items), { headers: { 'content-type': 'application/json' } });
+  } catch (err) {
+    console.error('[cron shard]', n, err.message);
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 502,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+}
+
+// Manual trigger for runHomeRefresh — same orchestrator scheduled() calls,
+// exposed so a refresh can be forced on demand (right after a deploy, or to
+// debug a stuck home:current) instead of waiting for the next cron tick.
+async function handleCronRefreshHome(request, env, url) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const result = await runHomeRefresh(env, url.origin);
+  return new Response(JSON.stringify(result), {
+    status: result.ok ? 200 : 502,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
 async function handleApi(request, env, ctx, url) {
   const method = request.method;
   if (method !== 'GET' && method !== 'HEAD') {
     return new Response('Method not allowed', { status: 405 });
   }
 
-  const cacheKey = url.pathname + url.search;
-  const ttl = ttlFor(url.pathname);
-
-  // Cache API keys are matched by request, always as GET so HEAD reuses the
-  // same entry a prior GET populated (and vice versa).
   const cache = caches.default;
   const cacheReq = new Request(url.toString(), { method: 'GET' });
 
@@ -217,6 +295,17 @@ async function handleApi(request, env, ctx, url) {
     headers.set('x-catalog-cache', 'hit');
     return new Response(method === 'HEAD' ? null : hit.body, { headers, status: hit.status });
   }
+
+  // LEGACY_UPSTREAM=1 also pulls home-data back into the generic proxy path
+  // below (falls through to `fetch(UPSTREAM + cacheKey)`, build stays null
+  // since localBuilder doesn't know this path either) — one flag for "go
+  // back to full VPS dependency", covering both Phase 3 and Phase 4 at once.
+  if (url.pathname === HOME_PATH && env.LEGACY_UPSTREAM !== '1') {
+    return handleHomeData(env, ctx, cache, cacheReq, method);
+  }
+
+  const cacheKey = url.pathname + url.search;
+  const ttl = ttlFor(url.pathname);
 
   // env.LEGACY_UPSTREAM = '1' forces every path back through the VPS proxy,
   // bypassing the local builders below entirely — the documented Phase 3
@@ -295,9 +384,24 @@ async function handleApi(request, env, ctx, url) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname.startsWith('/__cron/shard/')) {
+      const n = url.pathname.slice('/__cron/shard/'.length);
+      return handleCronShard(request, env, n);
+    }
+    if (url.pathname === '/__cron/refresh-home') {
+      return handleCronRefreshHome(request, env, url);
+    }
     if (url.pathname.startsWith('/api/')) {
       return handleApi(request, env, ctx, url);
     }
     return env.ASSETS.fetch(request);
+  },
+
+  async scheduled(event, env, ctx) {
+    // env.ROUTE_ORIGIN isn't a thing Workers expose to scheduled() (no
+    // incoming request to read a Host header from), so the shard/orchestrator
+    // self-calls use the production custom domain directly.
+    ctx.waitUntil(runHomeRefresh(env, 'https://phim.bluesia.net'));
   },
 };

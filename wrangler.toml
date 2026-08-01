@@ -50,15 +50,25 @@ database_id = "6eaf211c-0fcb-4404-9cff-718048e7c0c7"
 binding = "BUCKET"
 bucket_name = "redflare-r2"
 
-# LEGACY_UPSTREAM=1 is the Phase 3 rollback switch: forces every /api/* path
-# back through the VPS proxy (img.bluesia.net), bypassing the Worker's own
-# OPhim+TMDB builders (worker/index.js localBuilder / worker/lib/*) entirely.
-# Flip via `wrangler deploy --var LEGACY_UPSTREAM:1` or the dashboard — no
-# code revert or redeploy needed. Default "0" (Worker builds list/genre/
-# country/search/movie itself; home-data/recommendation/related still
-# proxy regardless of this flag — that's unconditional until Phase 4/5).
+# LEGACY_UPSTREAM=1 is the emergency rollback switch: forces every /api/*
+# path back through the VPS proxy (img.bluesia.net), bypassing the Worker's
+# own OPhim+TMDB builders (worker/index.js localBuilder / worker/lib/*) AND
+# the Phase 4 home-data cron/KV path entirely -- one flag for "go back to
+# full VPS dependency". Flip via `wrangler deploy --var LEGACY_UPSTREAM:1`
+# or the dashboard, no code revert or redeploy needed. Default "0".
+# recommendation/related always proxy regardless of this flag -- that's
+# unconditional until Phase 5.
 [vars]
 LEGACY_UPSTREAM = "0"
+
+# Home-data refresh (worker/lib/home.js runHomeRefresh, via scheduled()).
+# Hourly, matching the 60-minute cadence the VPS owner confirmed acceptable
+# 2026-08-01 (see plan.md Phase 4) -- keeps KV writes for the trending-id
+# cache and home:current well under the free tier's 1,000/day quota. Can
+# also be triggered on demand: GET /__cron/refresh-home with header
+# x-cron-key: <CRON_KEY secret>.
+[triggers]
+crons = ["0 * * * *"]
 
 # Ships Worker logs to the dashboard (Workers Logs). Must be the LAST section
 # in this file — TOML has no block-end marker, so any top-level key=value
