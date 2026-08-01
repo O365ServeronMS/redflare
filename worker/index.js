@@ -2,14 +2,21 @@
 // survives the VPS being unreachable. See bluesiaOM/context/state-redflare-cf-worker.md
 // for the full migration state. Short version of what this file does today:
 //
-//   /api/*   → handled here: Cache API (hot tier) in front of img.bluesia.net,
-//              with a durable last-known-good fallback (KV for home-data, D1
-//              for everything else except search) for when the VPS is down.
+//   /api/list, /api/genre, /api/country, /api/search, /api/movie/:slug
+//              → built HERE: fetch OPhim directly, enrich with TMDB
+//              (worker/lib/enrich.js), map images to R2 (worker/lib/images.js).
+//              No VPS involved on a cache miss (Phase 3).
+//   /api/home-data, /api/recommendation/*, /api/related/*
+//              → still proxied to the VPS catalog-api (img.bluesia.net) —
+//              Phase 4 (home) and Phase 5 (recommendation) move these later.
 //   anything else that isn't a static asset → env.ASSETS.fetch(request),
 //              which applies wrangler.toml's not_found_handling (SPA fallback)
 //
-// Requests that match a literal file in dist/ never reach this script at all
-// — Cloudflare's default asset routing serves those directly.
+// Every /api/* response (built here or proxied) goes through the SAME
+// caching shell: Cache API (hot tier, no daily write quota — see the Phase 2
+// note below) in front, with a durable last-known-good fallback (KV for
+// home-data, D1 for everything else except search) for when the origin
+// (OPhim/TMDB directly, or the VPS) is unreachable.
 //
 // Why Cache API and not KV for the hot tier: KV's free-plan write quota is
 // 1,000/day, and /api/search has effectively unbounded keyword cardinality —
@@ -22,19 +29,22 @@
 // is a documented debugging contract in redflare/CLAUDE.md), which Workers
 // Caching's transparent replay wouldn't give us.
 //
-// KV is used for exactly one thing: a single durable copy of /api/home-data
-// (~24-48 writes/day at a 30-60 min refresh cadence). D1 holds the durable
-// fallback for list/genre/country/movie/recommendation (table `stale`,
-// migrations/0001_stale.sql) — D1's free write quota is 100,000/day, comfortably
-// above what that bounded set of paths can generate. /api/search intentionally
-// gets NO durable fallback: with unbounded keyword cardinality, persisting
-// every query forever isn't safe on any quota, and a search miss during a VPS
-// outage degrading to empty results is an acceptable trade-off.
+// KV is used for exactly one thing: a single durable copy of /api/home-data.
+// D1 holds the durable fallback for list/genre/country/movie/recommendation
+// (table `stale`, migrations/0001_stale.sql). /api/search intentionally gets
+// NO durable fallback: with unbounded keyword cardinality, persisting every
+// query forever isn't safe on any quota, and a search miss during an outage
+// degrading to empty results is an acceptable trade-off.
+
+import { createEnrich } from './lib/enrich.js';
+import { mapItemsImages, mapItemImages } from './lib/images.js';
 
 const UPSTREAM = 'https://img.bluesia.net';
+const OPHIM_BASE = 'https://ophim1.com';
 
 // Mirrors catalog-api's own Valkey TTLs (catalog-api/src/server.js) — no
-// reason to diverge, the VPS is still the source of truth for freshness.
+// reason to diverge, OPhim/TMDB freshness expectations haven't changed just
+// because the fetch now happens here instead of on the VPS.
 const TTL = {
   home: 30 * 60,
   movie: 60 * 60,
@@ -60,13 +70,115 @@ function isSearch(pathname) {
   return pathname.startsWith('/api/search');
 }
 
-function jsonResponse(body, extraHeaders) {
-  return new Response(body, {
-    headers: { 'content-type': 'application/json', ...extraHeaders },
-  });
+// --- OPhim fetch + local list/detail builders (Phase 3) ---------------------
+// Ported from catalog-api/src/server.js's route handlers. Each builder does
+// exactly one OPhim fetch, then enrich.enrichListPayload/enrichDetailPayload
+// (up to ~24 TMDB fetches, bounded to 6 concurrent — worker/lib/enrich.js)
+// runs against it. Worst case subrequest budget for a 24-item page: 1 OPhim +
+// 24 TMDB meta + (rare) up to 24 IMDB-resolve fallbacks = 49, under the free
+// plan's 50/invocation cap — see state.md Phase 3 log for how this was sized.
+
+function httpError(message, status) {
+  return Object.assign(new Error(message), { status });
 }
 
-// Durable last-known-good read/write, split by path per the comment above.
+async function fetchOphimJson(url) {
+  const res = await fetch(url, {
+    headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
+  });
+  if (!res.ok) throw httpError(`OPhim upstream ${res.status}`, res.status);
+  return res.json();
+}
+
+// Map images inside an OPhim list payload ({ items } or { data: { items } }),
+// mirrors catalog-api's signListPayload minus the signing (and minus the
+// reverse-index side effect — that's Phase 5).
+function mapListPayloadImages(data) {
+  const d = data?.data || data;
+  if (d?.items?.length) {
+    d.items = mapItemsImages(d.items);
+    if (data.data) data.data.items = d.items;
+    else data.items = d.items;
+  }
+  return data;
+}
+
+function mapDetailPayloadImages(data) {
+  const item = data?.data?.item || data?.item || data?.movie;
+  if (item) {
+    const mapped = mapItemImages(item);
+    if (data.data?.item) data.data.item = mapped;
+    else if (data.item) data.item = mapped;
+    else if (data.movie) data.movie = mapped;
+  }
+  return data;
+}
+
+async function buildEnrichedList(enrich, upstreamUrl) {
+  const data = await fetchOphimJson(upstreamUrl);
+  await enrich.enrichListPayload(data);
+  return mapListPayloadImages(data);
+}
+
+// Resolve a request the Worker now builds itself. Returns a zero-arg async
+// builder function, or null if this path should still be proxied to the VPS
+// (home-data, recommendation, related — untouched in this phase).
+function localBuilder(env, url) {
+  const pathname = url.pathname;
+
+  if (pathname === '/api/list') {
+    const type = url.searchParams.get('type') || '';
+    const page = url.searchParams.get('page') || '1';
+    if (!type) throw httpError('Missing type', 400);
+    const upstream = type === 'phim-moi-cap-nhat'
+      ? `${OPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=${page}`
+      : `${OPHIM_BASE}/v1/api/danh-sach/${type}?page=${page}`;
+    return () => buildEnrichedList(createEnrich(env), upstream);
+  }
+
+  if (pathname === '/api/genre') {
+    const slug = url.searchParams.get('slug') || '';
+    const page = url.searchParams.get('page') || '1';
+    if (!slug) throw httpError('Missing slug', 400);
+    return () =>
+      buildEnrichedList(createEnrich(env), `${OPHIM_BASE}/v1/api/the-loai/${slug}?page=${page}`);
+  }
+
+  if (pathname === '/api/country') {
+    const slug = url.searchParams.get('slug') || '';
+    const page = url.searchParams.get('page') || '1';
+    if (!slug) throw httpError('Missing slug', 400);
+    return () =>
+      buildEnrichedList(createEnrich(env), `${OPHIM_BASE}/v1/api/quoc-gia/${slug}?page=${page}`);
+  }
+
+  if (pathname === '/api/search') {
+    const keyword = (url.searchParams.get('keyword') || '').trim();
+    const page = url.searchParams.get('page') || '1';
+    if (keyword.length < 2) return async () => ({ data: { items: [] } });
+    return () =>
+      buildEnrichedList(
+        createEnrich(env),
+        `${OPHIM_BASE}/v1/api/tim-kiem?keyword=${encodeURIComponent(keyword)}&page=${page}`
+      );
+  }
+
+  if (pathname.startsWith('/api/movie/')) {
+    const slug = pathname.slice('/api/movie/'.length);
+    if (!slug) throw httpError('Missing slug', 400);
+    return async () => {
+      const enrich = createEnrich(env);
+      const data = await fetchOphimJson(`${OPHIM_BASE}/phim/${slug}`);
+      await enrich.enrichDetailPayload(data);
+      return mapDetailPayloadImages(data);
+    };
+  }
+
+  return null; // home-data, recommendation, related -> proxy to VPS
+}
+
+// --- Durable last-known-good read/write, split by path (unchanged from Phase 2) ---
+
 async function readStale(env, pathname, cacheKey) {
   if (pathname === HOME_PATH) return env.CATALOG_KV.get(HOME_KV_KEY);
   if (isSearch(pathname)) return null;
@@ -106,16 +218,42 @@ async function handleApi(request, env, ctx, url) {
     return new Response(method === 'HEAD' ? null : hit.body, { headers, status: hit.status });
   }
 
+  // env.LEGACY_UPSTREAM = '1' forces every path back through the VPS proxy,
+  // bypassing the local builders below entirely — the documented Phase 3
+  // rollback, no redeploy needed (just `wrangler deploy --var LEGACY_UPSTREAM:1`
+  // or flip it in the dashboard).
+  let build = null;
   try {
-    const res = await fetch(UPSTREAM + cacheKey, {
-      headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
+    build = env.LEGACY_UPSTREAM === '1' ? null : localBuilder(env, url);
+  } catch (err) {
+    // Thrown synchronously by localBuilder for a malformed request (missing
+    // required query param) — matches catalog-api's own validation, which
+    // also returns 4xx directly with no caching.
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: err.status || 400,
+      headers: { 'content-type': 'application/json' },
     });
-    if (!res.ok) throw new Error(`upstream ${res.status}`);
-    const body = await res.text();
+  }
 
-    const cacheableRes = jsonResponse(body, {
-      'x-catalog-cache': 'miss',
-      'cache-control': `public, s-maxage=${ttl}`,
+  try {
+    let body;
+    if (build) {
+      const payload = await build();
+      body = JSON.stringify(payload);
+    } else {
+      const res = await fetch(UPSTREAM + cacheKey, {
+        headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
+      });
+      if (!res.ok) throw new Error(`upstream ${res.status}`);
+      body = await res.text();
+    }
+
+    const cacheableRes = new Response(body, {
+      headers: {
+        'content-type': 'application/json',
+        'x-catalog-cache': 'miss',
+        'cache-control': `public, s-maxage=${ttl}`,
+      },
     });
     ctx.waitUntil(cache.put(cacheReq, cacheableRes.clone()));
     ctx.waitUntil(Promise.resolve(writeStale(env, url.pathname, cacheKey, body)).catch((err) => {
@@ -126,6 +264,16 @@ async function handleApi(request, env, ctx, url) {
       headers: { 'content-type': 'application/json', 'x-catalog-cache': 'miss' },
     });
   } catch (err) {
+    // A genuine 4xx from OPhim itself (e.g. an unknown genre/country slug) —
+    // matches catalog-api's own behavior: return the real status, no caching,
+    // no durable-fallback lookup (a 404 isn't "the origin is down").
+    if (err.status && err.status >= 400 && err.status < 500) {
+      return new Response(method === 'HEAD' ? null : JSON.stringify({ error: err.message }), {
+        status: err.status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
     let stale = null;
     try {
       stale = await readStale(env, url.pathname, cacheKey);

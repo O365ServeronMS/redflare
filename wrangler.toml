@@ -50,6 +50,16 @@ database_id = "6eaf211c-0fcb-4404-9cff-718048e7c0c7"
 binding = "BUCKET"
 bucket_name = "redflare-r2"
 
+# LEGACY_UPSTREAM=1 is the Phase 3 rollback switch: forces every /api/* path
+# back through the VPS proxy (img.bluesia.net), bypassing the Worker's own
+# OPhim+TMDB builders (worker/index.js localBuilder / worker/lib/*) entirely.
+# Flip via `wrangler deploy --var LEGACY_UPSTREAM:1` or the dashboard — no
+# code revert or redeploy needed. Default "0" (Worker builds list/genre/
+# country/search/movie itself; home-data/recommendation/related still
+# proxy regardless of this flag — that's unconditional until Phase 4/5).
+[vars]
+LEGACY_UPSTREAM = "0"
+
 # Ships Worker logs to the dashboard (Workers Logs). Must be the LAST section
 # in this file — TOML has no block-end marker, so any top-level key=value
 # written after a [table] header (even routes/main above) gets silently
