@@ -1,5 +1,5 @@
 name = "redflare"
-compatibility_date = "2024-03-20"
+compatibility_date = "2026-08-01"
 workers_dev = false
 preview_urls = false
 
@@ -30,9 +30,32 @@ binding = "CATALOG_KV"
 id = "a4a69489a7da49d3895c9ed2389b7055"
 
 # DB: durable last-known-good copy for list/genre/country/movie/recommendation
-# (table `stale`, migrations/0001_stale.sql). /api/search has no durable
-# fallback by design — unbounded keyword cardinality.
+# (table `stale`, migrations/0001_stale.sql), plus the reverse index /
+# recommendation cache / R2-mirroring bookkeeping tables added for later
+# phases (migrations/0002_recs_idx_mirror.sql — idx, recs, mirrored,
+# mirror_queue are not read/written by the Worker yet, that's Phase 5/6).
 [[d1_databases]]
 binding = "DB"
 database_name = "redflare-db"
 database_id = "6eaf211c-0fcb-4404-9cff-718048e7c0c7"
+
+# BUCKET: R2 bucket that already mirrors artwork for redflarer2.bluesia.net
+# (mirrored there by the VPS catalog-api today; the Worker doesn't write to
+# it yet — that's Phase 6, when mirroring moves off the VPS). Binding name
+# deliberately differs from the "Redflare-R2" name briefly added via the
+# dashboard on 2026-07-31 (and silently dropped by the next git-push deploy,
+# since dashboard-only bindings aren't in this file) — binding name only
+# affects code, not the bucket itself.
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "redflare-r2"
+
+# Ships Worker logs to the dashboard (Workers Logs). Must be the LAST section
+# in this file — TOML has no block-end marker, so any top-level key=value
+# written after a [table] header (even routes/main above) gets silently
+# absorbed into that table instead of staying top-level. Learned this the
+# hard way: an earlier edit placed [observability] before `routes`/`main`
+# and wrangler warned "Unexpected fields found in observability field:
+# routes, main" — both had been swallowed.
+[observability]
+enabled = true
