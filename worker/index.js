@@ -13,12 +13,16 @@
 //              result in KV; this route just reads that KV key. See
 //              worker/lib/home.js for why home-data can't be built
 //              synchronously per-request the way list/genre/etc. are.
-//   /api/recommendation/*, /api/related/*
-//              → still proxied to the VPS catalog-api (img.bluesia.net) —
-//              Phase 5 moves these.
+//   /api/recommendation/:type/:id, /api/related/:type/:id, /api/related/:id
+//              → built HERE (Phase 5): TMDB recommendations matched to OPhim
+//              via a tmdb.id → item reverse index in D1 (table `idx`), with a
+//              bounded live OPhim search fallback, cached in D1 table `recs`
+//              (30d/1h conditional TTL). See worker/lib/recommendation.js.
 //   /__cron/shard/:n, /__cron/refresh-home
 //              → internal, gated by the CRON_KEY secret. Not part of the
-//              public API surface — see worker/lib/home.js.
+//              public API surface — see worker/lib/home.js. The shards also
+//              opportunistically populate the `idx` reverse index; the hourly
+//              cron additionally sweeps expired idx/recs rows.
 //   anything else that isn't a static asset → env.ASSETS.fetch(request),
 //              which applies wrangler.toml's not_found_handling (SPA fallback)
 //
@@ -50,6 +54,15 @@ import {
   runHomeRefresh,
   buildHomeFallback,
 } from './lib/home.js';
+import {
+  buildRecommendation,
+  readRecsCache,
+  writeRecsCache,
+  cleanupRecTables,
+  indexItems,
+  TTL_RELATED,
+  TTL_RELATED_EMPTY,
+} from './lib/recommendation.js';
 
 const UPSTREAM = 'https://img.bluesia.net';
 const OPHIM_BASE = 'https://ophim1.com';
@@ -131,9 +144,10 @@ async function buildEnrichedList(enrich, upstreamUrl) {
 }
 
 // Resolve a request the Worker now builds itself. Returns a zero-arg async
-// builder function, or null if this path should still be proxied to the VPS
-// (recommendation, related — untouched in this phase; home-data is
-// intercepted before this function is ever called, see handleApi()).
+// builder function, or null to fall through to the VPS proxy. home-data and
+// recommendation are intercepted in handleApi() before this is ever called
+// (unless LEGACY_UPSTREAM=1, in which case everything falls through here to
+// null → proxy).
 function localBuilder(env, url) {
   const pathname = url.pathname;
 
@@ -188,9 +202,11 @@ function localBuilder(env, url) {
   return null; // recommendation, related -> proxy to VPS
 }
 
-// --- Durable last-known-good read/write for list/genre/country/movie/
-// recommendation (unchanged from Phase 2/3). home-data no longer flows
-// through this — see handleHomeData(). ---
+// --- Durable last-known-good read/write for list/genre/country/movie
+// (unchanged from Phase 2/3). home-data (KV, see handleHomeData) and
+// recommendation (D1 `recs`, see handleRecommendation) have their own durable
+// layers and no longer flow through this generic `stale` table — except when
+// LEGACY_UPSTREAM=1 routes them back through the proxy path below. ---
 
 async function readStale(env, pathname, cacheKey) {
   if (isSearch(pathname)) return null;
@@ -243,6 +259,73 @@ async function handleHomeData(env, ctx, cache, cacheReq, method) {
   });
 }
 
+// --- /api/recommendation, /api/related (Phase 5) -----------------------------
+// Built here now instead of proxied. Cache API hot tier (checked in handleApi)
+// sits in front; this handler's durable layer is the D1 `recs` table with the
+// VPS's conditional TTL (30d real / 1h empty), not the generic `stale` table.
+
+function parseRecommendationPath(pathname) {
+  // /api/recommendation/:type/:tmdb_id  |  /api/related/:type/:tmdb_id
+  let m = pathname.match(/^\/api\/(?:recommendation|related)\/(movie|tv)\/([^/]+)$/);
+  if (m) return { type: m[1], tmdbId: m[2] };
+  // /api/related/:tmdb_id (legacy, no type — defaults to movie, matches VPS)
+  m = pathname.match(/^\/api\/related\/([^/]+)$/);
+  if (m) return { type: 'movie', tmdbId: m[1] };
+  return null;
+}
+
+async function handleRecommendation(env, ctx, cache, cacheReq, method, type, tmdbId) {
+  // Cache API was already checked (and missed) in handleApi. Next tier: the
+  // durable D1 recs cache.
+  let body = null;
+  try {
+    body = await readRecsCache(env, type, tmdbId);
+  } catch (err) {
+    console.error('[recs read]', err.message);
+  }
+
+  let cacheStatus;
+  let hasItems;
+  if (body != null) {
+    cacheStatus = 'd1-recs';
+    try {
+      hasItems = (JSON.parse(body).items || []).length > 0;
+    } catch {
+      hasItems = true;
+    }
+  } else {
+    cacheStatus = 'miss';
+    let payload;
+    try {
+      payload = await buildRecommendation(env, type, tmdbId);
+    } catch (err) {
+      console.error('[recommendation]', err.message);
+      payload = { items: [] };
+    }
+    body = JSON.stringify(payload);
+    hasItems = payload.items.length > 0;
+    ctx.waitUntil(
+      writeRecsCache(env, type, tmdbId, body, hasItems).catch((err) =>
+        console.error('[recs write]', err.message)
+      )
+    );
+  }
+
+  const ttl = hasItems ? TTL_RELATED : TTL_RELATED_EMPTY;
+  const cacheableRes = new Response(body, {
+    headers: {
+      'content-type': 'application/json',
+      'x-catalog-cache': cacheStatus,
+      'cache-control': `public, s-maxage=${ttl}`,
+    },
+  });
+  ctx.waitUntil(cache.put(cacheReq, cacheableRes.clone()));
+
+  return new Response(method === 'HEAD' ? null : body, {
+    headers: { 'content-type': 'application/json', 'x-catalog-cache': cacheStatus },
+  });
+}
+
 // --- /__cron/* (Phase 4) -----------------------------------------------------
 // Internal-only. A wrong/missing x-cron-key returns 404, not 403 — a 403
 // would confirm to a prober that this path exists at all.
@@ -252,12 +335,17 @@ function checkCronKey(request, env) {
   return Boolean(env.CRON_KEY) && key === env.CRON_KEY;
 }
 
-async function handleCronShard(request, env, n) {
+async function handleCronShard(request, env, ctx, n) {
   if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
   const builder = CRON_SHARD_BUILDERS[n];
   if (!builder) return new Response('Not found', { status: 404 });
   try {
     const items = await builder(env);
+    // Seed the `idx` reverse index with this shard's items (Phase 5) — the
+    // hourly home refresh is the primary source of index coverage for the
+    // popular titles recommendations point at (VPS's indexHomePayload).
+    // Fire-and-forget: the returned items don't depend on the write landing.
+    ctx.waitUntil(indexItems(env, items).catch((e) => console.error('[shard idx]', n, e.message)));
     return new Response(JSON.stringify(items), { headers: { 'content-type': 'application/json' } });
   } catch (err) {
     console.error('[cron shard]', n, err.message);
@@ -296,12 +384,18 @@ async function handleApi(request, env, ctx, url) {
     return new Response(method === 'HEAD' ? null : hit.body, { headers, status: hit.status });
   }
 
-  // LEGACY_UPSTREAM=1 also pulls home-data back into the generic proxy path
-  // below (falls through to `fetch(UPSTREAM + cacheKey)`, build stays null
-  // since localBuilder doesn't know this path either) — one flag for "go
-  // back to full VPS dependency", covering both Phase 3 and Phase 4 at once.
-  if (url.pathname === HOME_PATH && env.LEGACY_UPSTREAM !== '1') {
-    return handleHomeData(env, ctx, cache, cacheReq, method);
+  // LEGACY_UPSTREAM=1 pulls home-data AND recommendation back into the generic
+  // proxy path below (falls through to `fetch(UPSTREAM + cacheKey)`, build
+  // stays null since localBuilder doesn't know these paths either) — one flag
+  // for "go back to full VPS dependency", covering Phase 3/4/5 at once.
+  if (env.LEGACY_UPSTREAM !== '1') {
+    if (url.pathname === HOME_PATH) {
+      return handleHomeData(env, ctx, cache, cacheReq, method);
+    }
+    const rec = parseRecommendationPath(url.pathname);
+    if (rec) {
+      return handleRecommendation(env, ctx, cache, cacheReq, method, rec.type, rec.tmdbId);
+    }
   }
 
   const cacheKey = url.pathname + url.search;
@@ -329,6 +423,17 @@ async function handleApi(request, env, ctx, url) {
     if (build) {
       const payload = await build();
       body = JSON.stringify(payload);
+      // Opportunistically index a freshly-built movie detail into the `idx`
+      // reverse index (Phase 5) so recommendations can resolve it by tmdb.id
+      // without a live OPhim search — same side effect the VPS did on every
+      // signed movie payload. List/genre/country/search deliberately do NOT
+      // index (see worker/lib/recommendation.js deviation #2).
+      if (url.pathname.startsWith('/api/movie/')) {
+        const item = payload?.data?.item || payload?.item || payload?.movie;
+        if (item?.tmdb?.id) {
+          ctx.waitUntil(indexItems(env, [item]).catch((e) => console.error('[movie idx]', e.message)));
+        }
+      }
     } else {
       const res = await fetch(UPSTREAM + cacheKey, {
         headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
@@ -387,7 +492,7 @@ export default {
 
     if (url.pathname.startsWith('/__cron/shard/')) {
       const n = url.pathname.slice('/__cron/shard/'.length);
-      return handleCronShard(request, env, n);
+      return handleCronShard(request, env, ctx, n);
     }
     if (url.pathname === '/__cron/refresh-home') {
       return handleCronRefreshHome(request, env);
@@ -400,5 +505,7 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runHomeRefresh(env));
+    // Sweep expired idx (>45d) / recs rows in the same hourly cron (Phase 5).
+    ctx.waitUntil(cleanupRecTables(env).catch((e) => console.error('[rec cleanup]', e.message)));
   },
 };
