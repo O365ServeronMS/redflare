@@ -83,16 +83,26 @@ implementation rather than after mistakes.
 ## What this is
 
 `phim.bluesia.net` — a Vietnamese movie-streaming front-end. **Vanilla JS SPA**
-(no framework), built with Vite, deployed to Cloudflare as static assets **plus
-a thin Worker** (`worker/index.js`, `main` in `wrangler.toml`). The Worker's
-only job is `/api/*`: cache-aside in KV in front of the VPS `catalog-api`
-(`img.bluesia.net/api/*`), falling back to the last-known-good KV copy if the
-VPS is unreachable — see "Data flow & caching" below. All the actual catalog
-work (OPhim proxying, hero ranking, TMDB enrichment, HMAC-free R2 image
-mirroring) still happens on the **VPS `catalog-api`**; the Worker never builds
-data itself, only caches and re-serves it. `hls.js` + `artplayer` handle
-playback. Images are served from **R2** (`redflarer2.bluesia.net`), mirrored
-there by `catalog-api` — see "Data flow & caching" below.
+(no framework), built with Vite, deployed entirely to Cloudflare's free
+tier: static assets **plus a Worker** (`worker/index.js`, `main` in
+`wrangler.toml`) that does *all* the catalog work itself — OPhim proxying,
+TMDB enrichment, hero/recommendation ranking, R2 image mirroring — with no
+backend server anywhere else. `hls.js` + `artplayer` handle playback. Images
+are served from **R2** (`redflarer2.bluesia.net`), mirrored there by the
+Worker itself — see "Data flow & caching" below.
+
+**This used to run differently.** Through 2026-08-01 the Worker was a thin
+KV cache-aside shim in front of a VPS Node service (`catalog-api`, at
+`img.bluesia.net/api/*`) that did all the real work; the VPS also mirrored
+images into R2 and ran Valkey as its own cache. That VPS backend
+(`bluefilm-backend`) was migrated onto the Worker in phases and the VPS
+stack was fully retired 2026-08-01 — see
+[`bluesiaOM/context/state-redflare-cf-worker.md`](../bluesiaOM/context/state-redflare-cf-worker.md)
+for the phase-by-phase history and the gotchas hit along the way (D1's
+100-bound-param cap, a Worker `fetch()`-ing its own Custom Domain always
+returning 522, etc). The retired VPS source is archived, not deleted, at
+`github.com/O365ServeronMS/bluefilm-backend` — it's the reference if the
+enrichment/ranking logic ever needs cross-checking.
 
 There are **no tests**, **no TypeScript**, and **no linter/CI**. Plain ES modules
 + imperative DOM.
@@ -103,10 +113,10 @@ Node **26** (pinned in `.nvmrc` — Cloudflare's build image reads it too).
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Vite dev server on `:3000`. Default loop. `src/api/ophim.js` calls same-origin `/api/*`; `vite.config.js`'s `server.proxy` forwards that straight to the **live** `img.bluesia.net/api/*` — there is no local backend and no local Worker in this mode, so the VPS must be up. |
+| `npm run dev` | Vite dev server on `:3000`. Default loop. `src/api/ophim.js` calls same-origin `/api/*`; `vite.config.js`'s `server.proxy` forwards that straight to the **live production Worker** at `phim.bluesia.net/api/*` (the Worker is the only backend now — there is no local backend to run instead). |
 | `npm run build` | Vite build → `dist/` |
-| `npm run preview` | Vite's own static preview of `dist/` (no SPA fallback, no Worker — but `preview.proxy` forwards `/api/*` to the VPS same as `dev`) |
-| `npm start` | `wrangler dev` — runs the **actual Worker** (`worker/index.js`) locally, with a locally-simulated KV namespace (works fine even though `wrangler.toml`'s KV `id` is a real remote id — local mode doesn't touch it), serving `dist/` through the asset layer. Use this (not `preview`) to verify `not_found_handling = "single-page-application"` (deep link like `/phim/<slug>` reloads correctly) **and** to test the KV cache-aside / VPS-down fallback in `worker/index.js`. Requires `npm run build` first. |
+| `npm run preview` | Vite's own static preview of `dist/` (no SPA fallback, no Worker — but `preview.proxy` forwards `/api/*` to the live production Worker same as `dev`) |
+| `npm start` | `wrangler dev --remote` — runs the **actual Worker** (`worker/index.js`) with **real bindings** (KV/D1/R2/service binding), serving `dist/` through the asset layer. Use `--remote`, not plain `wrangler dev` — local simulated bindings are empty/stale and will not reproduce real cache/D1/R2 behavior (see "Platform gotchas" — `wrangler kv/r2/d1` commands need `--remote` too, for the same reason). Use this to verify `not_found_handling = "single-page-application"` (deep link like `/phim/<slug>` reloads correctly) **and** to test the Worker's own builders (`worker/lib/*`) and Cache API / D1 fallback behavior. Requires `npm run build` first. |
 
 **Deploy = `git push origin main`.** Cloudflare Workers Builds picks it up, runs
 `npm run build`, and publishes `dist/` as static assets. No `wrangler deploy` by
@@ -130,13 +140,17 @@ if the Git integration is disconnected/reconnected. Don't remove it.
   `attachImageFallback` (retry the original TMDB/OPhim URL if the R2 mirror
   hasn't landed yet — see "Images: R2" below), and `normalizeListItem` (smooths
   over OPhim's two list shapes).
-- **`worker/index.js`** — the Worker. Handles `/api/*` only: KV cache-aside in
-  front of the VPS `catalog-api`, with a TTL-less fallback key so a cached
-  response keeps being served if the VPS goes down. Anything that isn't
-  `/api/*` and isn't a literal file in `dist/` falls through to
+- **`worker/index.js`** + **`worker/lib/*`** — the Worker. Handles `/api/*`
+  end to end: fetches OPhim + TMDB directly, runs enrichment/ranking
+  (`worker/lib/enrich.js`, ported from the retired `catalog-api`), maintains
+  the reverse index + recommendation cache in D1 (`worker/lib/recommendation.js`),
+  maps/mirrors artwork into R2 (`worker/lib/images.js` for URL mapping,
+  `worker/lib/mirror.js` for the mirror-queue drain). `/api/home-data` is
+  pre-built by an hourly cron (`worker/lib/home.js`) rather than built
+  per-request — see "Data flow & caching". Anything that isn't `/api/*` and
+  isn't a literal file in `dist/` falls through to
   `env.ASSETS.fetch(request)`, which applies `not_found_handling` below (SPA
-  fallback). The Worker never builds catalog data itself — see "Data flow &
-  caching".
+  fallback).
 - **`src/modules/<Name>/<Name>.js`** — UI modules, each exporting
   `renderX(container, ...)` that builds DOM imperatively and appends it. No
   virtual DOM, no templating lib. Naming rules + migration status live in
@@ -149,41 +163,49 @@ if the Git integration is disconnected/reconnected. Don't remove it.
   `block__element--modifier`.
 - **`docs/DESIGN.md` + `docs/tokens.json`** — the Netflix-style design reference
   the tokens in `variables.css` derive from. Reference only, not built.
-- **`catalog-api`** (separate Node service on the VPS, *not* in this repo) —
-  proxies OPhim, runs the hero-ranking algorithm + TMDB trending/enrichment,
-  mirrors TMDB/OPhim artwork into R2, caches in Valkey. Served at
-  `img.bluesia.net/api/*` — this is what the Worker calls on a KV miss.
-  Source: `/srv/filmbluesia/catalog-api`. The original `worker.js` and
-  `trending.js` were deleted from this repo when that logic first moved to the
-  VPS (commit `81e498a`); a Worker came back later (`worker/index.js`) as a
-  cache/fallback layer only — it does not reimplement any of that logic.
+- **`catalog-api`** (retired 2026-08-01) — used to be a separate Node service
+  on the VPS doing everything `worker/lib/*` does now (OPhim proxying, hero
+  ranking, TMDB enrichment, R2 mirroring, Valkey cache), served at
+  `img.bluesia.net/api/*`. Fully ported to the Worker across Phases 3–6 of
+  the migration and shut down; source archived at
+  `github.com/O365ServeronMS/bluefilm-backend` for reference, not imported by
+  this repo. The original `worker.js`/`trending.js` in *this* repo were
+  deleted when that logic first moved to the VPS (commit `81e498a`) — the
+  current `worker/index.js` + `worker/lib/*` is a from-scratch reimplementation
+  written for the Worker runtime, not a revert of that old code.
 
 ## Data flow & caching (important)
 
-Two different paths, two different origins:
+Two different paths, both entirely on Cloudflare — no other server involved:
 
 - **Data** (`/api/*`) — same-origin. The frontend calls `phim.bluesia.net/api/*`,
-  which the Worker (`worker/index.js`) handles: KV cache-aside in front of the
-  VPS `catalog-api` (`img.bluesia.net/api/*`). The VPS is still the source of
-  truth and does all the real work (OPhim proxying, hero ranking, TMDB
-  enrichment); the Worker only caches its JSON responses and re-serves them —
-  see "Caching layers" below for exactly how.
-- **Images** — `redflarer2.bluesia.net` (R2), never the Worker and never the
-  VPS at read time. `catalog-api` mirrors TMDB/OPhim artwork into R2 in the
-  background as titles get enriched; R2 object keys mirror the upstream path
-  (`t/p/w500/<hash>.jpg`), so if a mirror hasn't landed yet (or R2 is somehow
-  unreachable) the frontend's `<img onerror>` handler rebuilds the original
-  TMDB/OPhim URL from the R2 URL and retries it directly — see
-  `upstreamFallback`/`attachImageFallback` in `src/api/ophim.js`. Objects
-  expire from the bucket after ~150 days (TMDB's cache-duration limit);
-  `catalog-api` re-mirrors on the next enrich if a title is viewed again after
-  that.
+  which the Worker (`worker/index.js` + `worker/lib/*`) handles directly: it
+  fetches OPhim and TMDB itself, runs enrichment/ranking, and (for
+  recommendations) reads/writes a reverse index in D1. `/api/home-data` is
+  the one exception — it's pre-built by an hourly cron rather than per
+  request, see below. The Cache API sits in front of everything as the hot
+  tier — see "Caching layers" below for exactly how.
+- **Images** — `redflarer2.bluesia.net` (R2), never proxied through the
+  Worker at read time. The Worker mirrors TMDB/OPhim artwork into R2 itself
+  (`worker/lib/mirror.js`): every build enqueues new image URLs into a D1
+  queue (`mirror_queue`), and a cron every 10 minutes drains up to 20 at a
+  time — `env.BUCKET.head()` to skip ones already mirrored, otherwise fetch
+  upstream and `env.BUCKET.put(key, res.body)` streamed straight through (no
+  in-JS hashing). R2 object keys mirror the upstream path (`t/p/w500/<hash>.jpg`),
+  so if a mirror hasn't landed yet (or R2 is somehow unreachable) the
+  frontend's `<img onerror>` handler rebuilds the original TMDB/OPhim URL
+  from the R2 URL and retries it directly — see
+  `upstreamFallback`/`attachImageFallback` in `src/api/ophim.js`. **No
+  lifecycle expiry rule on the bucket** — objects don't expire on their own
+  once mirrored (an earlier version of this doc claimed a 150-day TMDB
+  cache-duration expiry; that was never actually configured on the bucket —
+  corrected 2026-08-01).
 
 ### Endpoints the frontend calls
 
-All defined in `src/api/ophim.js`, all same-origin `/api/*` (the Worker
-transparently maps these onto `img.bluesia.net/api/*` on a cache miss). Keep
-this table in sync when adding one.
+All defined in `src/api/ophim.js`, all same-origin `/api/*`, all built by the
+Worker itself now (no upstream to fall back to). Keep this table in sync when
+adding one.
 
 | Client fn | Endpoint | Notes |
 |---|---|---|
@@ -199,10 +221,11 @@ this table in sync when adding one.
 ### Field ownership: OPhim vs TMDB
 
 A recurring misreading: *"OPhim only tells us which titles exist + their TMDB id,
-TMDB supplies the metadata."* Not how it works. catalog-api fetches the **whole
+TMDB supplies the metadata."* Not how it works. The Worker fetches the **whole
 OPhim record**, then **overrides a fixed set of fields** with TMDB
-(`catalog-api/src/tmdb-enrich.js`). OPhim is the per-field fallback, so a title
-that TMDB can't resolve still renders — just with OPhim values.
+(`worker/lib/enrich.js`, ported from the retired `catalog-api/src/tmdb-enrich.js`).
+OPhim is the per-field fallback, so a title that TMDB can't resolve still
+renders — just with OPhim values.
 
 | Field | Owner | Notes |
 |---|---|---|
@@ -250,55 +273,79 @@ name. Expect the two to disagree occasionally.
 
 1. **In-page** — `src/api/ophim.js` memoizes every response by URL for **5 min**
    (`CACHE_TTL`). Cleared on hard reload; nothing else invalidates it.
-2. **Worker KV** (`CATALOG_KV`, `worker/index.js`) — every `/api/*` response is
-   written under two keys: `live:<path+query>` with a TTL mirroring the VPS's
-   own Valkey TTLs (below), and `stale:<path+query>` with **no TTL**. Normal
-   path: `live` hit → served straight from KV, VPS never called. `live` miss →
-   fetch the VPS, write both keys, serve fresh. VPS fetch **fails** (down,
-   timeout, non-2xx) → serve `stale` if it exists (`x-catalog-cache:
-   stale-vps-down`); if `stale` doesn't exist either (never cached), `502`.
-   This is the mechanism that keeps `phim.bluesia.net` up when the VPS is down
-   — the KV `stale` copy just keeps being served, however old it is.
-3. **Valkey on the VPS** — `catalog:c1:*`. `home` is kept warm by a background
-   refresh (~20 min); lists 30 min; detail 60 min; recommendations 30 days
-   (`catalog:c1:related:*` + reverse index `catalog:c1:idx:*` — key names kept
-   legacy on purpose, renaming would orphan a warm 30-day cache). This is
-   upstream of the Worker's KV — a Worker `live` miss hits this layer first,
-   and only reaches OPhim/TMDB itself on a Valkey miss too.
-4. **Cloudflare edge** — assets only (`dist/`), plus whatever CDN caching R2
-   applies to images. Never caches `/api/*` JSON responses — that's what the
-   Worker KV layer is for.
+2. **Cache API** (`caches.default`, `worker/index.js`) — the hot tier for
+   **every** `/api/*` path, chosen deliberately over Workers KV because it has
+   no daily write-quota (KV's 1,000 writes/day would be blown through by
+   `/api/search`'s unbounded keyword cardinality alone). A hit is served
+   straight from cache with no rebuild; a miss falls through to the Worker's
+   own builder (OPhim + TMDB fetch, enrichment, D1 lookups as needed) and the
+   fresh response is written back to cache before returning. `x-catalog-cache:
+   hit`/`miss` on every response says which happened.
+3. **KV** (`CATALOG_KV`) — deliberately minimal: one key
+   (`home:current`, plus TTL'd `trending:week`/`trending:day`) written only by
+   the hourly cron, never per-request, and ~111 `meta:*` TMDB-enrichment
+   entries (14-day TTL) written by `worker/lib/enrich.js`. `/api/home-data`
+   reads `home:current` directly — no build happens on that request path at
+   all, see below.
+4. **D1** (`redflare-db`) — 5 tables, all live: `stale` (last-known-good copy
+   per path for list/genre/country/movie/recommendation, upserted on every
+   successful build — this is what would get served if OPhim/TMDB itself were
+   ever unreachable, `x-catalog-cache: stale-vps-down` despite the header name
+   predating the VPS's retirement); `idx` (reverse index, OPhim item keyed by
+   `tmdb.id`+media type, built by the hourly-shard cron + on-demand during
+   detail/recommendation builds — this is what makes recommendation matching
+   possible without a full OPhim search); `recs` (TMDB recommendation results
+   cached 30d cold / 1h warm); `mirrored` + `mirror_queue` (R2 image-mirror
+   bookkeeping, see "Images" above).
+5. **Cloudflare edge** — assets only (`dist/`), plus whatever CDN caching R2
+   applies to images. `/api/*` JSON never reaches this layer as a distinct
+   cache — that's the Cache API above (also edge-backed, but addressed
+   explicitly via `caches.default` rather than implicit HTTP caching).
 
-**To force fresh data:** the Worker's `live` KV key expires on its own TTL, so
-usually nothing to do — wait it out, or in the dashboard delete the specific
-`live:<path>` key from the `CATALOG_KV` namespace to force an immediate refetch.
-For the VPS's own layer: restart the `catalog-api` container (drops the warm
-home build), `DEL catalog:c1:home` in Valkey for just the home page, or bump
-`CACHE_NS` in catalog-api `server.js` to invalidate *everything* at once — do
-this if you also want the Worker's `stale` KV keys to stop reflecting the old
-data, since `stale` only gets overwritten on the next successful VPS fetch.
-Changing anything in the enrichment table above needs more than that: the TMDB
-values are frozen in `catalog:c1:meta:*` for 14 days, and *already-enriched*
-items sit inside `catalog:c1:idx:*` (45 d) and `catalog:c1:related:*` (30 d) —
-purge those too or stale titles keep resurfacing in "Bạn cũng có thể thích".
+**Home page is special: cron-built, never built on request.**
+`/api/home-data` would blow the 10ms CPU / 50-subrequest budget if built
+synchronously (it needs OPhim + TMDB across many categories). Instead an
+hourly cron (`0 * * * *` → `worker/lib/home.js` `runHomeRefresh`) calls 6
+`/__cron/shard/:n` routes — each its own Worker invocation with its own
+CPU/subrequest budget — via the `SELF` **service binding** (not a public
+`fetch()`; a Worker fetching its own Custom Domain always 522s, a documented
+Cloudflare behavior), concatenates the resulting JSON without reparsing, and
+writes one KV key. The request path only ever reads that key.
 
-**Why this shape:** the Worker exists for exactly one reason — `phim.bluesia.net`
-needs to keep serving *something* when the VPS is unreachable, since the VPS also
-hosts unrelated services (Sonarr, Radarr, qBittorrent, …) and isn't as reliable
-as Cloudflare's edge. The Worker deliberately does none of the VPS's actual work
-(no OPhim proxying, no TMDB calls, no ranking) — it is a cache-aside shim, kept
-thin enough to stay inside the Workers free tier (10ms CPU, 50 subrequests) with
-room to spare. Full backend docs: the `catalog-api` README on the VPS
-(`/srv/filmbluesia/catalog-api`).
+**To force fresh data:** for `/api/list`/`genre`/`country`/`search`/`movie`/
+`recommendation`, delete the specific Cache API entry (no dashboard UI for
+this — easiest is a cache-busting query param, or wait out the response's
+`Cache-Control`) or just let the next distinct request rebuild it (Cache API
+misses are cheap, there's no upstream to protect anymore). For home, the KV
+key `home:current` only changes on the next hourly cron tick — trigger it on
+demand with `GET /__cron/refresh-home` (header `x-cron-key: <CRON_KEY>`).
+Changing the enrichment table above needs more: TMDB values are frozen in KV
+`meta:*` for 14 days, and already-built recommendation results sit in D1
+`recs` (30d cold-cache) — both need clearing or stale data resurfaces in
+"Bạn cũng có thể thích".
 
-**Debugging a data problem:** hit the Worker's own path first
-(`curl -s https://phim.bluesia.net/api/home-data | head -c 400` — check the
-`x-catalog-cache` response header: `kv-live`/`miss` = normal, `stale-vps-down` =
-**the VPS is unreachable right now**, serving a cached copy). If you need to
-know whether the VPS itself is the problem (vs. a stale KV entry), hit it
-directly: `curl -s https://img.bluesia.net/api/home-data | head -c 400`. If
-that's stale or broken, it's a VPS/Valkey problem — nothing in this repo can
-fix it, only the Worker's fallback softens it.
+**Why this shape:** everything runs inside the Workers free tier (10ms CPU,
+50 subrequests/request, 1,000 KV writes/day) — every design choice above
+(Cache API over KV for the hot tier, D1 for the reverse index instead of KV,
+cron-sharded home build instead of per-request, streamed R2 PUT instead of
+in-JS hashing) traces back to one of those three limits. See
+`bluesiaOM/context/plan-redflare-len-cf-worker.md` for the full reasoning per
+constraint, and `bluesiaOM/context/state-redflare-cf-worker.md` for how each
+phase actually turned out (including two platform bugs that ate most of the
+debugging time: D1's undocumented 100-bound-param-per-query cap silently
+rejecting large batch inserts, and `wrangler secret put` not reliably
+attaching unless preceded immediately by a `wrangler deploy`).
+
+**Debugging a data problem:** hit the Worker directly
+(`curl -sD- https://phim.bluesia.net/api/home-data -o /dev/null | grep
+x-catalog-cache` — `hit`/`miss` = normal; `stale-vps-down` = the live build
+failed and D1's last-known-good copy is being served instead, worth
+investigating why OPhim/TMDB itself is failing). `wrangler tail` shows
+requests/responses/exceptions but **not** `console.log` output (verified —
+don't rely on it for tracing logic; return debug info in the response body
+instead). Remember `wrangler kv key list` / `d1 execute` / `r2 object`
+commands need `--remote` to see real data — without it they read an empty
+local simulation and make live resources look empty.
 
 ## Conventions & gotchas
 

@@ -9,10 +9,12 @@ routes = [
   { pattern = "phim.bluesia.net", custom_domain = true },
 ]
 
-# worker/index.js fronts /api/* with a caching layer in front of the VPS
-# catalog-api (img.bluesia.net) — see bluesiaOM/context/state-redflare-cf-worker.md
-# for the full migration state. Everything that isn't /api/* and isn't a literal
-# file in dist/ falls through to the assets layer, which applies
+# worker/index.js builds and serves /api/* entirely on the Worker (OPhim +
+# TMDB fetched directly, D1 for the reverse index/recommendation cache, R2
+# for image mirroring). The VPS backend (bluefilm-backend, img.bluesia.net)
+# was retired 2026-08-01 -- see bluesiaOM/context/state-redflare-cf-worker.md
+# for the full migration history. Everything that isn't /api/* and isn't a
+# literal file in dist/ falls through to the assets layer, which applies
 # not_found_handling below (SPA fallback for client routes).
 main = "worker/index.js"
 
@@ -29,35 +31,34 @@ not_found_handling = "single-page-application"
 binding = "CATALOG_KV"
 id = "a4a69489a7da49d3895c9ed2389b7055"
 
-# DB: durable last-known-good copy for list/genre/country/movie/recommendation
-# (table `stale`, migrations/0001_stale.sql), plus the reverse index /
-# recommendation cache / R2-mirroring bookkeeping tables added for later
-# phases (migrations/0002_recs_idx_mirror.sql — idx, recs, mirrored,
-# mirror_queue are not read/written by the Worker yet, that's Phase 5/6).
+# DB: reverse index (idx) + recommendation cache (recs) + R2-mirror
+# bookkeeping (mirrored, mirror_queue), plus a durable last-known-good copy
+# for list/genre/country/movie/recommendation (table `stale`). All 5 tables
+# are live and read/written by the Worker (migrations/0001_stale.sql,
+# 0002_recs_idx_mirror.sql).
 [[d1_databases]]
 binding = "DB"
 database_name = "redflare-db"
 database_id = "6eaf211c-0fcb-4404-9cff-718048e7c0c7"
 
-# BUCKET: R2 bucket that already mirrors artwork for redflarer2.bluesia.net
-# (mirrored there by the VPS catalog-api today; the Worker doesn't write to
-# it yet — that's Phase 6, when mirroring moves off the VPS). Binding name
-# deliberately differs from the "Redflare-R2" name briefly added via the
-# dashboard on 2026-07-31 (and silently dropped by the next git-push deploy,
-# since dashboard-only bindings aren't in this file) — binding name only
-# affects code, not the bucket itself.
+# BUCKET: R2 bucket serving artwork at redflarer2.bluesia.net. The Worker
+# both reads (image URL mapping) and writes it (worker/lib/mirror.js
+# drainMirrorQueue, streamed PUT, no local hashing). The VPS's own mirroring
+# (catalog-api r2.js) was retired along with the rest of the VPS backend,
+# 2026-08-01. Binding name deliberately differs from the "Redflare-R2" name
+# briefly added via the dashboard on 2026-07-31 (and silently dropped by the
+# next git-push deploy, since dashboard-only bindings aren't in this file) —
+# binding name only affects code, not the bucket itself.
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "redflare-r2"
 
-# LEGACY_UPSTREAM=1 is the emergency rollback switch: forces every /api/*
-# path back through the VPS proxy (img.bluesia.net), bypassing the Worker's
-# own OPhim+TMDB builders (worker/index.js localBuilder / worker/lib/*) AND
-# the Phase 4 home-data cron/KV path entirely -- one flag for "go back to
-# full VPS dependency". Flip via `wrangler deploy --var LEGACY_UPSTREAM:1`
-# or the dashboard, no code revert or redeploy needed. Default "0".
-# recommendation/related always proxy regardless of this flag -- that's
-# unconditional until Phase 5.
+# LEGACY_UPSTREAM=1 was the rollback switch for the migration: forced every
+# /api/* path back through the VPS proxy (img.bluesia.net). The VPS backend
+# was retired 2026-08-01 (bluesiaOM state file, Phase 7b) -- there is no
+# upstream left to fall back to, so this flag is now inert. Kept at "0" and
+# left in place rather than removed, in case the code path is ever useful
+# again for a future upstream.
 [vars]
 LEGACY_UPSTREAM = "0"
 
