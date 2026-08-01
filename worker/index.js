@@ -18,11 +18,15 @@
 //              via a tmdb.id → item reverse index in D1 (table `idx`), with a
 //              bounded live OPhim search fallback, cached in D1 table `recs`
 //              (30d/1h conditional TTL). See worker/lib/recommendation.js.
-//   /__cron/shard/:n, /__cron/refresh-home
+//   /__cron/shard/:n, /__cron/refresh-home, /__cron/mirror
 //              → internal, gated by the CRON_KEY secret. Not part of the
-//              public API surface — see worker/lib/home.js. The shards also
-//              opportunistically populate the `idx` reverse index; the hourly
-//              cron additionally sweeps expired idx/recs rows.
+//              public API surface — see worker/lib/home.js and
+//              worker/lib/mirror.js. The shards also opportunistically populate
+//              the `idx` reverse index; the hourly cron sweeps expired idx/recs
+//              rows; a */10 cron drains the R2 image-mirror queue (Phase 6).
+//   Images: every build (list/detail/home/rec) enqueues its artwork into the
+//              `mirror_queue` D1 table; the mirror cron copies them into R2 via
+//              the binding (worker/lib/mirror.js) — the VPS no longer mirrors.
 //   anything else that isn't a static asset → env.ASSETS.fetch(request),
 //              which applies wrangler.toml's not_found_handling (SPA fallback)
 //
@@ -47,7 +51,7 @@
 // Caching's transparent replay wouldn't give us.
 
 import { createEnrich } from './lib/enrich.js';
-import { mapItemsImages, mapItemImages } from './lib/images.js';
+import { mapItemsImages, mapItemImages, mirrorTargets } from './lib/images.js';
 import {
   HOME_KV_KEY,
   CRON_SHARD_BUILDERS,
@@ -63,6 +67,7 @@ import {
   TTL_RELATED,
   TTL_RELATED_EMPTY,
 } from './lib/recommendation.js';
+import { enqueueMirror, drainMirrorQueue } from './lib/mirror.js';
 
 const UPSTREAM = 'https://img.bluesia.net';
 const OPHIM_BASE = 'https://ophim1.com';
@@ -309,6 +314,14 @@ async function handleRecommendation(env, ctx, cache, cacheReq, method, type, tmd
         console.error('[recs write]', err.message)
       )
     );
+    // Mirror the recommended titles' artwork too (Phase 6).
+    if (hasItems) {
+      ctx.waitUntil(
+        enqueueMirror(env, mirrorTargets(payload.items)).catch((e) =>
+          console.error('[mirror enqueue rec]', e.message)
+        )
+      );
+    }
   }
 
   const ttl = hasItems ? TTL_RELATED : TTL_RELATED_EMPTY;
@@ -346,6 +359,8 @@ async function handleCronShard(request, env, ctx, n) {
     // popular titles recommendations point at (VPS's indexHomePayload).
     // Fire-and-forget: the returned items don't depend on the write landing.
     ctx.waitUntil(indexItems(env, items).catch((e) => console.error('[shard idx]', n, e.message)));
+    // Enqueue the shard's artwork for R2 mirroring (Phase 6).
+    ctx.waitUntil(enqueueMirror(env, mirrorTargets(items)).catch((e) => console.error('[shard mirror]', n, e.message)));
     return new Response(JSON.stringify(items), { headers: { 'content-type': 'application/json' } });
   } catch (err) {
     console.error('[cron shard]', n, err.message);
@@ -366,6 +381,15 @@ async function handleCronRefreshHome(request, env) {
     status: result.ok ? 200 : 502,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+// Manual trigger for the R2 mirror drain — same call the */10 cron makes.
+// Exposed so a drain can be forced on demand (verifying Phase 6 without waiting
+// for the cron tick).
+async function handleCronMirror(request, env) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const result = await drainMirrorQueue(env);
+  return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
 }
 
 async function handleApi(request, env, ctx, url) {
@@ -423,16 +447,24 @@ async function handleApi(request, env, ctx, url) {
     if (build) {
       const payload = await build();
       body = JSON.stringify(payload);
+      const items =
+        payload?.data?.items ||
+        payload?.items ||
+        [payload?.data?.item || payload?.item || payload?.movie].filter(Boolean);
       // Opportunistically index a freshly-built movie detail into the `idx`
       // reverse index (Phase 5) so recommendations can resolve it by tmdb.id
       // without a live OPhim search — same side effect the VPS did on every
       // signed movie payload. List/genre/country/search deliberately do NOT
       // index (see worker/lib/recommendation.js deviation #2).
-      if (url.pathname.startsWith('/api/movie/')) {
-        const item = payload?.data?.item || payload?.item || payload?.movie;
-        if (item?.tmdb?.id) {
-          ctx.waitUntil(indexItems(env, [item]).catch((e) => console.error('[movie idx]', e.message)));
-        }
+      if (url.pathname.startsWith('/api/movie/') && items[0]?.tmdb?.id) {
+        ctx.waitUntil(indexItems(env, [items[0]]).catch((e) => console.error('[movie idx]', e.message)));
+      }
+      // Enqueue this payload's artwork for mirroring into R2 (Phase 6). Every
+      // build path feeds the queue; the mirror cron drains it. Fire-and-forget.
+      if (items.length) {
+        ctx.waitUntil(
+          enqueueMirror(env, mirrorTargets(items)).catch((e) => console.error('[mirror enqueue]', e.message))
+        );
       }
     } else {
       const res = await fetch(UPSTREAM + cacheKey, {
@@ -497,6 +529,9 @@ export default {
     if (url.pathname === '/__cron/refresh-home') {
       return handleCronRefreshHome(request, env);
     }
+    if (url.pathname === '/__cron/mirror') {
+      return handleCronMirror(request, env);
+    }
     if (url.pathname.startsWith('/api/')) {
       return handleApi(request, env, ctx, url);
     }
@@ -504,8 +539,16 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runHomeRefresh(env));
-    // Sweep expired idx (>45d) / recs rows in the same hourly cron (Phase 5).
-    ctx.waitUntil(cleanupRecTables(env).catch((e) => console.error('[rec cleanup]', e.message)));
+    // Two schedules share this handler (see wrangler.toml [triggers]); dispatch
+    // by which one fired. Both can coincide at :00 — event.cron disambiguates.
+    if (event.cron === '0 * * * *') {
+      ctx.waitUntil(runHomeRefresh(env));
+      // Sweep expired idx (>45d) / recs rows in the same hourly cron (Phase 5).
+      ctx.waitUntil(cleanupRecTables(env).catch((e) => console.error('[rec cleanup]', e.message)));
+    }
+    if (event.cron === '*/10 * * * *') {
+      // Drain the R2 image-mirror queue (Phase 6).
+      ctx.waitUntil(drainMirrorQueue(env).catch((e) => console.error('[mirror drain]', e.message)));
+    }
   },
 };

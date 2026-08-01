@@ -61,14 +61,17 @@ bucket_name = "redflare-r2"
 [vars]
 LEGACY_UPSTREAM = "0"
 
-# Home-data refresh (worker/lib/home.js runHomeRefresh, via scheduled()).
-# Hourly, matching the 60-minute cadence the VPS owner confirmed acceptable
-# 2026-08-01 (see plan.md Phase 4) -- keeps KV writes for the trending-id
-# cache and home:current well under the free tier's 1,000/day quota. Can
-# also be triggered on demand: GET /__cron/refresh-home with header
-# x-cron-key: <CRON_KEY secret>.
+# Two cron schedules, dispatched by event.cron in scheduled():
+#   "0 * * * *"    hourly — home-data refresh (worker/lib/home.js
+#                  runHomeRefresh) + idx/recs sweep (cleanupRecTables).
+#                  60-min cadence confirmed acceptable by the VPS owner
+#                  2026-08-01; keeps KV writes well under 1,000/day.
+#   "*/10 * * * *" every 10 min — drain the R2 image-mirror queue
+#                  (worker/lib/mirror.js drainMirrorQueue), <=20 images/run.
+# Both can also be triggered on demand (header x-cron-key: <CRON_KEY>):
+#   GET /__cron/refresh-home  and  GET /__cron/mirror.
 [triggers]
-crons = ["0 * * * *"]
+crons = ["0 * * * *", "*/10 * * * *"]
 
 # SELF: service binding to this same Worker, used by runHomeRefresh
 # (worker/lib/home.js) to call the /__cron/shard/:n routes. A plain fetch()

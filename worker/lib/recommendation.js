@@ -77,22 +77,28 @@ function indexable(items) {
   return out;
 }
 
-// Batched upsert: ONE multi-row INSERT for the whole array (plan §6 — D1 bills
-// per row, but batching saves round-trips and statement overhead). Fire-and-
+// Batched upsert (plan §6 — D1 bills per row, but batching saves round-trips).
+// D1 caps bound parameters at 100/query and this binds 4 per row, so chunk at
+// <= 25 rows/INSERT (a full 24-item shard is right at the edge). Fire-and-
 // forget from callers via ctx.waitUntil; failures are logged, never thrown.
+const IDX_CHUNK = 20;
+
 export async function indexItems(env, items) {
   const rows = indexable(items);
   if (!rows.length) return;
   const now = Date.now();
-  const placeholders = rows.map(() => '(?, ?, ?, ?)').join(', ');
-  const binds = [];
-  for (const r of rows) binds.push(r.type, r.id, JSON.stringify(r.item), now);
-  await env.DB.prepare(
-    `INSERT INTO idx (type, tmdb_id, item, updated_at) VALUES ${placeholders} ` +
-      `ON CONFLICT(type, tmdb_id) DO UPDATE SET item = excluded.item, updated_at = excluded.updated_at`
-  )
-    .bind(...binds)
-    .run();
+  for (let i = 0; i < rows.length; i += IDX_CHUNK) {
+    const chunk = rows.slice(i, i + IDX_CHUNK);
+    const placeholders = chunk.map(() => '(?, ?, ?, ?)').join(', ');
+    const binds = [];
+    for (const r of chunk) binds.push(r.type, r.id, JSON.stringify(r.item), now);
+    await env.DB.prepare(
+      `INSERT INTO idx (type, tmdb_id, item, updated_at) VALUES ${placeholders} ` +
+        `ON CONFLICT(type, tmdb_id) DO UPDATE SET item = excluded.item, updated_at = excluded.updated_at`
+    )
+      .bind(...binds)
+      .run();
+  }
 }
 
 // Batched lookup: one SELECT with an IN-list, filtered to fresh rows (<45d).
