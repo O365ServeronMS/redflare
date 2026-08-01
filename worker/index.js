@@ -249,6 +249,13 @@ async function handleHomeData(env, ctx, cache, cacheReq, method) {
 
 function checkCronKey(request, env) {
   const key = request.headers.get('x-cron-key');
+  console.log('[cron-key-debug]', {
+    hasEnvKey: Boolean(env.CRON_KEY),
+    envKeyLen: env.CRON_KEY ? env.CRON_KEY.length : 0,
+    hasHeaderKey: Boolean(key),
+    headerKeyLen: key ? key.length : 0,
+    match: key === env.CRON_KEY,
+  });
   return Boolean(env.CRON_KEY) && key === env.CRON_KEY;
 }
 
