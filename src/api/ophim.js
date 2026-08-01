@@ -1,11 +1,10 @@
 /**
  * Catalog API client
- * Base: same-origin /api/* — the Worker (worker/index.js) caches responses in
- * KV and proxies to the VPS catalog-api (img.bluesia.net) on a miss, falling
- * back to the last-known-good KV copy if the VPS is unreachable.
+ * Base: same-origin /api/* — the Worker (worker/index.js) builds every catalog
+ * response itself (OPhim + TMDB, cached in Cache API / KV / D1). There is no
+ * VPS behind it any more; img.bluesia.net is gone.
  */
 
-const IMAGE_CACHE_BASE = 'https://img.bluesia.net';
 // Empty on purpose: every call site below already prefixes its path with
 // '/api/...', so this just makes the fetch same-origin relative.
 const CATALOG_BASE = '';
@@ -46,7 +45,6 @@ export async function getNewMovies(page = 1) {
   return {
     items: data.items || [],
     pagination: data.pagination || {},
-    pathImage: IMAGE_CACHE_BASE,
   };
 }
 
@@ -69,7 +67,8 @@ export async function getMoviesByType(type, page = 1) {
 }
 
 /**
- * Get home-page data (hero ranking + carousels), built and signed by catalog-api.
+ * Get home-page data (hero ranking + carousels). Built by the Worker's hourly
+ * cron into KV; this route just reads it.
  * @returns {Promise<Object>}
  */
 export async function getHomeData() {
@@ -82,13 +81,11 @@ export async function getHomeData() {
  * @returns {Promise<Object>}
  */
 export async function getMovieDetail(slug) {
-  // Route through catalog-api (VPS) so images are signed before reaching the client
   const data = await fetchJson(`${CATALOG_BASE}/api/movie/${slug}`);
   const item = data.data?.item || data.item || data.movie || {};
   return {
     ...item,
     episodes: item.episodes || data.episodes || data.data?.episodes || [],
-    cdnImage: IMAGE_CACHE_BASE,
   };
 }
 
@@ -139,9 +136,9 @@ export async function getMoviesByCountry(countrySlug, page = 1) {
 
 /**
  * Get recommendations ("Bạn cũng có thể thích") for a TMDB title.
- * Resolved + cached 30 days on the VPS via TMDB recommendations.
- * Media type matters: TMDB ids are not unique across movie/tv, so the VPS must
- * know which endpoint (/movie or /tv) to query.
+ * Resolved by the Worker from TMDB recommendations, cached 30 days in D1.
+ * Media type matters: TMDB ids are not unique across movie/tv, so the Worker
+ * must know which endpoint (/movie or /tv) to query.
  * @param {string|number} tmdbId
  * @param {string} [type] OPhim tmdb.type — 'tv' or 'movie' (default)
  * @returns {Promise<Array>}
@@ -154,8 +151,9 @@ export async function getRecommendation(tmdbId, type = 'movie') {
 }
 
 // --- Image URL helpers ---
-// catalog-api signs all image URLs before they reach the client.
-// These functions are now pass-throughs — URLs are always full https:// signed URLs.
+// The Worker already emits full https:// R2 URLs, so these are pass-throughs.
+// Kept because every render path calls them; they're the single place to add
+// URL rewriting again if that's ever needed.
 
 export function posterUrl(path) {
   return path || '';
@@ -165,11 +163,11 @@ export function thumbUrl(path) {
   return path || '';
 }
 
-// Artwork lives in R2 (redflarer2.bluesia.net), mirrored there by catalog-api.
-// The copy is made in the background, so the first viewer of a new title can
-// arrive before it lands; the bucket also expires objects after 150 days to stay
-// inside TMDB's 6-month caching limit. Object keys mirror the upstream path, so
-// the origin URL is rebuildable from the R2 URL alone — that is the fallback.
+// Artwork lives in R2 (redflarer2.bluesia.net), mirrored there by the Worker's
+// */10 cron (worker/lib/mirror.js). The copy is made in the background, so the
+// first viewer of a new title can arrive before it lands. Object keys mirror the
+// upstream path, so the origin URL is rebuildable from the R2 URL alone — that
+// is the fallback below.
 const R2_BASE = 'https://redflarer2.bluesia.net/';
 
 export function upstreamFallback(url) {
@@ -214,5 +212,3 @@ export function normalizeListItem(item) {
     modified: item.modified || {},
   };
 }
-
-export { IMAGE_CACHE_BASE };
