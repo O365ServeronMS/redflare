@@ -17,7 +17,15 @@
 //              → built HERE (Phase 5): TMDB recommendations matched to OPhim
 //              via a tmdb.id → item reverse index in D1 (table `idx`), with a
 //              bounded live OPhim search fallback, cached in D1 table `recs`
-//              (30d/1h conditional TTL). See worker/lib/recommendation.js.
+//              with a 3-tier TTL based on result completeness (30d full / 6h
+//              partial / 1h empty — see worker/lib/recommendation.js
+//              classifyTier/ttlForTier, added in the Phase 1 fix for
+//              bluesiaOM/context/state-sua-loi-recommendation.md).
+//   /__cron/purge-recs?type=&id=
+//              → internal, gated by CRON_KEY like the other /__cron/* routes.
+//              Evicts one title's recommendation cache at BOTH layers (D1
+//              `recs` and the Cache API) — see handleCronPurgeRecs below for
+//              why both are required.
 //   /__cron/shard/:n, /__cron/refresh-home, /__cron/mirror
 //              → internal, gated by the CRON_KEY secret. Not part of the
 //              public API surface — see worker/lib/home.js and
@@ -62,10 +70,11 @@ import {
   buildRecommendation,
   readRecsCache,
   writeRecsCache,
+  deleteRecsCache,
   cleanupRecTables,
   indexItems,
-  TTL_RELATED,
-  TTL_RELATED_EMPTY,
+  classifyTier,
+  ttlForTier,
 } from './lib/recommendation.js';
 import { enqueueMirror, drainMirrorQueue } from './lib/mirror.js';
 
@@ -266,8 +275,12 @@ async function handleHomeData(env, ctx, cache, cacheReq, method) {
 
 // --- /api/recommendation, /api/related (Phase 5) -----------------------------
 // Built here now instead of proxied. Cache API hot tier (checked in handleApi)
-// sits in front; this handler's durable layer is the D1 `recs` table with the
-// VPS's conditional TTL (30d real / 1h empty), not the generic `stale` table.
+// sits in front; this handler's durable layer is the D1 `recs` table, not the
+// generic `stale` table. TTL is 3-tier based on result completeness (see
+// classifyTier/ttlForTier in worker/lib/recommendation.js) — NOT just whether
+// the result was empty. Both this D1 layer and the Cache API layer above it
+// use the SAME classifyTier() call on the SAME stored payload, so a D1 hit
+// and a fresh build always agree on how long to keep serving a given result.
 
 function parseRecommendationPath(pathname) {
   // /api/recommendation/:type/:tmdb_id  |  /api/related/:type/:tmdb_id
@@ -290,14 +303,19 @@ async function handleRecommendation(env, ctx, cache, cacheReq, method, type, tmd
   }
 
   let cacheStatus;
+  let ttl;
   let hasItems;
   if (body != null) {
     cacheStatus = 'd1-recs';
+    let tier = 'full'; // parse failure on stored data: assume it's fine rather than force a rebuild storm
     try {
-      hasItems = (JSON.parse(body).items || []).length > 0;
+      const parsed = JSON.parse(body);
+      hasItems = (parsed.items || []).length > 0;
+      tier = classifyTier(parsed);
     } catch {
       hasItems = true;
     }
+    ttl = ttlForTier(tier);
   } else {
     cacheStatus = 'miss';
     let payload;
@@ -305,12 +323,13 @@ async function handleRecommendation(env, ctx, cache, cacheReq, method, type, tmd
       payload = await buildRecommendation(env, type, tmdbId);
     } catch (err) {
       console.error('[recommendation]', err.message);
-      payload = { items: [] };
+      payload = { items: [], candidates: 0, resolved: 0, skippedBudget: 0, searchErrors: 0 };
     }
     body = JSON.stringify(payload);
     hasItems = payload.items.length > 0;
+    ttl = ttlForTier(classifyTier(payload));
     ctx.waitUntil(
-      writeRecsCache(env, type, tmdbId, body, hasItems).catch((err) =>
+      writeRecsCache(env, type, tmdbId, body, ttl).catch((err) =>
         console.error('[recs write]', err.message)
       )
     );
@@ -324,7 +343,6 @@ async function handleRecommendation(env, ctx, cache, cacheReq, method, type, tmd
     }
   }
 
-  const ttl = hasItems ? TTL_RELATED : TTL_RELATED_EMPTY;
   const cacheableRes = new Response(body, {
     headers: {
       'content-type': 'application/json',
@@ -390,6 +408,43 @@ async function handleCronMirror(request, env) {
   if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
   const result = await drainMirrorQueue(env);
   return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
+}
+
+// Purge one title's recommendation cache at BOTH layers — added in the Phase 1
+// fix (state-sua-loi-recommendation.md) because the D1 `recs` row and the
+// Cache API copy are independent: deleting only the D1 row leaves real users
+// seeing the stale Cache API response for up to 30 more days (this is exactly
+// what happened testing the original bug report — the D1 row rebuilt correctly
+// but a plain curl still showed the old, incomplete list). Before this route
+// existed, fixing one title required a manual `wrangler d1 execute DELETE`
+// that STILL didn't reach the Cache API layer.
+async function handleCronPurgeRecs(request, env, url) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const type = url.searchParams.get('type');
+  const id = url.searchParams.get('id');
+  if ((type !== 'movie' && type !== 'tv') || !id) {
+    return new Response(JSON.stringify({ error: 'query params required: type=movie|tv, id=<tmdb id>' }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+  const cache = caches.default;
+  const paths = [`/api/recommendation/${type}/${id}`, `/api/related/${type}/${id}`];
+  if (type === 'movie') paths.push(`/api/related/${id}`); // legacy alias, see parseRecommendationPath
+  let cacheDeleted = 0;
+  for (const p of paths) {
+    const deleted = await cache.delete(new Request(url.origin + p, { method: 'GET' }));
+    if (deleted) cacheDeleted++;
+  }
+  let dbDeleted = 0;
+  try {
+    dbDeleted = await deleteRecsCache(env, type, id);
+  } catch (err) {
+    console.error('[purge-recs d1]', err.message);
+  }
+  return new Response(JSON.stringify({ ok: true, type, id, paths, cacheDeleted, dbDeleted }), {
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 async function handleApi(request, env, ctx, url) {
@@ -531,6 +586,9 @@ export default {
     }
     if (url.pathname === '/__cron/mirror') {
       return handleCronMirror(request, env);
+    }
+    if (url.pathname === '/__cron/purge-recs') {
+      return handleCronPurgeRecs(request, env, url);
     }
     if (url.pathname.startsWith('/api/')) {
       return handleApi(request, env, ctx, url);

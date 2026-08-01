@@ -2,8 +2,13 @@
 // catalog-api/src/recommendation.js. TMDB recommendations cross-referenced to
 // the OPhim catalog via a tmdb.id → item reverse index (D1 table `idx`), with
 // a live OPhim keyword-search fallback. Results are cached in D1 table `recs`
-// with a conditional TTL (30d for real results, 1h for empties — re-resolve
-// TMDB hiccups / titles not yet in OPhim), matching the VPS exactly.
+// with a 3-tier TTL based on how COMPLETE the result was, not just whether it
+// was non-empty — see "Result quality + TTL tiers" below. This is a deliberate
+// change from the VPS's 2-tier (30d real / 1h empty) TTL — see
+// bluesiaOM/context/state-sua-loi-recommendation.md Phase 1 for why: a result
+// that only resolved 1 of 15 candidates was getting cached for 30 days
+// identically to a complete one, which is how "Gia Tộc Rồng" recommending
+// without "Game of Thrones" survived undetected.
 //
 // DELIBERATE DEVIATIONS FROM THE VPS VERSION (see state.md Phase 5 log before
 // assuming a difference from VPS output is a bug):
@@ -33,8 +38,9 @@ const OPHIM_BASE = 'https://ophim1.com';
 const RELATED_LIMIT = 8;
 const TMDB_CANDIDATES = 15;          // top-N TMDB recs to consider (matches VPS)
 const SEARCH_FALLBACK_BUDGET = 6;    // max index-miss candidates to OPhim-search (Worker limits)
-export const TTL_RELATED = 30 * 24 * 60 * 60;   // 30 days, seconds
-export const TTL_RELATED_EMPTY = 60 * 60;       // 1 hour
+export const TTL_RELATED = 30 * 24 * 60 * 60;         // 30 days — full result
+export const TTL_RELATED_PARTIAL = 6 * 60 * 60;       // 6 hours — incomplete result, re-check soon
+export const TTL_RELATED_EMPTY = 60 * 60;             // 1 hour — no matches at all
 const IDX_MAX_AGE_MS = 45 * 24 * 60 * 60 * 1000; // 45 days — matches VPS TTL_IDX
 
 async function fetchWithTimeout(url, opts = {}, ms = 8000) {
@@ -155,7 +161,15 @@ async function fetchTmdbRecommendations(env, type, tmdbId) {
 // localized title, filtered by tmdb id + type. On a hit, enrich + R2-map (to
 // match the rest of the catalog) and index it for next time. Direct port of
 // the VPS matchOphimByTmdb fallback branch, minus signItem.
+//
+// Returns { item, error }. `error` distinguishes "OPhim answered, this title
+// genuinely isn't in the catalog" (item: null, error: false — a legitimate,
+// cacheable-long-term outcome) from "the OPhim call itself failed" (item:
+// null, error: true — transient, should NOT be trusted for a 30-day cache;
+// see classifyTier below). Before this, both cases were caught by the same
+// empty `catch {}` and looked identical to the caller.
 async function matchViaSearch(env, enrich, rec, type) {
+  let sawError = false;
   for (const kw of [rec.keyword, rec.viTitle]) {
     if (!kw) continue;
     try {
@@ -169,23 +183,30 @@ async function matchViaSearch(env, enrich, rec, type) {
       if (hit) {
         await enrich.enrichItemsCards([hit]);
         const mapped = mapItemImages(hit);
-        return mapped;
+        return { item: mapped, error: false };
       }
     } catch {
-      // try the next keyword
+      sawError = true; // this keyword's OPhim call failed — try the next one
     }
   }
-  return null;
+  return { item: null, error: sawError };
 }
 
 // Build the recommendation list for a title. Resolution mirrors the VPS: each
 // candidate resolves index-first (D1, cheap, no external call), then a live
 // OPhim search fallback — and results are emitted in strict TMDB rank order
 // (the VPS's Promise.all(recs.map(...)) preserves position; so do we, via a
-// positional slots array). Returns { items }.
+// positional slots array).
+//
+// Returns { items, candidates, resolved, skippedBudget, searchErrors } — the
+// three extra fields are the quality signal classifyTier() below uses to pick
+// a TTL. Without them, a result that only resolved 1 of 15 candidates (e.g.
+// because the one that mattered — Game of Thrones for Gia Tộc Rồng — hadn't
+// entered the `idx` reverse index yet) was indistinguishable from a complete
+// one and got cached for 30 days either way (see state.md Phase 1 log).
 export async function buildRecommendation(env, type, tmdbId) {
   const recs = await fetchTmdbRecommendations(env, type, tmdbId);
-  if (!recs.length) return { items: [] };
+  if (!recs.length) return { items: [], candidates: 0, resolved: 0, skippedBudget: 0, searchErrors: 0 };
 
   // 1. Batch index lookup for every candidate (one D1 query).
   const indexHits = await lookupIndexBatch(env, type, recs.map((r) => r.id));
@@ -193,28 +214,43 @@ export async function buildRecommendation(env, type, tmdbId) {
   // 2. Positional slots, one per candidate. Index hits fill immediately; the
   //    first SEARCH_FALLBACK_BUDGET index-misses are queued for a live OPhim
   //    search (the cap keeps OPhim fan-out under the Worker's connection /
-  //    subrequest limits). Remaining misses stay null.
+  //    subrequest limits). Misses beyond the budget stay null and count
+  //    toward skippedBudget — this is what used to happen silently.
   const enrich = createEnrich(env);
   const slots = new Array(recs.length).fill(null);
   const toSearch = []; // { idx, rec }
+  let skippedBudget = 0;
   for (let i = 0; i < recs.length; i++) {
     const hit = indexHits.get(recs[i].id);
-    if (hit) slots[i] = hit;
-    else if (toSearch.length < SEARCH_FALLBACK_BUDGET) toSearch.push({ idx: i, rec: recs[i] });
+    if (hit) {
+      slots[i] = hit;
+      continue;
+    }
+    if (toSearch.length < SEARCH_FALLBACK_BUDGET) toSearch.push({ idx: i, rec: recs[i] });
+    else skippedBudget++;
   }
 
   // 3. Resolve the queued searches (bounded set) — enrichItemsCards' own
   //    mapLimit(6) caps TMDB connections; toSearch is already
   //    <= SEARCH_FALLBACK_BUDGET so OPhim fan-out is bounded too.
+  let searchErrors = 0;
   if (toSearch.length) {
     await Promise.all(
       toSearch.map(async ({ idx, rec }) => {
-        slots[idx] = await matchViaSearch(env, enrich, rec, type);
+        const result = await matchViaSearch(env, enrich, rec, type);
+        slots[idx] = result.item;
+        if (result.error) searchErrors++;
       })
     );
   }
 
-  // 4. Emit in rank order, dedupe by slug, cap at RELATED_LIMIT. Warm the index
+  // 4. Count how many candidates resolved at all (over every slot, before
+  //    dedup/cap below) — the quality signal cares about this, not just the
+  //    final emitted count.
+  let resolved = 0;
+  for (const s of slots) if (s) resolved++;
+
+  // 5. Emit in rank order, dedupe by slug, cap at RELATED_LIMIT. Warm the index
   //    with items that came from the search fallback (weren't index hits).
   const items = [];
   const seenSlug = new Set();
@@ -231,7 +267,28 @@ export async function buildRecommendation(env, type, tmdbId) {
     indexItems(env, newlyResolved).catch((err) => console.error('[rec idx warm]', err.message));
   }
 
-  return { items };
+  return { items, candidates: recs.length, resolved, skippedBudget, searchErrors };
+}
+
+// --- Result quality + TTL tiers ---------------------------------------------
+// "Sufficient" means either the list is already full (RELATED_LIMIT reached
+// — nothing was left on the table) or every candidate was actually
+// considered (no budget cutoff, no OPhim call failures) so a short list is
+// short because OPhim genuinely doesn't have more, not because the Worker
+// gave up early. Anything short of that is "partial": real items, but the
+// list may be missing something and deserves a much shorter TTL so it
+// self-heals instead of being frozen for 30 days (state.md Phase 1 log has
+// the concrete case: 1/15 candidates resolved, cached 30 days regardless).
+export function classifyTier({ items, skippedBudget, searchErrors }) {
+  if (!items || !items.length) return 'empty';
+  const sufficient = items.length >= RELATED_LIMIT || (skippedBudget === 0 && searchErrors === 0);
+  return sufficient ? 'full' : 'partial';
+}
+
+export function ttlForTier(tier) {
+  if (tier === 'full') return TTL_RELATED;
+  if (tier === 'partial') return TTL_RELATED_PARTIAL;
+  return TTL_RELATED_EMPTY;
 }
 
 // --- recs cache (D1 table `recs`) -------------------------------------------
@@ -245,8 +302,11 @@ export async function readRecsCache(env, type, tmdbId) {
   return row.body;
 }
 
-export async function writeRecsCache(env, type, tmdbId, body, hasItems) {
-  const ttl = hasItems ? TTL_RELATED : TTL_RELATED_EMPTY;
+// ttl is seconds, from ttlForTier() above — caller decides the tier, this
+// function just persists it. (Used to take a `hasItems` boolean and pick
+// between 2 TTLs itself; that collapsed "1/15 resolved" and "15/15 resolved"
+// into the same 30-day bucket — see classifyTier's doc comment.)
+export async function writeRecsCache(env, type, tmdbId, body, ttl) {
   const expiresAt = Date.now() + ttl * 1000;
   await env.DB.prepare(
     'INSERT INTO recs (type, tmdb_id, body, expires_at) VALUES (?1, ?2, ?3, ?4) ' +
@@ -255,6 +315,18 @@ export async function writeRecsCache(env, type, tmdbId, body, hasItems) {
     .bind(type, tmdbId, body, expiresAt)
     .run();
   return ttl;
+}
+
+// Purge one title's durable D1 cache — the D1 half of the two-tier cache
+// (state.md Phase 0 finding: fixing D1 alone doesn't reach real users, the
+// Cache API copy in worker/index.js also has to be evicted; see
+// handleCronPurgeRecs there). Returns the number of rows actually deleted
+// (0 or 1 — (type, tmdb_id) is the primary key).
+export async function deleteRecsCache(env, type, tmdbId) {
+  const res = await env.DB.prepare('DELETE FROM recs WHERE type = ?1 AND tmdb_id = ?2')
+    .bind(type, tmdbId)
+    .run();
+  return res.meta?.changes ?? 0;
 }
 
 // --- periodic cleanup (called from the hourly home cron) --------------------
