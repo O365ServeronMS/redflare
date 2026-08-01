@@ -271,9 +271,9 @@ async function handleCronShard(request, env, n) {
 // Manual trigger for runHomeRefresh — same orchestrator scheduled() calls,
 // exposed so a refresh can be forced on demand (right after a deploy, or to
 // debug a stuck home:current) instead of waiting for the next cron tick.
-async function handleCronRefreshHome(request, env, url) {
+async function handleCronRefreshHome(request, env) {
   if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
-  const result = await runHomeRefresh(env, url.origin);
+  const result = await runHomeRefresh(env);
   return new Response(JSON.stringify(result), {
     status: result.ok ? 200 : 502,
     headers: { 'content-type': 'application/json' },
@@ -390,7 +390,7 @@ export default {
       return handleCronShard(request, env, n);
     }
     if (url.pathname === '/__cron/refresh-home') {
-      return handleCronRefreshHome(request, env, url);
+      return handleCronRefreshHome(request, env);
     }
     if (url.pathname.startsWith('/api/')) {
       return handleApi(request, env, ctx, url);
@@ -399,9 +399,6 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // env.ROUTE_ORIGIN isn't a thing Workers expose to scheduled() (no
-    // incoming request to read a Host header from), so the shard/orchestrator
-    // self-calls use the production custom domain directly.
-    ctx.waitUntil(runHomeRefresh(env, 'https://phim.bluesia.net'));
+    ctx.waitUntil(runHomeRefresh(env));
   },
 };

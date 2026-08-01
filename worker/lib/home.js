@@ -211,29 +211,38 @@ export const CRON_SHARD_BUILDERS = {
   5: (env) => buildTrendingShard(env),
 };
 
-// --- Orchestrator: calls all 6 shards as real HTTP requests (each gets its
-// own independent invocation budget — a function call would NOT), then
-// concatenates their pre-serialized JSON as STRINGS. Parsing 6 fragments and
-// re-stringifying a combined ~150KB object here would cost 3-5ms of CPU on
-// its own, eating most of this invocation's 10ms budget for no reason — the
-// whole point of shipping each shard as raw JSON text. ---
+// --- Orchestrator: calls all 6 shards through the SELF service binding
+// (each still gets its own independent invocation budget — a function call
+// would NOT), then concatenates their pre-serialized JSON as STRINGS.
+// Parsing 6 fragments and re-stringifying a combined ~150KB object here
+// would cost 3-5ms of CPU on its own, eating most of this invocation's 10ms
+// budget for no reason — the whole point of shipping each shard as raw JSON
+// text.
+//
+// Why a service binding (env.SELF) and not a plain fetch() to
+// https://phim.bluesia.net/...: Cloudflare Workers on a Custom Domain
+// return a 522 for a fetch() to their own hostname — documented platform
+// behavior, confirmed by reproducing it 2026-08-01 (see wrangler.toml's
+// [[services]] comment). A service binding routes directly to this
+// Worker's own fetch handler without touching the public network, so the
+// self-hostname restriction doesn't apply.
 
-async function callShard(env, n, origin) {
-  const res = await fetch(`${origin}/__cron/shard/${n}`, {
+async function callShard(env, n) {
+  const res = await env.SELF.fetch(`https://phim.bluesia.net/__cron/shard/${n}`, {
     headers: { 'x-cron-key': env.CRON_KEY },
   });
   if (!res.ok) throw new Error(`shard ${n} failed: ${res.status}`);
   return res.text();
 }
 
-export async function runHomeRefresh(env, origin) {
+export async function runHomeRefresh(env) {
   try {
-    const s0 = await callShard(env, 0, origin);
-    const s1 = await callShard(env, 1, origin);
-    const s2 = await callShard(env, 2, origin);
-    const s3 = await callShard(env, 3, origin);
-    const s4 = await callShard(env, 4, origin);
-    const s5 = await callShard(env, 5, origin);
+    const s0 = await callShard(env, 0);
+    const s1 = await callShard(env, 1);
+    const s2 = await callShard(env, 2);
+    const s3 = await callShard(env, 3);
+    const s4 = await callShard(env, 4);
+    const s5 = await callShard(env, 5);
 
     const body =
       '{"timestamp":' + Date.now() +

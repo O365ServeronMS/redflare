@@ -70,6 +70,18 @@ LEGACY_UPSTREAM = "0"
 [triggers]
 crons = ["0 * * * *"]
 
+# SELF: service binding to this same Worker, used by runHomeRefresh
+# (worker/lib/home.js) to call the /__cron/shard/:n routes. A plain fetch()
+# to https://phim.bluesia.net/... from WITHIN this Worker returns a
+# documented Cloudflare 522 -- "performing a fetch to its own hostname"
+# on a Custom Domain always fails that way (confirmed reproducing it
+# 2026-08-01). A service binding routes directly to this Worker's own fetch
+# handler without touching the public network at all, sidestepping the
+# issue entirely.
+[[services]]
+binding = "SELF"
+service = "redflare"
+
 # Ships Worker logs to the dashboard (Workers Logs). Must be the LAST section
 # in this file — TOML has no block-end marker, so any top-level key=value
 # written after a [table] header (even routes/main above) gets silently
