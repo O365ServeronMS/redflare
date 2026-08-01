@@ -9,10 +9,11 @@ routes = [
   { pattern = "phim.bluesia.net", custom_domain = true },
 ]
 
-# worker/index.js fronts /api/* with a KV cache-aside in front of the VPS
-# catalog-api (img.bluesia.net) — see state.md Phase 3. Everything that isn't
-# /api/* and isn't a literal file in dist/ falls through to the assets layer,
-# which applies not_found_handling below (SPA fallback for client routes).
+# worker/index.js fronts /api/* with a caching layer in front of the VPS
+# catalog-api (img.bluesia.net) — see bluesiaOM/context/state-redflare-cf-worker.md
+# for the full migration state. Everything that isn't /api/* and isn't a literal
+# file in dist/ falls through to the assets layer, which applies
+# not_found_handling below (SPA fallback for client routes).
 main = "worker/index.js"
 
 [assets]
@@ -20,6 +21,18 @@ directory = "dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 
+# CATALOG_KV: durable last-known-good copy of /api/home-data only (single key).
+# Hot-tier caching for every /api/* path is the Cache API (caches.default),
+# not KV — keeps per-day KV writes bounded regardless of query cardinality
+# (e.g. /api/search keywords). See worker/index.js.
 [[kv_namespaces]]
 binding = "CATALOG_KV"
 id = "a4a69489a7da49d3895c9ed2389b7055"
+
+# DB: durable last-known-good copy for list/genre/country/movie/recommendation
+# (table `stale`, migrations/0001_stale.sql). /api/search has no durable
+# fallback by design — unbounded keyword cardinality.
+[[d1_databases]]
+binding = "DB"
+database_name = "redflare-db"
+database_id = "6eaf211c-0fcb-4404-9cff-718048e7c0c7"
