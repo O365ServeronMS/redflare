@@ -37,7 +37,16 @@ const OPHIM_BASE = 'https://ophim1.com';
 
 const RELATED_LIMIT = 8;
 const TMDB_CANDIDATES = 15;          // top-N TMDB recs to consider (matches VPS)
-const SEARCH_FALLBACK_BUDGET = 6;    // max index-miss candidates to OPhim-search (Worker limits)
+// Phase 2 (state.md): raised from 6. Measured via wrangler dev --remote
+// against genuinely cold titles (never-indexed trending movies + the 3
+// known worst-case titles from the Phase 1 audit) at a trial value of 11 —
+// all succeeded cleanly, no Cloudflare resource-limit errors, latency
+// 0.6-4.5s. Landed on 10 (not the full trial value) to keep a safety
+// margin under the ~50-subrequest/invocation cap rather than run at the
+// measured edge. SEARCH_CONCURRENCY (below) is what actually bounds
+// simultaneous OPhim connections now — this only bounds total attempts.
+const SEARCH_FALLBACK_BUDGET = 10;
+const SEARCH_CONCURRENCY = 6;        // Workers free plan: 6 simultaneous outgoing connections
 export const TTL_RELATED = 30 * 24 * 60 * 60;         // 30 days — full result
 export const TTL_RELATED_PARTIAL = 6 * 60 * 60;       // 6 hours — incomplete result, re-check soon
 export const TTL_RELATED_EMPTY = 60 * 60;             // 1 hour — no matches at all
@@ -157,6 +166,22 @@ async function fetchTmdbRecommendations(env, type, tmdbId) {
   }));
 }
 
+// Bounded-concurrency map — mirrors enrich.js's own mapLimit. The search
+// fan-out below used to be a raw Promise.all over `toSearch`, which only
+// ever respected the Workers free plan's 6-simultaneous-connection cap by
+// coincidence: SEARCH_FALLBACK_BUDGET happened to be 6. Raising the budget
+// without this would silently blow past that limit under real concurrency.
+async function mapLimit(items, limit, fn) {
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      await fn(items[idx], idx);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 // Live OPhim keyword search for one index-miss candidate: original title then
 // localized title, filtered by tmdb id + type. On a hit, enrich + R2-map (to
 // match the rest of the catalog) and index it for next time. Direct port of
@@ -216,32 +241,47 @@ export async function buildRecommendation(env, type, tmdbId) {
   //    search (the cap keeps OPhim fan-out under the Worker's connection /
   //    subrequest limits). Misses beyond the budget stay null and count
   //    toward skippedBudget — this is what used to happen silently.
+  //
+  //    Early stop: once index hits + already-queued searches already cover
+  //    RELATED_LIMIT, further misses aren't queued at all (not even counted
+  //    against skippedBudget — they were never needed, not cut off). This
+  //    doesn't help a poorly-indexed title fill more slots (its top
+  //    candidates are already misses, so there's nothing to stop early on),
+  //    but it means a well-indexed title doesn't burn the search budget on
+  //    candidates ranked below what's ever shown — headroom that matters
+  //    once SEARCH_FALLBACK_BUDGET goes up (see the constant's comment).
   const enrich = createEnrich(env);
   const slots = new Array(recs.length).fill(null);
   const toSearch = []; // { idx, rec }
   let skippedBudget = 0;
+  let plannedCount = 0; // index hits (certain) + queued searches (tentative)
   for (let i = 0; i < recs.length; i++) {
     const hit = indexHits.get(recs[i].id);
     if (hit) {
       slots[i] = hit;
+      plannedCount++;
       continue;
     }
-    if (toSearch.length < SEARCH_FALLBACK_BUDGET) toSearch.push({ idx: i, rec: recs[i] });
-    else skippedBudget++;
+    if (plannedCount >= RELATED_LIMIT) continue; // already have enough lined up
+    if (toSearch.length < SEARCH_FALLBACK_BUDGET) {
+      toSearch.push({ idx: i, rec: recs[i] });
+      plannedCount++;
+    } else {
+      skippedBudget++;
+    }
   }
 
-  // 3. Resolve the queued searches (bounded set) — enrichItemsCards' own
-  //    mapLimit(6) caps TMDB connections; toSearch is already
-  //    <= SEARCH_FALLBACK_BUDGET so OPhim fan-out is bounded too.
+  // 3. Resolve the queued searches through mapLimit(SEARCH_CONCURRENCY) —
+  //    toSearch can now exceed 6 (SEARCH_FALLBACK_BUDGET > SEARCH_CONCURRENCY),
+  //    so this is what actually keeps simultaneous OPhim connections at the
+  //    platform's cap, not the budget size.
   let searchErrors = 0;
   if (toSearch.length) {
-    await Promise.all(
-      toSearch.map(async ({ idx, rec }) => {
-        const result = await matchViaSearch(env, enrich, rec, type);
-        slots[idx] = result.item;
-        if (result.error) searchErrors++;
-      })
-    );
+    await mapLimit(toSearch, SEARCH_CONCURRENCY, async ({ idx, rec }) => {
+      const result = await matchViaSearch(env, enrich, rec, type);
+      slots[idx] = result.item;
+      if (result.error) searchErrors++;
+    });
   }
 
   // 4. Count how many candidates resolved at all (over every slot, before
