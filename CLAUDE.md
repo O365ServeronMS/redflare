@@ -294,9 +294,10 @@ name. Expect the two to disagree occasionally.
    predating the VPS's retirement); `idx` (reverse index, OPhim item keyed by
    `tmdb.id`+media type, built by the hourly-shard cron + on-demand during
    detail/recommendation builds — this is what makes recommendation matching
-   possible without a full OPhim search); `recs` (TMDB recommendation results
-   cached 30d cold / 1h warm); `mirrored` + `mirror_queue` (R2 image-mirror
-   bookkeeping, see "Images" above).
+   possible without a full OPhim search); `recs` (TMDB recommendation
+   results, TTL by **result completeness**, not just presence — see
+   "Recommendation cache TTL" below); `mirrored` + `mirror_queue` (R2
+   image-mirror bookkeeping, see "Images" above).
 5. **Cloudflare edge** — assets only (`dist/`), plus whatever CDN caching R2
    applies to images. `/api/*` JSON never reaches this layer as a distinct
    cache — that's the Cache API above (also edge-backed, but addressed
@@ -312,16 +313,33 @@ CPU/subrequest budget — via the `SELF` **service binding** (not a public
 Cloudflare behavior), concatenates the resulting JSON without reparsing, and
 writes one KV key. The request path only ever reads that key.
 
-**To force fresh data:** for `/api/list`/`genre`/`country`/`search`/`movie`/
-`recommendation`, delete the specific Cache API entry (no dashboard UI for
-this — easiest is a cache-busting query param, or wait out the response's
-`Cache-Control`) or just let the next distinct request rebuild it (Cache API
-misses are cheap, there's no upstream to protect anymore). For home, the KV
-key `home:current` only changes on the next hourly cron tick — trigger it on
-demand with `GET /__cron/refresh-home` (header `x-cron-key: <CRON_KEY>`).
-Changing the enrichment table above needs more: TMDB values are frozen in KV
-`meta:*` for 14 days, and already-built recommendation results sit in D1
-`recs` (30d cold-cache) — both need clearing or stale data resurfaces in
+**Recommendation cache TTL (`worker/lib/recommendation.js` `classifyTier`/`ttlForTier`).**
+Not just "has results / empty" — a result is `full` (30 days) only if it
+either filled all `RELATED_LIMIT` (8) slots or every TMDB candidate was
+actually attempted (no OPhim-search budget cutoff, no OPhim call failures);
+otherwise `partial` (6 hours, so it self-heals soon instead of freezing a
+short list for a month); truly empty stays 1 hour. Both the D1 `recs` row
+and the Cache API entry in front of it are set from the *same*
+`classifyTier()` call on the same payload — added because they used to
+disagree: a title's D1 cache could get manually corrected while the Cache
+API kept serving the old 30-day-pinned response to real users regardless
+(see bluesiaOM/context/state-sua-loi-recommendation.md Phase 0 for how this
+surfaced — "Gia Tộc Rồng" recommending without "Game of Thrones"). To force
+one title's recommendation cache to rebuild immediately at *both* layers:
+`GET /__cron/purge-recs?type=movie|tv&id=<tmdb id>` (header `x-cron-key:
+<CRON_KEY>`, same gate as the other `/__cron/*` routes).
+
+**To force fresh data:** for `/api/list`/`genre`/`country`/`search`/`movie`,
+delete the specific Cache API entry (no dashboard UI for this — easiest is a
+cache-busting query param, or wait out the response's `Cache-Control`) or
+just let the next distinct request rebuild it (Cache API misses are cheap,
+there's no upstream to protect anymore). Recommendation has its own purge
+route, see above. For home, the KV key `home:current` only changes on the
+next hourly cron tick — trigger it on demand with `GET /__cron/refresh-home`
+(header `x-cron-key: <CRON_KEY>`). Changing the enrichment table above needs
+more: TMDB values are frozen in KV `meta:*` for 14 days, and already-built
+recommendation results sit in D1 `recs` (up to 30 days, see the TTL tiers
+above) — both need clearing or stale data resurfaces in
 "Bạn cũng có thể thích".
 
 **Why this shape:** everything runs inside the Workers free tier (10ms CPU,
