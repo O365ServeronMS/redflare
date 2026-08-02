@@ -23,10 +23,13 @@
 //    hits. NOT list/genre/country/search results. Keeps D1 writes bounded and
 //    predictable, and avoids re-introducing the /api/search unbounded-
 //    cardinality problem on the write side.
-// 3. The OPhim search fallback is capped at SEARCH_FALLBACK_BUDGET candidates
-//    per request (the VPS fired up to 15×2 OPhim searches concurrently via
-//    Promise.all) to stay under the Worker's 6 simultaneous-connection and 50
-//    external-subrequest limits.
+// 3. The OPhim search fallback is capped at SEARCH_FALLBACK_BUDGET (10)
+//    candidates per request — total attempts, to stay under the Worker's
+//    ~50 external-subrequest limit; the VPS had no such cap. Simultaneous
+//    connections are a SEPARATE bound (SEARCH_CONCURRENCY=6, enforced by
+//    mapLimit below) — the two used to be conflated when budget happened to
+//    equal 6, which meant a raw Promise.all only stayed under the
+//    connection limit by coincidence. See state.md Phase 2 log.
 // 4. Stored items are R2-mapped (mapItemImages), not HMAC-signed — r2 mode is
 //    the only mode this site runs now (worker/lib/images.js).
 
