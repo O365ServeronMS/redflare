@@ -239,36 +239,31 @@ export async function buildRecommendation(env, type, tmdbId) {
   // 2. Positional slots, one per candidate. Index hits fill immediately; the
   //    first SEARCH_FALLBACK_BUDGET index-misses are queued for a live OPhim
   //    search (the cap keeps OPhim fan-out under the Worker's connection /
-  //    subrequest limits). Misses beyond the budget stay null and count
-  //    toward skippedBudget — this is what used to happen silently.
+  //    subrequest limits, enforced for real by mapLimit below). Misses
+  //    beyond the budget stay null and count toward skippedBudget.
   //
-  //    Early stop: once index hits + already-queued searches already cover
-  //    RELATED_LIMIT, further misses aren't queued at all (not even counted
-  //    against skippedBudget — they were never needed, not cut off). This
-  //    doesn't help a poorly-indexed title fill more slots (its top
-  //    candidates are already misses, so there's nothing to stop early on),
-  //    but it means a well-indexed title doesn't burn the search budget on
-  //    candidates ranked below what's ever shown — headroom that matters
-  //    once SEARCH_FALLBACK_BUDGET goes up (see the constant's comment).
+  //    NOT early-stopping once index hits reach RELATED_LIMIT (an earlier
+  //    version of this did, and looked like a Phase 2 win in isolated
+  //    testing) — it's WRONG: queued searches aren't guaranteed to succeed,
+  //    so treating them as certain and skipping lower-ranked candidates on
+  //    that assumption drops candidates that would have matched. Caught
+  //    concretely on movie/278: candidates ranked #9+ (Papillon, Lawless —
+  //    both instant OPhim hits when searched directly) were never even
+  //    attempted because higher-ranked candidates were optimistically
+  //    "reserved" and then some of them failed to resolve. See state.md
+  //    Phase 2 log for the full trace.
   const enrich = createEnrich(env);
   const slots = new Array(recs.length).fill(null);
   const toSearch = []; // { idx, rec }
   let skippedBudget = 0;
-  let plannedCount = 0; // index hits (certain) + queued searches (tentative)
   for (let i = 0; i < recs.length; i++) {
     const hit = indexHits.get(recs[i].id);
     if (hit) {
       slots[i] = hit;
-      plannedCount++;
       continue;
     }
-    if (plannedCount >= RELATED_LIMIT) continue; // already have enough lined up
-    if (toSearch.length < SEARCH_FALLBACK_BUDGET) {
-      toSearch.push({ idx: i, rec: recs[i] });
-      plannedCount++;
-    } else {
-      skippedBudget++;
-    }
+    if (toSearch.length < SEARCH_FALLBACK_BUDGET) toSearch.push({ idx: i, rec: recs[i] });
+    else skippedBudget++;
   }
 
   // 3. Resolve the queued searches through mapLimit(SEARCH_CONCURRENCY) —
