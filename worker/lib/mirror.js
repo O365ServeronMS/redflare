@@ -35,13 +35,23 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 // reads off the bucket (served from CDN cache instead) — see plan §5.
 const OBJECT_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
+// Accept: image/webp negotiates a WebP response from image.tmdb.org (it does
+// content negotiation; img.ophim.live does not, so this is a no-op for it —
+// harmless). cacheTtl: 0 bypasses Cloudflare's shared subrequest cache: TMDB
+// sends no `Vary: Accept`, so a JPEG cached from an older request could
+// otherwise be handed back here despite the Accept header (see state.md
+// "Constraints discovered while planning" #2).
 async function fetchWithTimeout(url, ms = 8000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
   try {
     return await fetch(url, {
       signal: ctrl.signal,
-      headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
+      headers: {
+        'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)',
+        accept: 'image/webp,image/*,*/*',
+      },
+      cf: { cacheTtl: 0 },
     });
   } finally {
     clearTimeout(timer);
@@ -148,6 +158,13 @@ async function mirrorOne(env, key, sourceUrl) {
   if (!ct.startsWith('image/')) {
     await env.DB.prepare('DELETE FROM mirror_queue WHERE key = ?1').bind(key).run();
     return 'give-up';
+  }
+  // A key we're queuing as `<original>.webp` must actually be WebP bytes —
+  // otherwise a JPEG would land under a .webp key (e.g. TMDB serving JPEG
+  // despite the Accept header some future day). Retry rather than give-up:
+  // this is expected to be transient, not a permanent 4xx.
+  if (key.endsWith('.webp') && ct !== 'image/webp') {
+    return 'retry';
   }
   const clen = Number(res.headers.get('content-length') || 0);
   if (clen && clen > MAX_IMAGE_BYTES) {

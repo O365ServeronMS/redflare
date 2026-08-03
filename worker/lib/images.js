@@ -85,11 +85,21 @@ export function mapItemsImages(items) {
 
 // Reconstruct the upstream source URL for an R2 object key — the exact inverse
 // of objectKeyFor / the client's upstreamFallback(). Only the two mirrored
-// hosts are reversible; anything else returns ''.
+// hosts are reversible; anything else returns ''. Strips a trailing `.webp`
+// first (see webpKeyFor) so it works on both the original jpg-shaped key and
+// the appended-suffix webp key.
 export function upstreamForKey(key) {
   if (!key) return '';
-  if (key.startsWith('ophim/')) return `https://img.ophim.live/${key.slice('ophim/'.length)}`;
-  return `https://image.tmdb.org/${key}`;
+  const base = key.endsWith('.webp') ? key.slice(0, -'.webp'.length) : key;
+  if (base.startsWith('ophim/')) return `https://img.ophim.live/${base.slice('ophim/'.length)}`;
+  return `https://image.tmdb.org/${base}`;
+}
+
+// R2 key for the WebP copy of a given (jpg-shaped) key. Appends rather than
+// swaps the extension — see redflare state.md "Contract change" — so the
+// inverse (upstreamForKey) never has to guess the original extension.
+export function webpKeyFor(key) {
+  return `${key}.webp`;
 }
 
 // From ALREADY-MAPPED items (whose thumb_url/poster_url are R2 URLs), extract
@@ -97,6 +107,12 @@ export function upstreamForKey(key) {
 // mirror pipeline (worker/lib/mirror.js) to enqueue images for copying into
 // R2. Runs on mapped items so every build path (list/detail/home/rec) feeds
 // the queue uniformly without re-deriving upstream URLs.
+//
+// TMDB targets are queued as their WebP variant (worker/lib/mirror.js
+// negotiates WebP via Accept when it drains these) — image.tmdb.org supports
+// content negotiation, so no separate transform step is needed. OPhim targets
+// are queued as-is: img.ophim.live does not negotiate WebP, and the raw
+// mirror is what Phase 5's serve-time transformation reads from.
 export function mirrorTargets(items) {
   const out = new Map();
   const prefix = `${R2_PUBLIC_BASE}/`;
@@ -104,9 +120,38 @@ export function mirrorTargets(items) {
     for (const u of [it?.thumb_url, it?.poster_url]) {
       if (typeof u !== 'string' || !u.startsWith(prefix)) continue;
       const key = u.slice(prefix.length).split('?')[0];
-      if (!key || out.has(key)) continue;
+      if (!key) continue;
+      const isOphim = key.startsWith('ophim/');
+      const targetKey = isOphim ? key : webpKeyFor(key);
+      if (out.has(targetKey)) continue;
       const sourceUrl = upstreamForKey(key);
-      if (sourceUrl) out.set(key, { key, sourceUrl });
+      if (sourceUrl) out.set(targetKey, { key: targetKey, sourceUrl });
+    }
+  }
+  return [...out.values()];
+}
+
+// Phase 2 one-off backfill: given the jpg-shaped keys already in D1
+// `mirrored` (from before Phase 1), derive the WebP-variant targets to
+// enqueue, plus a `w154` variant of each `w500` poster key (feeds the hero
+// rail right-sizing in Phase 4 — HeroSlider renders that rail at
+// 42px/30px wide, not the 500px-wide poster it currently loads). OPhim keys
+// and keys already ending `.webp` are skipped — same reasoning as
+// mirrorTargets above.
+export function webpBackfillTargets(keys) {
+  const out = new Map();
+  for (const key of keys || []) {
+    if (!key || key.startsWith('ophim/') || key.endsWith('.webp')) continue;
+    const sourceUrl = upstreamForKey(key);
+    if (!sourceUrl) continue;
+
+    const webpKey = webpKeyFor(key);
+    if (!out.has(webpKey)) out.set(webpKey, { key: webpKey, sourceUrl });
+
+    if (key.startsWith('t/p/w500/')) {
+      const w154Key = webpKeyFor(key.replace('t/p/w500/', 't/p/w154/'));
+      const w154Source = sourceUrl.replace('/t/p/w500/', '/t/p/w154/');
+      if (!out.has(w154Key)) out.set(w154Key, { key: w154Key, sourceUrl: w154Source });
     }
   }
   return [...out.values()];

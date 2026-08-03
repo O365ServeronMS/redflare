@@ -32,6 +32,11 @@
 //              worker/lib/mirror.js. The shards also opportunistically populate
 //              the `idx` reverse index; the hourly cron sweeps expired idx/recs
 //              rows; a */10 cron drains the R2 image-mirror queue (Phase 6).
+//   /__cron/backfill-webp
+//              → internal, gated by CRON_KEY. One-off (WebP migration Phase 2,
+//              see state.md): enqueues a `.webp` mirror target for every
+//              pre-Phase-1 jpg key in D1 `mirrored`, plus a `w154` variant of
+//              each `w500` poster key. Drains through the normal mirror cron.
 //   Images: every build (list/detail/home/rec) enqueues its artwork into the
 //              `mirror_queue` D1 table; the mirror cron copies them into R2 via
 //              the binding (worker/lib/mirror.js) — the VPS no longer mirrors.
@@ -59,7 +64,7 @@
 // Caching's transparent replay wouldn't give us.
 
 import { createEnrich } from './lib/enrich.js';
-import { mapItemsImages, mapItemImages, mirrorTargets } from './lib/images.js';
+import { mapItemsImages, mapItemImages, mirrorTargets, webpBackfillTargets } from './lib/images.js';
 import {
   HOME_KV_KEY,
   CRON_SHARD_BUILDERS,
@@ -410,6 +415,25 @@ async function handleCronMirror(request, env) {
   return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
 }
 
+// One-off: enqueue WebP (+ w154 poster) targets for every jpg-shaped key
+// already in D1 `mirrored` from before Phase 1 shipped. Drains through the
+// normal */10 mirror cron like any other queued target — this route only
+// enqueues, it doesn't fetch/put itself. See state.md Phase 2. Safe to call
+// more than once: enqueueMirror skips keys already in `mirrored`, and this
+// route's own SELECT already excludes keys ending `.webp`.
+async function handleCronBackfillWebp(request, env) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const { results } = await env.DB.prepare(
+    "SELECT key FROM mirrored WHERE key NOT LIKE '%.webp' AND key NOT LIKE 'ophim/%'"
+  ).all();
+  const keys = (results || []).map((r) => r.key);
+  const targets = webpBackfillTargets(keys);
+  await enqueueMirror(env, targets);
+  return new Response(JSON.stringify({ scanned: keys.length, queued: targets.length }), {
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
 // Purge one title's recommendation cache at BOTH layers — added in the Phase 1
 // fix (state-sua-loi-recommendation.md) because the D1 `recs` row and the
 // Cache API copy are independent: deleting only the D1 row leaves real users
@@ -586,6 +610,9 @@ export default {
     }
     if (url.pathname === '/__cron/mirror') {
       return handleCronMirror(request, env);
+    }
+    if (url.pathname === '/__cron/backfill-webp') {
+      return handleCronBackfillWebp(request, env);
     }
     if (url.pathname === '/__cron/purge-recs') {
       return handleCronPurgeRecs(request, env, url);
