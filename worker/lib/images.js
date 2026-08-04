@@ -24,7 +24,13 @@ function normalizeOphimImageUrl(raw) {
   if (src.startsWith('//')) return `https:${src}`;
   if (!src.startsWith('http')) {
     const path = src.replace(/^\/+/, '');
-    return `https://img.ophim.live/uploads/movies/${path}`;
+    // OPhim's own list endpoints (/v1/api/danh-sach|the-loai|quoc-gia) already
+    // return the path WITH the uploads/ prefix (e.g. "uploads/movies/x.jpg");
+    // only /v1/api/tim-kiem returns a bare filename. Prepending unconditionally
+    // double-appended the prefix for the former, producing 404s like
+    // uploads/movies/uploads/movies/<file> — see redflare CLAUDE.md incident log.
+    const rel = path.startsWith('uploads/') ? path : `uploads/movies/${path}`;
+    return `https://img.ophim.live/${rel}`;
   }
   try {
     return new URL(src).toString();
