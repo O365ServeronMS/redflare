@@ -2,7 +2,9 @@
  * Catalog API client
  * Base: same-origin /api/* — the Worker (worker/index.js) builds every catalog
  * response itself (OPhim + TMDB, cached in Cache API / KV / D1). There is no
- * VPS behind it any more; img.bluesia.net is gone.
+ * VPS behind it any more; the old VPS host was img.bluesia.net (retired
+ * 2026-08-01), a different thing from the R2 image host reusing that same
+ * hostname since the 2026-08 domain migration — see R2_BASE below.
  */
 
 // Empty on purpose: every call site below already prefixes its path with
@@ -156,12 +158,12 @@ export async function getRecommendation(tmdbId, type = 'movie') {
 // serve-time Cloudflare Image Transformation on top (Phase 5 of the WebP
 // migration — see state.md).
 
-// Artwork lives in R2 (redflarer2.bluesia.net), mirrored there by the Worker's
+// Artwork lives in R2 (img.bluesia.net), mirrored there by the Worker's
 // */10 cron (worker/lib/mirror.js). The copy is made in the background, so the
 // first viewer of a new title can arrive before it lands. Object keys mirror the
 // upstream path, so the origin URL is rebuildable from the R2 URL alone — that
 // is the fallback below.
-const R2_BASE = 'https://redflarer2.bluesia.net/';
+const R2_BASE = 'https://img.bluesia.net/';
 const OPHIM_R2_PREFIX = `${R2_BASE}ophim/`;
 
 // img.ophim.live doesn't negotiate WebP (unlike image.tmdb.org, see
@@ -206,9 +208,9 @@ export function upstreamFallback(url) {
   if (!plain || !plain.startsWith(R2_BASE)) return '';
   let key = plain.slice(R2_BASE.length);
   // TMDB images are served from the `.webp` variant (worker/lib/images.js
-  // r2ImageUrl, Phase 3 of the WebP migration — see state.md); strip it back
-  // off to rebuild the original TMDB URL. OPhim keys never carry the suffix.
-  if (key.endsWith('.webp')) key = key.slice(0, -'.webp'.length);
+  // r2ImageUrl, key swaps `.jpg` -> `.webp`); swap it back to rebuild the
+  // original TMDB URL. OPhim keys never carry the suffix.
+  if (key.endsWith('.webp')) key = `${key.slice(0, -'.webp'.length)}.jpg`;
   return key.startsWith('ophim/')
     ? `https://img.ophim.live/${key.slice(6)}`
     : `https://image.tmdb.org/${key}`;

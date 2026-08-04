@@ -1,6 +1,8 @@
-// worker/index.js — fronts the VPS catalog-api with a caching layer that
-// survives the VPS being unreachable. See bluesiaOM/context/state-redflare-cf-worker.md
-// for the full migration state. Short version of what this file does today:
+// worker/index.js — builds the whole /api/* catalog itself (OPhim + TMDB
+// fetched directly, D1/KV/R2 for caching and image mirroring). The VPS
+// catalog-api this used to front is retired; see
+// bluesiaOM/context/state-redflare-cf-worker.md for the migration history.
+// Short version of what this file does today:
 //
 //   /api/list, /api/genre, /api/country, /api/search, /api/movie/:slug
 //              → built HERE: fetch OPhim directly, enrich with TMDB
@@ -32,33 +34,23 @@
 //              worker/lib/mirror.js. The shards also opportunistically populate
 //              the `idx` reverse index; the hourly cron sweeps expired idx/recs
 //              rows; a */10 cron drains the R2 image-mirror queue (Phase 6).
-//   /__cron/backfill-webp
-//              → internal, gated by CRON_KEY. One-off (WebP migration Phase 2,
-//              see state.md): enqueues a `.webp` mirror target for every
-//              pre-Phase-1 jpg key in D1 `mirrored`, plus a `w154` variant of
-//              each `w500` poster key. Drains through the normal mirror cron.
-//   /__cron/rekey-webp
-//              → internal, gated by CRON_KEY. Key-shape migration Phase A
-//              (see git log / CLAUDE.md "Images"): forces a batch of the
-//              `.jpg.webp` -> `.webp` in-bucket re-key on demand. Also runs
-//              unattended every */10 tick alongside the mirror drain
-//              (worker/lib/mirror.js drainRekeyBatch) — no manual trigger
-//              needed for the migration itself, this route just forces a
-//              batch immediately instead of waiting for the next tick.
 //   Images: every build (list/detail/home/rec) enqueues its artwork into the
 //              `mirror_queue` D1 table; the mirror cron copies them into R2 via
-//              the binding (worker/lib/mirror.js) — the VPS no longer mirrors.
+//              the binding (worker/lib/mirror.js) — served from
+//              img.bluesia.net (2026-08 domain migration; previously
+//              redflarer2.bluesia.net — see git history / state.md if that
+//              file still exists).
 //   anything else that isn't a static asset → env.ASSETS.fetch(request),
 //              which applies wrangler.toml's not_found_handling (SPA fallback)
 //
-// Every /api/* response (built here or proxied) goes through the SAME
-// caching shell: Cache API (hot tier, no daily write quota — see the Phase 2
-// note below) in front, with a durable last-known-good fallback (D1 for
-// list/genre/country/movie/recommendation, nothing for search) for when the
-// origin (OPhim/TMDB directly, or the VPS) is unreachable. /api/home-data no
-// longer goes through that generic fallback — see handleHomeData() below,
-// its durable copy IS the KV value the cron maintains, there's no separate
-// "upstream fetch failed" case to fall back from anymore.
+// Every /api/* response goes through the SAME caching shell: Cache API (hot
+// tier, no daily write quota — see the note below) in front, with a durable
+// last-known-good fallback (D1 for list/genre/country/movie/recommendation,
+// nothing for search) for when OPhim/TMDB itself is unreachable.
+// /api/home-data no longer goes through that generic fallback — see
+// handleHomeData() below, its durable copy IS the KV value the cron
+// maintains, there's no separate "upstream fetch failed" case to fall back
+// from anymore.
 //
 // Why Cache API and not KV for the hot tier: KV's free-plan write quota is
 // 1,000/day, and /api/search has effectively unbounded keyword cardinality —
@@ -72,7 +64,7 @@
 // Caching's transparent replay wouldn't give us.
 
 import { createEnrich } from './lib/enrich.js';
-import { mapItemsImages, mapItemImages, mirrorTargets, webpBackfillTargets } from './lib/images.js';
+import { mapItemsImages, mapItemImages, mirrorTargets } from './lib/images.js';
 import {
   HOME_KV_KEY,
   CRON_SHARD_BUILDERS,
@@ -89,9 +81,8 @@ import {
   classifyTier,
   ttlForTier,
 } from './lib/recommendation.js';
-import { enqueueMirror, drainMirrorQueue, drainRekeyBatch } from './lib/mirror.js';
+import { enqueueMirror, drainMirrorQueue } from './lib/mirror.js';
 
-const UPSTREAM = 'https://img.bluesia.net';
 const OPHIM_BASE = 'https://ophim1.com';
 
 // Mirrors catalog-api's own Valkey TTLs (catalog-api/src/server.js) — no
@@ -170,11 +161,10 @@ async function buildEnrichedList(enrich, upstreamUrl) {
   return mapListPayloadImages(data);
 }
 
-// Resolve a request the Worker now builds itself. Returns a zero-arg async
-// builder function, or null to fall through to the VPS proxy. home-data and
-// recommendation are intercepted in handleApi() before this is ever called
-// (unless LEGACY_UPSTREAM=1, in which case everything falls through here to
-// null → proxy).
+// Resolve a request the Worker builds itself. Returns a zero-arg async
+// builder function, or null for a path this Worker doesn't know how to build
+// (handleApi returns 404 in that case). home-data and recommendation are
+// intercepted in handleApi() before this is ever called.
 function localBuilder(env, url) {
   const pathname = url.pathname;
 
@@ -226,14 +216,13 @@ function localBuilder(env, url) {
     };
   }
 
-  return null; // recommendation, related -> proxy to VPS
+  return null; // unknown /api/* path
 }
 
 // --- Durable last-known-good read/write for list/genre/country/movie
 // (unchanged from Phase 2/3). home-data (KV, see handleHomeData) and
 // recommendation (D1 `recs`, see handleRecommendation) have their own durable
-// layers and no longer flow through this generic `stale` table — except when
-// LEGACY_UPSTREAM=1 routes them back through the proxy path below. ---
+// layers and no longer flow through this generic `stale` table. ---
 
 async function readStale(env, pathname, cacheKey) {
   if (isSearch(pathname)) return null;
@@ -423,34 +412,6 @@ async function handleCronMirror(request, env) {
   return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
 }
 
-// Manual trigger for the R2 re-key drain (.jpg.webp -> .webp key-shape
-// migration, Phase A) — same call the */10 cron makes. Exposed to force a
-// batch on demand without waiting for the cron tick.
-async function handleCronRekeyWebp(request, env) {
-  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
-  const result = await drainRekeyBatch(env);
-  return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
-}
-
-// One-off: enqueue WebP (+ w154 poster) targets for every jpg-shaped key
-// already in D1 `mirrored` from before Phase 1 shipped. Drains through the
-// normal */10 mirror cron like any other queued target — this route only
-// enqueues, it doesn't fetch/put itself. See state.md Phase 2. Safe to call
-// more than once: enqueueMirror skips keys already in `mirrored`, and this
-// route's own SELECT already excludes keys ending `.webp`.
-async function handleCronBackfillWebp(request, env) {
-  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
-  const { results } = await env.DB.prepare(
-    "SELECT key FROM mirrored WHERE key NOT LIKE '%.webp' AND key NOT LIKE 'ophim/%'"
-  ).all();
-  const keys = (results || []).map((r) => r.key);
-  const targets = webpBackfillTargets(keys);
-  await enqueueMirror(env, targets);
-  return new Response(JSON.stringify({ scanned: keys.length, queued: targets.length }), {
-    headers: { 'content-type': 'application/json' },
-  });
-}
-
 // Purge one title's recommendation cache at BOTH layers — added in the Phase 1
 // fix (state-sua-loi-recommendation.md) because the D1 `recs` row and the
 // Cache API copy are independent: deleting only the D1 row leaves real users
@@ -504,30 +465,20 @@ async function handleApi(request, env, ctx, url) {
     return new Response(method === 'HEAD' ? null : hit.body, { headers, status: hit.status });
   }
 
-  // LEGACY_UPSTREAM=1 pulls home-data AND recommendation back into the generic
-  // proxy path below (falls through to `fetch(UPSTREAM + cacheKey)`, build
-  // stays null since localBuilder doesn't know these paths either) — one flag
-  // for "go back to full VPS dependency", covering Phase 3/4/5 at once.
-  if (env.LEGACY_UPSTREAM !== '1') {
-    if (url.pathname === HOME_PATH) {
-      return handleHomeData(env, ctx, cache, cacheReq, method);
-    }
-    const rec = parseRecommendationPath(url.pathname);
-    if (rec) {
-      return handleRecommendation(env, ctx, cache, cacheReq, method, rec.type, rec.tmdbId);
-    }
+  if (url.pathname === HOME_PATH) {
+    return handleHomeData(env, ctx, cache, cacheReq, method);
+  }
+  const rec = parseRecommendationPath(url.pathname);
+  if (rec) {
+    return handleRecommendation(env, ctx, cache, cacheReq, method, rec.type, rec.tmdbId);
   }
 
   const cacheKey = url.pathname + url.search;
   const ttl = ttlFor(url.pathname);
 
-  // env.LEGACY_UPSTREAM = '1' forces every path back through the VPS proxy,
-  // bypassing the local builders below entirely — the documented Phase 3
-  // rollback, no redeploy needed (just `wrangler deploy --var LEGACY_UPSTREAM:1`
-  // or flip it in the dashboard).
   let build = null;
   try {
-    build = env.LEGACY_UPSTREAM === '1' ? null : localBuilder(env, url);
+    build = localBuilder(env, url);
   } catch (err) {
     // Thrown synchronously by localBuilder for a malformed request (missing
     // required query param) — matches catalog-api's own validation, which
@@ -538,36 +489,34 @@ async function handleApi(request, env, ctx, url) {
     });
   }
 
+  if (!build) {
+    return new Response(JSON.stringify({ error: 'Not found' }), {
+      status: 404,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
   try {
-    let body;
-    if (build) {
-      const payload = await build();
-      body = JSON.stringify(payload);
-      const items =
-        payload?.data?.items ||
-        payload?.items ||
-        [payload?.data?.item || payload?.item || payload?.movie].filter(Boolean);
-      // Opportunistically index a freshly-built movie detail into the `idx`
-      // reverse index (Phase 5) so recommendations can resolve it by tmdb.id
-      // without a live OPhim search — same side effect the VPS did on every
-      // signed movie payload. List/genre/country/search deliberately do NOT
-      // index (see worker/lib/recommendation.js deviation #2).
-      if (url.pathname.startsWith('/api/movie/') && items[0]?.tmdb?.id) {
-        ctx.waitUntil(indexItems(env, [items[0]]).catch((e) => console.error('[movie idx]', e.message)));
-      }
-      // Enqueue this payload's artwork for mirroring into R2 (Phase 6). Every
-      // build path feeds the queue; the mirror cron drains it. Fire-and-forget.
-      if (items.length) {
-        ctx.waitUntil(
-          enqueueMirror(env, mirrorTargets(items)).catch((e) => console.error('[mirror enqueue]', e.message))
-        );
-      }
-    } else {
-      const res = await fetch(UPSTREAM + cacheKey, {
-        headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
-      });
-      if (!res.ok) throw new Error(`upstream ${res.status}`);
-      body = await res.text();
+    const payload = await build();
+    const body = JSON.stringify(payload);
+    const items =
+      payload?.data?.items ||
+      payload?.items ||
+      [payload?.data?.item || payload?.item || payload?.movie].filter(Boolean);
+    // Opportunistically index a freshly-built movie detail into the `idx`
+    // reverse index (Phase 5) so recommendations can resolve it by tmdb.id
+    // without a live OPhim search — same side effect the VPS did on every
+    // signed movie payload. List/genre/country/search deliberately do NOT
+    // index (see worker/lib/recommendation.js deviation #2).
+    if (url.pathname.startsWith('/api/movie/') && items[0]?.tmdb?.id) {
+      ctx.waitUntil(indexItems(env, [items[0]]).catch((e) => console.error('[movie idx]', e.message)));
+    }
+    // Enqueue this payload's artwork for mirroring into R2 (Phase 6). Every
+    // build path feeds the queue; the mirror cron drains it. Fire-and-forget.
+    if (items.length) {
+      ctx.waitUntil(
+        enqueueMirror(env, mirrorTargets(items)).catch((e) => console.error('[mirror enqueue]', e.message))
+      );
     }
 
     const cacheableRes = new Response(body, {
@@ -628,12 +577,6 @@ export default {
     if (url.pathname === '/__cron/mirror') {
       return handleCronMirror(request, env);
     }
-    if (url.pathname === '/__cron/backfill-webp') {
-      return handleCronBackfillWebp(request, env);
-    }
-    if (url.pathname === '/__cron/rekey-webp') {
-      return handleCronRekeyWebp(request, env);
-    }
     if (url.pathname === '/__cron/purge-recs') {
       return handleCronPurgeRecs(request, env, url);
     }
@@ -654,12 +597,6 @@ export default {
     if (event.cron === '*/10 * * * *') {
       // Drain the R2 image-mirror queue (Phase 6).
       ctx.waitUntil(drainMirrorQueue(env).catch((e) => console.error('[mirror drain]', e.message)));
-      // Drain the .jpg.webp -> .webp re-key batch (key-shape migration Phase
-      // A). Runs unattended alongside the mirror drain; once every
-      // `mirrored` row ends in .webp with no .jpg.webp left, this becomes a
-      // no-op every tick (drainRekeyBatch returns immediately) until the
-      // route/hook is removed in Phase C.
-      ctx.waitUntil(drainRekeyBatch(env).catch((e) => console.error('[rekey drain]', e.message)));
     }
   },
 };

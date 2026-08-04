@@ -41,26 +41,20 @@ binding = "DB"
 database_name = "redflare-db"
 database_id = "6eaf211c-0fcb-4404-9cff-718048e7c0c7"
 
-# BUCKET: R2 bucket serving artwork at redflarer2.bluesia.net. The Worker
-# both reads (image URL mapping) and writes it (worker/lib/mirror.js
-# drainMirrorQueue, streamed PUT, no local hashing). The VPS's own mirroring
-# (catalog-api r2.js) was retired along with the rest of the VPS backend,
-# 2026-08-01. Binding name deliberately differs from the "Redflare-R2" name
-# briefly added via the dashboard on 2026-07-31 (and silently dropped by the
-# next git-push deploy, since dashboard-only bindings aren't in this file) —
-# binding name only affects code, not the bucket itself.
+# BUCKET: R2 bucket serving artwork at img.bluesia.net (2026-08 domain
+# migration off redflarer2.bluesia.net -- that hostname was retired once
+# every reader/cache moved to img.bluesia.net; img.bluesia.net itself is a
+# reused hostname, not the old VPS -- the VPS that used to live there was
+# retired 2026-08-01 and has no relation to this bucket). The Worker both
+# reads (image URL mapping) and writes it (worker/lib/mirror.js
+# drainMirrorQueue, streamed PUT, no local hashing). Binding name
+# deliberately differs from the "Redflare-R2" name briefly added via the
+# dashboard on 2026-07-31 (and silently dropped by the next git-push deploy,
+# since dashboard-only bindings aren't in this file) — binding name only
+# affects code, not the bucket itself.
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "redflare-r2"
-
-# LEGACY_UPSTREAM=1 was the rollback switch for the migration: forced every
-# /api/* path back through the VPS proxy (img.bluesia.net). The VPS backend
-# was retired 2026-08-01 (bluesiaOM state file, Phase 7b) -- there is no
-# upstream left to fall back to, so this flag is now inert. Kept at "0" and
-# left in place rather than removed, in case the code path is ever useful
-# again for a future upstream.
-[vars]
-LEGACY_UPSTREAM = "0"
 
 # Two cron schedules, dispatched by event.cron in scheduled():
 #   "0 * * * *"    hourly — home-data refresh (worker/lib/home.js
