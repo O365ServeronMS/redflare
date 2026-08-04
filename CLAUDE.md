@@ -88,13 +88,14 @@ tier: static assets **plus a Worker** (`worker/index.js`, `main` in
 `wrangler.toml`) that does *all* the catalog work itself — OPhim proxying,
 TMDB enrichment, hero/recommendation ranking, R2 image mirroring — with no
 backend server anywhere else. `hls.js` + `artplayer` handle playback. Images
-are served from **R2** (`redflarer2.bluesia.net`), mirrored there by the
+are served from **R2** (`img.bluesia.net`), mirrored there by the
 Worker itself — see "Data flow & caching" below.
 
-**This used to run differently.** Through 2026-08-01 the Worker was a thin
-KV cache-aside shim in front of a VPS Node service (`catalog-api`, at
-`img.bluesia.net/api/*`) that did all the real work; the VPS also mirrored
-images into R2 and ran Valkey as its own cache. That VPS backend
+**This used to run differently, twice over.** Through 2026-08-01 the Worker
+was a thin KV cache-aside shim in front of a VPS Node service (`catalog-api`,
+at `img.bluesia.net/api/*` — **the same hostname R2 uses today, a different
+thing**; see the callout below) that did all the real work; the VPS also
+mirrored images into R2 and ran Valkey as its own cache. That VPS backend
 (`bluefilm-backend`) was migrated onto the Worker in phases and the VPS
 stack was fully retired 2026-08-01 — see
 [`bluesiaOM/context/state-redflare-cf-worker.md`](../bluesiaOM/context/state-redflare-cf-worker.md)
@@ -103,6 +104,14 @@ for the phase-by-phase history and the gotchas hit along the way (D1's
 returning 522, etc). The retired VPS source is archived, not deleted, at
 `github.com/O365ServeronMS/bluefilm-backend` — it's the reference if the
 enrichment/ranking logic ever needs cross-checking.
+
+Separately, images themselves moved domain later that same day: R2 originally
+served artwork at `redflarer2.bluesia.net`; a 2026-08-04 migration moved it to
+`img.bluesia.net` — the exact hostname the retired VPS used to own, now
+reused for something unrelated (R2 image serving, not a catalog API). Don't
+confuse the two: if you're reading old commit history or archived docs and see
+`img.bluesia.net`, check the date — before 2026-08-04 it means the VPS;
+2026-08-04 onward it means the R2 bucket.
 
 There are **no tests**, **no TypeScript**, and **no linter/CI**. Plain ES modules
 + imperative DOM.
@@ -166,7 +175,9 @@ if the Git integration is disconnected/reconnected. Don't remove it.
 - **`catalog-api`** (retired 2026-08-01) — used to be a separate Node service
   on the VPS doing everything `worker/lib/*` does now (OPhim proxying, hero
   ranking, TMDB enrichment, R2 mirroring, Valkey cache), served at
-  `img.bluesia.net/api/*`. Fully ported to the Worker across Phases 3–6 of
+  `img.bluesia.net/api/*` (VPS-era meaning of that hostname — see the callout
+  in "What this is"; today `img.bluesia.net` is the R2 image host and has no
+  `/api/*` route at all). Fully ported to the Worker across Phases 3–6 of
   the migration and shut down; source archived at
   `github.com/O365ServeronMS/bluefilm-backend` for reference, not imported by
   this repo. The original `worker.js`/`trending.js` in *this* repo were
@@ -185,8 +196,11 @@ Two different paths, both entirely on Cloudflare — no other server involved:
   the one exception — it's pre-built by an hourly cron rather than per
   request, see below. The Cache API sits in front of everything as the hot
   tier — see "Caching layers" below for exactly how.
-- **Images** — `redflarer2.bluesia.net` (R2), never proxied through the
-  Worker at read time. The Worker mirrors TMDB/OPhim artwork into R2 itself
+- **Images** — `img.bluesia.net` (R2), never proxied through the
+  Worker at read time. Served from that domain since a 2026-08-04 migration
+  off the original `redflarer2.bluesia.net` (a hard cutover, not a gradual
+  soak — see "Images: 2026-08-04 domain + key-shape migration" below for what
+  that entailed). The Worker mirrors TMDB/OPhim artwork into R2 itself
   (`worker/lib/mirror.js`): every build enqueues new image URLs into a D1
   queue (`mirror_queue`), and a cron every 10 minutes drains up to 20 at a
   time — `env.BUCKET.head()` to skip ones already mirrored, otherwise fetch
@@ -196,21 +210,25 @@ Two different paths, both entirely on Cloudflare — no other server involved:
   150-day TMDB cache-duration expiry; that was never actually configured on
   the bucket — corrected 2026-08-01).
 
-  **TMDB artwork is mirrored as WebP** (2026-08-04 migration — the WHY/plan
-  lived in a now-deleted `state.md` during the work; this doc is the durable
-  record). `image.tmdb.org` does content negotiation — `Accept: image/webp`
-  gets a ~30-36% smaller response than the default JPEG — but sends **no
-  `Vary: Accept`**, so a cached JPEG can be handed back to a WebP request
-  regardless of the header; `worker/lib/mirror.js` works around this with
-  `cf: { cacheTtl: 0 }` on the fetch and asserts the response actually is
-  `image/webp` before writing (retrying otherwise, since a permanent
-  give-up would strand the object). R2 keys **append** rather than swap the
-  extension — `t/p/w500/<hash>.jpg` → `t/p/w500/<hash>.jpg.webp` — so the
-  inverse (`upstreamForKey` in `worker/lib/images.js`, `upstreamFallback` in
-  `src/api/ophim.js`) never has to guess the original extension; these two
-  functions are a load-bearing contract, keep them in lockstep. `img.ophim.live`
-  does **not** negotiate WebP, so OPhim-sourced keys are mirrored as plain
-  JPEG at their original extension, unmodified by this.
+  **TMDB artwork is mirrored as WebP.** `image.tmdb.org` does content
+  negotiation — `Accept: image/webp` gets a ~30-36% smaller response than the
+  default JPEG — but sends **no `Vary: Accept`**, so a cached JPEG can be
+  handed back to a WebP request regardless of the header; `worker/lib/mirror.js`
+  works around this with `cf: { cacheTtl: 0 }` on the fetch and asserts the
+  response actually is `image/webp` before writing (retrying otherwise, since
+  a permanent give-up would strand the object — in practice a small number of
+  TMDB images never negotiate WebP even with the header, and sit retrying
+  forever; harmless, since a key that's never written just keeps serving via
+  the JPEG fallback below). R2 keys **swap** the extension —
+  `t/p/w500/<hash>.jpg` → `t/p/w500/<hash>.webp` — so the inverse
+  (`upstreamForKey` in `worker/lib/images.js`, `upstreamFallback` in
+  `src/api/ophim.js`) reconstructs the original TMDB URL by swapping back to
+  `.jpg` (TMDB source images are confirmed always `.jpg`); these two
+  functions are a load-bearing contract, keep them in lockstep, and
+  `webpKeyFor()`/`r2ImageUrl()` are idempotent on a key that's already
+  `.webp`. `img.ophim.live` does **not** negotiate WebP, so OPhim-sourced
+  keys are mirrored as plain JPEG at their original extension, unmodified by
+  this.
 
   Every `w500` poster (`thumb_url`) also gets a `w154` sibling mirrored
   alongside it (`worker/lib/images.js` `addW154Sibling`) — the hero rail
@@ -231,12 +249,32 @@ Two different paths, both entirely on Cloudflare — no other server involved:
   consumer on the account.
 
   R2 object keys otherwise still mirror the upstream path
-  (`t/p/w500/<hash>.jpg[.webp]`, `ophim/<path>`), so if a mirror hasn't
+  (`t/p/w500/<hash>[.webp]`, `ophim/<path>`), so if a mirror hasn't
   landed yet (or R2 is somehow unreachable) the frontend's `<img onerror>`
   handler rebuilds the original TMDB/OPhim URL from the R2 URL (unwrapping
   the `.webp` suffix and/or the transform wrapper first, as applicable) and
   retries it directly — see `upstreamFallback`/`attachImageFallback` in
   `src/api/ophim.js`.
+
+  **Images: 2026-08-04 domain + key-shape migration.** Moved image serving
+  from `redflarer2.bluesia.net` to `img.bluesia.net` in one hard cutover (no
+  dual-domain soak period — R2 lets one bucket answer multiple custom
+  domains, but the old domain was retired the same day rather than kept
+  around, since every reader/writer of the URL lives in this repo's own code
+  and the client-side upstream fallback covers any gap). Bundled into the
+  same deploy: finished a key-shape migration that had stalled partway
+  (`t/p/w500/<hash>.jpg.webp`, an appended suffix from an earlier WebP
+  rollout, swapped to `t/p/w500/<hash>.webp`) since a hard cutover was the
+  only point where redoing that swap was free. Rollout was: repoint
+  `R2_PUBLIC_BASE`/`R2_BASE` and swap `webpKeyFor`/`upstreamForKey`, deploy,
+  then re-mirror every object under the new host+shape (queued directly from
+  D1 `mirrored`, drained via repeated `/__cron/mirror` calls rather than
+  waiting for the 10-min cron), then purge caches that had baked in the old
+  URL — **including D1 `idx`**, easy to miss: it stores each item's full
+  mapped JSON (not just IDs), so recommendation responses kept serving the
+  old domain until `idx` itself was cleared, even after Cache API and D1
+  `recs` were purged. Finished by GC-ing the ~2,300 old-shape R2 objects
+  (temporary `/__cron/gc-old-keys` route, removed once drained).
 
 ### Endpoints the frontend calls
 
@@ -454,8 +492,8 @@ every new below-fold section through them rather than setting `loading`/
   IntersectionObserver/cleanup bookkeeping isn't worth it for a section with
   no image/network payload.
 - `index.html`'s `<link rel="preconnect">` must point at the actual image
-  origin, `https://redflarer2.bluesia.net` — it once pointed at the retired
-  `img.bluesia.net` VPS host, which silently did nothing useful.
+  origin, `https://img.bluesia.net` — get this wrong (e.g. pointing at a
+  retired host) and it silently does nothing useful, no error either way.
 
 ## Conventions & gotchas
 

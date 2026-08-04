@@ -37,9 +37,8 @@
 //   Images: every build (list/detail/home/rec) enqueues its artwork into the
 //              `mirror_queue` D1 table; the mirror cron copies them into R2 via
 //              the binding (worker/lib/mirror.js) — served from
-//              img.bluesia.net (2026-08 domain migration; previously
-//              redflarer2.bluesia.net — see git history / state.md if that
-//              file still exists).
+//              img.bluesia.net (redflare/CLAUDE.md "Images: 2026-08-04
+//              domain + key-shape migration" has the full history).
 //   anything else that isn't a static asset → env.ASSETS.fetch(request),
 //              which applies wrangler.toml's not_found_handling (SPA fallback)
 //
