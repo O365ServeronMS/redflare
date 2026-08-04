@@ -140,7 +140,9 @@ export async function renderGrid(container, { type, fetchFn, title, currentPage 
       errorEl.style.display = '';
     } else {
       items.forEach((movie, index) => {
-        renderPosterCard(grid, movie);
+        // First row is the LCP candidate on grid pages (danh-sach, the-loai,
+        // quoc-gia); 6 covers desktop's widest row without over-prioritizing.
+        renderPosterCard(grid, movie, null, index < 6);
         const card = grid.lastElementChild;
         if (card) {
           card.classList.add('fade-up');

@@ -3,6 +3,7 @@
  */
 import { thumbUrl, posterUrl, upstreamFallback } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
+import { applyImagePolicy } from '../../lib/image.js';
 
 function getImdbScore(movie) {
   const rawScore =
@@ -36,8 +37,9 @@ function getTmdbScore(movie) {
  * @param {HTMLElement} container
  * @param {Object} movie - Movie item from API
  * @param {number|null} rank - If not null, display rank+1 as a large overlay number
+ * @param {boolean} [priority] - Mark this card's poster as an LCP candidate (above the fold)
  */
-export function renderPosterCard(container, movie, rank = null) {
+export function renderPosterCard(container, movie, rank = null, priority = false) {
   const card = document.createElement('div');
   card.className = 'movie-card';
   card.addEventListener('click', () => navigate(`/phim/${movie.slug}`));
@@ -47,7 +49,7 @@ export function renderPosterCard(container, movie, rank = null) {
   img.className = 'movie-card__poster';
   img.src = thumbUrl(movie.thumb_url);
   img.alt = movie.name;
-  img.loading = 'lazy';
+  applyImagePolicy(img, { priority });
 
   // Fallback on error: retry the upstream origin if the R2 copy is not there
   // yet, then fall back to the wide artwork.

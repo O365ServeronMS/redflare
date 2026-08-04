@@ -4,6 +4,7 @@
  */
 import { posterUrl, thumbUrl, upstreamFallback, attachImageFallback } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
+import { applyImagePolicy } from '../../lib/image.js';
 
 const ROTATE_INTERVAL = 8000;
 const MAX_SLIDES = 20;
@@ -14,7 +15,7 @@ const SLIDER_TITLE = 'Phim Hot Trong Tuần';
 // by viewport rather than rewriting the path.
 const DESKTOP_MQ = window.matchMedia('(min-width: 769px)');
 
-function getBackdropUrl(movie) {
+export function getBackdropUrl(movie) {
   return DESKTOP_MQ.matches
     ? posterUrl(movie.poster_url || movie.thumb_url)
     : thumbUrl(movie.thumb_url || movie.poster_url);
@@ -51,6 +52,17 @@ function setBackdrop(el, movie) {
     el.style.backgroundImage = `url(${upstream})`;
   });
   probe.src = url;
+}
+
+// Only the active slide + the one it's most likely to rotate/navigate to next
+// carry a real network request. The other ~18 backdrops stay empty until
+// goToSlide() reaches them — avoids firing ~20 full-size backdrop requests on
+// every home page load.
+function ensureBackdrop(contentElements, slides, index) {
+  const el = contentElements[index];
+  if (!el || el.backdropLoaded) return;
+  el.backdropLoaded = true;
+  setBackdrop(el.backdrop, slides[index]);
 }
 
 function getScore(movie) {
@@ -107,7 +119,6 @@ export function renderHeroSlider(container, movies) {
     const backdrop = document.createElement('div');
     backdrop.className = 'hero__backdrop';
     if (index === 0) backdrop.classList.add('hero__backdrop--active');
-    setBackdrop(backdrop, movie);
     hero.appendChild(backdrop);
 
     const overlay = document.createElement('div');
@@ -230,7 +241,9 @@ export function renderHeroSlider(container, movies) {
       goToSlide(index);
       resetAutoRotate();
     });
-    attachImageFallback(item.querySelector('img'));
+    const railImg = item.querySelector('img');
+    applyImagePolicy(railImg, { priority: index === 0 });
+    attachImageFallback(railImg);
     rail.appendChild(item);
     railButtons.push(item);
   });
@@ -268,6 +281,8 @@ export function renderHeroSlider(container, movies) {
     railButtons[currentIndex].classList.remove('hero__rail-item--active');
 
     currentIndex = index;
+    ensureBackdrop(contentElements, slides, currentIndex);
+    ensureBackdrop(contentElements, slides, (currentIndex + 1) % slides.length);
 
     const next = contentElements[currentIndex];
     next.backdrop.classList.add('hero__backdrop--active');
@@ -294,13 +309,27 @@ export function renderHeroSlider(container, movies) {
     intervalId = setInterval(nextSlide, ROTATE_INTERVAL);
   }
 
-  // Swap each backdrop to the correct variant when crossing the breakpoint.
+  // Swap each *already-loaded* backdrop to the correct variant when crossing
+  // the breakpoint — slides that haven't loaded yet will pick the right
+  // variant themselves when ensureBackdrop() first reaches them.
   function applyBackdrops() {
     contentElements.forEach((el, i) => {
-      setBackdrop(el.backdrop, slides[i]);
+      if (el.backdropLoaded) setBackdrop(el.backdrop, slides[i]);
     });
   }
   DESKTOP_MQ.addEventListener('change', applyBackdrops);
+
+  ensureBackdrop(contentElements, slides, 0);
+  if (slides.length > 1) {
+    // Prefetch slide 1 once the browser is idle so the first auto-rotation
+    // doesn't have to wait on a cold fetch.
+    const prefetchNext = () => ensureBackdrop(contentElements, slides, 1);
+    if ('requestIdleCallback' in window) {
+      window.requestIdleCallback(prefetchNext, { timeout: 3000 });
+    } else {
+      setTimeout(prefetchNext, 1500);
+    }
+  }
 
   intervalId = setInterval(nextSlide, ROTATE_INTERVAL);
   container.appendChild(hero);

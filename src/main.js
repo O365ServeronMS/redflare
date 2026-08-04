@@ -18,7 +18,7 @@ import {
 } from './api/ophim.js';
 
 import { renderHeader } from './modules/Header/Header.js';
-import { renderHeroSlider } from './modules/HeroSlider/HeroSlider.js';
+import { renderHeroSlider, getBackdropUrl } from './modules/HeroSlider/HeroSlider.js';
 import { renderCarousel } from './modules/Carousel/Carousel.js';
 import { renderFooter } from './modules/Footer/Footer.js';
 import { renderMovieDetail } from './components/MovieDetail.js';
@@ -143,6 +143,16 @@ async function renderHomePage() {
     // Clear skeleton
     page.innerHTML = '';
 
+    // The hero's first backdrop is the LCP candidate — hint the browser to
+    // fetch it immediately, before HeroSlider even builds the DOM for it.
+    if (heroMovies.items[0]) {
+      const preload = document.createElement('link');
+      preload.rel = 'preload';
+      preload.as = 'image';
+      preload.fetchPriority = 'high';
+      preload.href = getBackdropUrl(heroMovies.items[0]);
+      document.head.appendChild(preload);
+    }
 
     const heroCleanup = renderHeroSlider(page, heroMovies.items);
 
@@ -152,6 +162,7 @@ async function renderHomePage() {
       items: newMovies.items,
       seeAllLink: '/danh-sach/phim-moi-cap-nhat',
       showRank: true,
+      priorityCount: 3,
     });
 
     if (trending.items.length) {

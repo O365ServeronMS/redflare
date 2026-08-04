@@ -11,8 +11,9 @@ import { renderPosterCard } from '../PosterCard/PosterCard.js';
  * @param {Array} options.items - Movie items to display
  * @param {string} [options.seeAllLink] - Hash link for the "Xem tất cả" action
  * @param {boolean} [options.showRank] - Whether to show ranking numbers on cards
+ * @param {number} [options.priorityCount] - First N cards are LCP candidates (above the fold)
  */
-export function renderCarousel(container, { title, items, seeAllLink, showRank }) {
+export function renderCarousel(container, { title, items, seeAllLink, showRank, priorityCount = 0 }) {
   const section = document.createElement('section');
   section.className = 'carousel';
 
@@ -52,7 +53,7 @@ export function renderCarousel(container, { title, items, seeAllLink, showRank }
 
   items.forEach((movie, index) => {
     const rank = showRank ? index : null;
-    renderPosterCard(track, movie, rank);
+    renderPosterCard(track, movie, rank, index < priorityCount);
   });
 
   wrapper.appendChild(track);

@@ -7,6 +7,7 @@ import { getMovieDetail, posterUrl, thumbUrl, attachImageFallback } from '../api
 import { navigate } from '../router.js';
 import { renderPlayer } from '../modules/Player/Player.js';
 import { renderRecommendation } from '../modules/Recommendation/Recommendation.js';
+import { applyImagePolicy } from '../lib/image.js';
 
 function getEpisodeRank(ep) {
   const name = String(ep?.name || '').trim().toLowerCase();
@@ -138,7 +139,8 @@ export async function renderMovieDetail(container, slug) {
     thumb.className = 'detail__thumb';
     thumb.src = thumbUrl(movie.thumb_url);
     thumb.alt = movie.name || '';
-    thumb.loading = 'lazy';
+    // Above-the-fold on the detail page — this is the LCP candidate here.
+    applyImagePolicy(thumb, { priority: true });
     attachImageFallback(thumb);
     heroInner.appendChild(thumb);
     banner.classList.add('hero--has-thumb');
