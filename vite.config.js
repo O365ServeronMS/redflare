@@ -19,8 +19,11 @@ export default defineConfig({
     },
   },
   preview: {
+    // Same reason as server.proxy above. (Was pointed at img.bluesia.net --
+    // the VPS-era catalog host; that name is the R2 image bucket now and has
+    // no /api/* route, so preview served no catalog data at all.)
     proxy: {
-      '/api': { target: 'https://img.bluesia.net', changeOrigin: true },
+      '/api': { target: 'https://phim.bluesia.net', changeOrigin: true },
     },
   },
 });

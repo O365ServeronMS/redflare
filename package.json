@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "start": "wrangler dev"
+    "start": "wrangler dev --remote"
   },
   "devDependencies": {
     "vite": "^8.1.0",

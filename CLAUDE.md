@@ -125,7 +125,7 @@ Node **26** (pinned in `.nvmrc` — Cloudflare's build image reads it too).
 | `npm run dev` | Vite dev server on `:3000`. Default loop. `src/api/ophim.js` calls same-origin `/api/*`; `vite.config.js`'s `server.proxy` forwards that straight to the **live production Worker** at `phim.bluesia.net/api/*` (the Worker is the only backend now — there is no local backend to run instead). |
 | `npm run build` | Vite build → `dist/` |
 | `npm run preview` | Vite's own static preview of `dist/` (no SPA fallback, no Worker — but `preview.proxy` forwards `/api/*` to the live production Worker same as `dev`) |
-| `npm start` | `wrangler dev --remote` — runs the **actual Worker** (`worker/index.js`) with **real bindings** (KV/D1/R2/service binding), serving `dist/` through the asset layer. Use `--remote`, not plain `wrangler dev` — local simulated bindings are empty/stale and will not reproduce real cache/D1/R2 behavior (see "Platform gotchas" — `wrangler kv/r2/d1` commands need `--remote` too, for the same reason). Use this to verify `not_found_handling = "single-page-application"` (deep link like `/phim/<slug>` reloads correctly) **and** to test the Worker's own builders (`worker/lib/*`) and Cache API / D1 fallback behavior. Requires `npm run build` first. |
+| `npm start` | `wrangler dev --remote` — runs the **actual Worker** (`worker/index.js`) with **real bindings** (KV/D1/R2/service binding), serving `dist/` through the asset layer. `--remote` is in the npm script on purpose — plain `wrangler dev` uses local simulated bindings that are empty/stale and will not reproduce real cache/D1/R2 behavior (see "Platform gotchas" — `wrangler kv/r2/d1` commands need `--remote` too, for the same reason). Use this to verify `not_found_handling = "single-page-application"` (deep link like `/phim/<slug>` reloads correctly) **and** to test the Worker's own builders (`worker/lib/*`) and Cache API / D1 fallback behavior. Requires `npm run build` first. |
 
 **Deploy = `git push origin main`.** Cloudflare Workers Builds picks it up, runs
 `npm run build`, and publishes `dist/` as static assets. No `wrangler deploy` by
@@ -164,14 +164,27 @@ if the Git integration is disconnected/reconnected. Don't remove it.
   `renderX(container, ...)` that builds DOM imperatively and appends it. No
   virtual DOM, no templating lib. Naming rules + migration status live in
   [`MODULES.md`](MODULES.md) — read it before adding or renaming a module.
+  Caveat: its "Axis C — Service modules" table still describes `catalog-api`
+  on the VPS (Valkey cache namespaces, `sign.js`), i.e. the pre-2026-08-01
+  world. The naming convention in that doc is current; its backend map is not.
 - **`src/components/MovieDetail.js`** — the last legacy resident; it is
   page-level, so it moves to `pages/DetailPage.js` in the planned `pages/` step,
   not into `modules/`.
+- **`src/lib/`** — shared helpers, no DOM ownership of their own: `image.js`
+  and `lazyMount.js` (see "Lazy loading" below) plus `mediaSession.js`
+  (Media Session API metadata, called from `Player.js` — puts **tên phim +
+  tập và ảnh poster lên màn hình khoá iPhone**: `title` = `"<tên phim> -
+  <tập>"`, `artist` = `Film Bluesia`, `artwork` = the w500 poster. Without
+  it iOS falls back to `document.title` + favicon. Keep the title short —
+  it's the only line iOS reliably shows).
+- **`migrations/`** — the D1 schema: `0001_stale.sql`, `0002_recs_idx_mirror.sql`.
+  Source of truth for the 5 tables described under "Caching layers" #4.
 - **`src/styles/`** — `variables.css` (CSS custom props), `global.css`,
   `components.css` (the bulk, still monolithic). Class naming is BEM-ish:
   `block__element--modifier`.
-- **`docs/DESIGN.md` + `docs/tokens.json`** — the Netflix-style design reference
-  the tokens in `variables.css` derive from. Reference only, not built.
+- **`docs/DESIGN.md` + `docs/tokens.json` + `docs/theme.css`** — the
+  Netflix-style design reference the tokens in `variables.css` derive from.
+  Reference only, not built or imported.
 - **`catalog-api`** (retired 2026-08-01) — used to be a separate Node service
   on the VPS doing everything `worker/lib/*` does now (OPhim proxying, hero
   ranking, TMDB enrichment, R2 mirroring, Valkey cache), served at
@@ -287,9 +300,9 @@ Two different paths, both entirely on Cloudflare — no other server involved:
   layers" #2. Recommendations kept serving `redflarer2` URLs against a host
   whose DNS was already gone, so every image in them silently fell through to
   `attachImageFallback`'s TMDB origin (visibly fine, just unmirrored and
-  un-WebP'd). `CACHE_VERSION` was added for exactly this and bumped to `2`;
-  **bump it in the same deploy** as any future change to how image URLs are
-  built.
+  un-WebP'd). The takeaway for any future change to how image URLs are built:
+  **Purge Everything on the Cloudflare dashboard as part of that deploy** —
+  the Cache API entries will not fix themselves. See "Caching layers" #2.
 
 ### Endpoints the frontend calls
 
@@ -377,12 +390,16 @@ name. Expect the two to disagree occasionally.
    to 30 days for a `full`-tier recommendation), no matter how much traffic
    it gets. This matters because cached bodies embed **absolute image URLs**:
    anything that changes those URLs makes every pre-existing entry wrong, not
-   merely stale. The lever for that is `CACHE_VERSION` in `worker/index.js` —
-   the Cache API key is `<url>?__v=<CACHE_VERSION>` (`cacheKeyFor()`), so
-   bumping the constant retires every entry at every colo in one deploy.
-   Nothing else can: `cache.delete()` only evicts in the colo that served the
-   purge request. If you add another `cache.delete()` call site, it **must**
-   go through `cacheKeyFor()` or it silently deletes nothing.
+   merely stale. **Clearing them is a manual Cloudflare-dashboard step:**
+   Caching → Purge Everything on the `bluesia.net` zone. `caches.default` is
+   the same zone cache the CDN uses, so a dashboard purge does drop these
+   entries; the Cache API key here is the plain request URL
+   (`worker/index.js` `handleApi`), so purge-by-URL matches too. In-code
+   `cache.delete()` (the `/__cron/purge-recs` route) only evicts in the colo
+   that served the purge request — fine for spot-fixing one title, useless
+   for a fleet-wide URL change. A `CACHE_VERSION` key-versioning scheme
+   (`<url>?__v=N`) was tried for this and reverted (`a4826f7`) as redundant
+   with the dashboard purge.
 3. **KV** (`CATALOG_KV`) — deliberately minimal: one key
    (`home:current`, plus TTL'd `trending:week`/`trending:day`) written only by
    the hourly cron, never per-request, and ~111 `meta:*` TMDB-enrichment
@@ -438,10 +455,10 @@ one title's recommendation cache to rebuild immediately at *both* layers:
 <CRON_KEY>`, same gate as the other `/__cron/*` routes).
 
 **To force fresh data:** for `/api/list`/`genre`/`country`/`search`/`movie`,
-delete the specific Cache API entry (no dashboard UI for this — easiest is a
-cache-busting query param, or wait out the response's `Cache-Control`) or
-just let the next distinct request rebuild it (Cache API misses are cheap,
-there's no upstream to protect anymore). Recommendation has its own purge
+purge the Cache API entry from the Cloudflare dashboard (Caching → Purge
+Everything, or purge-by-URL — the key is the plain request URL), use a
+cache-busting query param, or just let the next distinct request rebuild it
+(Cache API misses are cheap, there's no upstream to protect anymore). Recommendation has its own purge
 route, see above. For home, the KV key `home:current` only changes on the
 next hourly cron tick — trigger it on demand with `GET /__cron/refresh-home`
 (header `x-cron-key: <CRON_KEY>`). Changing the enrichment table above needs
