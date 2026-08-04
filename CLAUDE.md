@@ -215,11 +215,16 @@ Two different paths, both entirely on Cloudflare — no other server involved:
   default JPEG — but sends **no `Vary: Accept`**, so a cached JPEG can be
   handed back to a WebP request regardless of the header; `worker/lib/mirror.js`
   works around this with `cf: { cacheTtl: 0 }` on the fetch and asserts the
-  response actually is `image/webp` before writing (retrying otherwise, since
-  a permanent give-up would strand the object — in practice a small number of
-  TMDB images never negotiate WebP even with the header, and sit retrying
-  forever; harmless, since a key that's never written just keeps serving via
-  the JPEG fallback below). R2 keys **swap** the extension —
+  response actually is `image/webp` before writing. That assertion retries
+  rather than gives up, but **only for `WEBP_GRACE_MS` (1 hour)** — a handful
+  of TMDB images never negotiate WebP no matter how often you ask, and
+  retrying those forever strands them twice over: the object never lands (so
+  the title falls back to the TMDB origin on every view) and, because
+  `drainMirrorQueue` pulls `ORDER BY queued_at`, the stuck rows are the oldest
+  and reoccupy a slot in *every* drain. Past the grace window the mirror
+  stores whatever image bytes it got, under the `.webp` key but with its real
+  `content-type` — browsers go by the header, not the extension, so it renders
+  correctly. Outcome shows as `mirrored-nonwebp` in the drain log. R2 keys **swap** the extension —
   `t/p/w500/<hash>.jpg` → `t/p/w500/<hash>.webp` — so the inverse
   (`upstreamForKey` in `worker/lib/images.js`, `upstreamFallback` in
   `src/api/ophim.js`) reconstructs the original TMDB URL by swapping back to
