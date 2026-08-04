@@ -20,10 +20,22 @@ function getBackdropUrl(movie) {
     : thumbUrl(movie.thumb_url || movie.poster_url);
 }
 
+// Rail slot renders at 42px wide (30px mobile, see .hero__rail-poster in
+// components.css) but thumb_url is a w500 TMDB poster — ~99KB average
+// (see state.md audit) for a 42px box. w154 covers up to DPR 3 at that size
+// and is mirrored alongside every w500 poster (worker/lib/images.js
+// addW154Sibling), so rewrite to it here rather than loading w500 and
+// discarding 90% of the pixels. Only touches TMDB-shaped R2 URLs — OPhim URLs
+// (no w-size segment) pass through untouched.
+const TMDB_W500_RE = /\/t\/p\/w500\//;
+function toRailSize(url) {
+  return TMDB_W500_RE.test(url) ? url.replace(TMDB_W500_RE, '/t/p/w154/') : url;
+}
+
 // Rail slot is portrait (aspect-ratio 2/3) — use the /m thumb_url, not the
 // landscape poster_url.
 function getRailThumbUrl(movie) {
-  return thumbUrl(movie.thumb_url || movie.poster_url);
+  return toRailSize(thumbUrl(movie.thumb_url || movie.poster_url));
 }
 
 // A background-image has no error event, so probe the URL and swap to the
@@ -207,7 +219,7 @@ export function renderHeroSlider(container, movies) {
     item.innerHTML = `
       <span class="hero__rail-rank">${index + 1}</span>
       <span class="hero__rail-poster">
-        <img src="${getRailThumbUrl(movie)}" alt="${movie.name}">
+        <img src="${getRailThumbUrl(movie)}" alt="${movie.name}" loading="lazy">
       </span>
       <span class="hero__rail-copy">
         <span class="hero__rail-title">${movie.name}</span>

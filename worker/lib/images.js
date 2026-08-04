@@ -111,6 +111,19 @@ export function webpKeyFor(key) {
   return `${key}.webp`;
 }
 
+// Derives the `w154` sibling of a `w500` poster target — used by both
+// mirrorTargets (ongoing) and webpBackfillTargets (one-off) so a title's
+// w154 mirror stays covered whichever path first discovers it. w154 feeds
+// the hero rail (Phase 4 — HeroSlider renders that rail at 42px/30px wide,
+// not the 500px poster it loaded before). No-op for anything that isn't a
+// `t/p/w500/...` key.
+function addW154Sibling(out, key, sourceUrl) {
+  if (!key.startsWith('t/p/w500/')) return;
+  const w154Key = webpKeyFor(key.replace('t/p/w500/', 't/p/w154/'));
+  if (out.has(w154Key)) return;
+  out.set(w154Key, { key: w154Key, sourceUrl: sourceUrl.replace('/t/p/w500/', '/t/p/w154/') });
+}
+
 // From ALREADY-MAPPED items (whose thumb_url/poster_url are R2 URLs), extract
 // the deduped [{ key, sourceUrl }] targets to mirror. Used by the Worker's
 // mirror pipeline (worker/lib/mirror.js) to enqueue images for copying into
@@ -121,20 +134,31 @@ export function webpKeyFor(key) {
 // negotiates WebP via Accept when it drains these) — image.tmdb.org supports
 // content negotiation, so no separate transform step is needed. OPhim targets
 // are queued as-is: img.ophim.live does not negotiate WebP, and the raw
-// mirror is what Phase 5's serve-time transformation reads from.
+// mirror is what Phase 5's serve-time transformation reads from. Every w500
+// poster also gets its w154 sibling queued (see addW154Sibling) so newly
+// discovered titles stay covered for the hero rail, not just the ones caught
+// by Phase 2's one-off backfill.
 export function mirrorTargets(items) {
   const out = new Map();
   const prefix = `${R2_PUBLIC_BASE}/`;
   for (const it of items || []) {
     for (const u of [it?.thumb_url, it?.poster_url]) {
       if (typeof u !== 'string' || !u.startsWith(prefix)) continue;
-      const key = u.slice(prefix.length).split('?')[0];
-      if (!key) continue;
-      const isOphim = key.startsWith('ophim/');
+      const servedKey = u.slice(prefix.length).split('?')[0];
+      if (!servedKey) continue;
+      const isOphim = servedKey.startsWith('ophim/');
+      // Since Phase 3, thumb_url/poster_url already carry the SERVED key --
+      // r2ImageUrl appends .webp for TMDB targets. Normalize back to the
+      // jpg-shaped base key before re-deriving the webp target key, or this
+      // double-appends .webp (a real bug that shipped between Phase 3 and
+      // Phase 4 -- see state.md incident log).
+      const key = !isOphim && servedKey.endsWith('.webp') ? servedKey.slice(0, -'.webp'.length) : servedKey;
       const targetKey = isOphim ? key : webpKeyFor(key);
-      if (out.has(targetKey)) continue;
-      const sourceUrl = upstreamForKey(key);
-      if (sourceUrl) out.set(targetKey, { key: targetKey, sourceUrl });
+      const sourceUrl = out.has(targetKey) ? null : upstreamForKey(key);
+      if (sourceUrl) {
+        out.set(targetKey, { key: targetKey, sourceUrl });
+        if (!isOphim) addW154Sibling(out, key, sourceUrl);
+      }
     }
   }
   return [...out.values()];
@@ -142,11 +166,8 @@ export function mirrorTargets(items) {
 
 // Phase 2 one-off backfill: given the jpg-shaped keys already in D1
 // `mirrored` (from before Phase 1), derive the WebP-variant targets to
-// enqueue, plus a `w154` variant of each `w500` poster key (feeds the hero
-// rail right-sizing in Phase 4 — HeroSlider renders that rail at
-// 42px/30px wide, not the 500px-wide poster it currently loads). OPhim keys
-// and keys already ending `.webp` are skipped — same reasoning as
-// mirrorTargets above.
+// enqueue, plus each w500 key's w154 sibling. OPhim keys and keys already
+// ending `.webp` are skipped — same reasoning as mirrorTargets above.
 export function webpBackfillTargets(keys) {
   const out = new Map();
   for (const key of keys || []) {
@@ -156,12 +177,7 @@ export function webpBackfillTargets(keys) {
 
     const webpKey = webpKeyFor(key);
     if (!out.has(webpKey)) out.set(webpKey, { key: webpKey, sourceUrl });
-
-    if (key.startsWith('t/p/w500/')) {
-      const w154Key = webpKeyFor(key.replace('t/p/w500/', 't/p/w154/'));
-      const w154Source = sourceUrl.replace('/t/p/w500/', '/t/p/w154/');
-      if (!out.has(w154Key)) out.set(w154Key, { key: w154Key, sourceUrl: w154Source });
-    }
+    addW154Sibling(out, key, sourceUrl);
   }
   return [...out.values()];
 }
