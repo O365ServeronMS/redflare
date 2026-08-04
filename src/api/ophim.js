@@ -172,7 +172,11 @@ const R2_BASE = 'https://redflarer2.bluesia.net/';
 
 export function upstreamFallback(url) {
   if (!url || !url.startsWith(R2_BASE)) return '';
-  const key = url.slice(R2_BASE.length);
+  let key = url.slice(R2_BASE.length);
+  // TMDB images are served from the `.webp` variant (worker/lib/images.js
+  // r2ImageUrl, Phase 3 of the WebP migration — see state.md); strip it back
+  // off to rebuild the original TMDB URL. OPhim keys never carry the suffix.
+  if (key.endsWith('.webp')) key = key.slice(0, -'.webp'.length);
   return key.startsWith('ophim/')
     ? `https://img.ophim.live/${key.slice(6)}`
     : `https://image.tmdb.org/${key}`;

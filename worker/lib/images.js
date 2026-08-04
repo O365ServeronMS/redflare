@@ -63,11 +63,20 @@ function objectKeyFor(canonicalUrl) {
 }
 
 // Public: raw upstream URL -> R2 URL, or '' if the host isn't mirrored.
+//
+// Phase 3 (WebP migration, see state.md): TMDB keys are served from their
+// `.webp` variant, mirrored by worker/lib/mirror.js since Phase 1/2. OPhim
+// keys are NOT — img.ophim.live doesn't negotiate WebP and Phase 1 never
+// mirrors an OPhim `.webp` object, so pointing at one here would 404 every
+// OPhim image permanently (Phase 5 covers OPhim separately, via a serve-time
+// transform of the existing raw mirror, not a stored `.webp` object).
 export function r2ImageUrl(rawUrl) {
   const canonical = canonicalizeImageUrl(rawUrl);
   if (!canonical) return '';
   const key = objectKeyFor(canonical);
-  return key ? `${R2_PUBLIC_BASE}/${key}` : '';
+  if (!key) return '';
+  const servedKey = key.startsWith('ophim/') ? key : webpKeyFor(key);
+  return `${R2_PUBLIC_BASE}/${servedKey}`;
 }
 
 // Maps an item's thumb_url/poster_url in place, mirroring sign.js's
