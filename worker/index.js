@@ -37,6 +37,14 @@
 //              see state.md): enqueues a `.webp` mirror target for every
 //              pre-Phase-1 jpg key in D1 `mirrored`, plus a `w154` variant of
 //              each `w500` poster key. Drains through the normal mirror cron.
+//   /__cron/rekey-webp
+//              → internal, gated by CRON_KEY. Key-shape migration Phase A
+//              (see git log / CLAUDE.md "Images"): forces a batch of the
+//              `.jpg.webp` -> `.webp` in-bucket re-key on demand. Also runs
+//              unattended every */10 tick alongside the mirror drain
+//              (worker/lib/mirror.js drainRekeyBatch) — no manual trigger
+//              needed for the migration itself, this route just forces a
+//              batch immediately instead of waiting for the next tick.
 //   Images: every build (list/detail/home/rec) enqueues its artwork into the
 //              `mirror_queue` D1 table; the mirror cron copies them into R2 via
 //              the binding (worker/lib/mirror.js) — the VPS no longer mirrors.
@@ -81,7 +89,7 @@ import {
   classifyTier,
   ttlForTier,
 } from './lib/recommendation.js';
-import { enqueueMirror, drainMirrorQueue } from './lib/mirror.js';
+import { enqueueMirror, drainMirrorQueue, drainRekeyBatch } from './lib/mirror.js';
 
 const UPSTREAM = 'https://img.bluesia.net';
 const OPHIM_BASE = 'https://ophim1.com';
@@ -415,6 +423,15 @@ async function handleCronMirror(request, env) {
   return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
 }
 
+// Manual trigger for the R2 re-key drain (.jpg.webp -> .webp key-shape
+// migration, Phase A) — same call the */10 cron makes. Exposed to force a
+// batch on demand without waiting for the cron tick.
+async function handleCronRekeyWebp(request, env) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const result = await drainRekeyBatch(env);
+  return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
+}
+
 // One-off: enqueue WebP (+ w154 poster) targets for every jpg-shaped key
 // already in D1 `mirrored` from before Phase 1 shipped. Drains through the
 // normal */10 mirror cron like any other queued target — this route only
@@ -614,6 +631,9 @@ export default {
     if (url.pathname === '/__cron/backfill-webp') {
       return handleCronBackfillWebp(request, env);
     }
+    if (url.pathname === '/__cron/rekey-webp') {
+      return handleCronRekeyWebp(request, env);
+    }
     if (url.pathname === '/__cron/purge-recs') {
       return handleCronPurgeRecs(request, env, url);
     }
@@ -634,6 +654,12 @@ export default {
     if (event.cron === '*/10 * * * *') {
       // Drain the R2 image-mirror queue (Phase 6).
       ctx.waitUntil(drainMirrorQueue(env).catch((e) => console.error('[mirror drain]', e.message)));
+      // Drain the .jpg.webp -> .webp re-key batch (key-shape migration Phase
+      // A). Runs unattended alongside the mirror drain; once every
+      // `mirrored` row ends in .webp with no .jpg.webp left, this becomes a
+      // no-op every tick (drainRekeyBatch returns immediately) until the
+      // route/hook is removed in Phase C.
+      ctx.waitUntil(drainRekeyBatch(env).catch((e) => console.error('[rekey drain]', e.message)));
     }
   },
 };
