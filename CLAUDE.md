@@ -276,6 +276,16 @@ Two different paths, both entirely on Cloudflare — no other server involved:
   `recs` were purged. Finished by GC-ing the ~2,300 old-shape R2 objects
   (temporary `/__cron/gc-old-keys` route, removed once drained).
 
+  One thing that migration got wrong and had to come back and fix: the
+  pre-deploy **Cache API** entries were left to expire on the assumption they
+  would rebuild once someone opened the title. They don't — see "Caching
+  layers" #2. Recommendations kept serving `redflarer2` URLs against a host
+  whose DNS was already gone, so every image in them silently fell through to
+  `attachImageFallback`'s TMDB origin (visibly fine, just unmirrored and
+  un-WebP'd). `CACHE_VERSION` was added for exactly this and bumped to `2`;
+  **bump it in the same deploy** as any future change to how image URLs are
+  built.
+
 ### Endpoints the frontend calls
 
 All defined in `src/api/ophim.js`, all same-origin `/api/*`, all built by the
@@ -356,6 +366,18 @@ name. Expect the two to disagree occasionally.
    own builder (OPhim + TMDB fetch, enrichment, D1 lookups as needed) and the
    fresh response is written back to cache before returning. `x-catalog-cache:
    hit`/`miss` on every response says which happened.
+
+   **A hit returns before the builder runs — so a wrong entry never
+   self-heals by being visited.** It survives until its own TTL expires (up
+   to 30 days for a `full`-tier recommendation), no matter how much traffic
+   it gets. This matters because cached bodies embed **absolute image URLs**:
+   anything that changes those URLs makes every pre-existing entry wrong, not
+   merely stale. The lever for that is `CACHE_VERSION` in `worker/index.js` —
+   the Cache API key is `<url>?__v=<CACHE_VERSION>` (`cacheKeyFor()`), so
+   bumping the constant retires every entry at every colo in one deploy.
+   Nothing else can: `cache.delete()` only evicts in the colo that served the
+   purge request. If you add another `cache.delete()` call site, it **must**
+   go through `cacheKeyFor()` or it silently deletes nothing.
 3. **KV** (`CATALOG_KV`) — deliberately minimal: one key
    (`home:current`, plus TTL'd `trending:week`/`trending:day`) written only by
    the hourly cron, never per-request, and ~111 `meta:*` TMDB-enrichment
