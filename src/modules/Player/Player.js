@@ -13,6 +13,7 @@ function createIframe(embedUrl) {
   const iframe = document.createElement('iframe');
   iframe.className = 'player__iframe';
   iframe.src = embedUrl;
+  iframe.loading = 'lazy';
   iframe.setAttribute('allow', 'autoplay; fullscreen; encrypted-media');
   iframe.setAttribute('allowfullscreen', '');
   iframe.setAttribute('frameborder', '0');

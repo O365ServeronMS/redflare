@@ -46,7 +46,7 @@ export function renderHeader(container) {
   logo.innerHTML = `
     <picture>
       <source srcset="/logo-dark.webp" type="image/webp">
-      <img src="/logo-dark.png" alt="Film Bluesia" style="height: 36px; display: block;" />
+      <img src="/logo-dark.png" alt="Film Bluesia" width="36" height="36" style="height: 36px; display: block;" />
     </picture>
   `;
   logo.addEventListener('click', (e) => {

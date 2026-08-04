@@ -8,6 +8,7 @@ import { navigate } from '../router.js';
 import { renderPlayer } from '../modules/Player/Player.js';
 import { renderRecommendation } from '../modules/Recommendation/Recommendation.js';
 import { applyImagePolicy } from '../lib/image.js';
+import { mountWhenVisible } from '../lib/lazyMount.js';
 
 function getEpisodeRank(ep) {
   const name = String(ep?.name || '').trim().toLowerCase();
@@ -439,9 +440,16 @@ export async function renderMovieDetail(container, slug) {
   body.appendChild(info);
   detail.appendChild(body);
 
-  // Fire-and-forget — appends the Recommendation ("Bạn cũng có thể thích") block
-  // at the bottom once resolved; must NOT block the main render.
-  renderRecommendation(detail, movie);
-
   container.appendChild(detail);
+
+  // Recommendation sits at the very bottom of the page and needs its own
+  // network round-trip — defer both the request and the render until the
+  // user scrolls near it instead of firing on every detail-page load.
+  const recPlaceholder = document.createElement('div');
+  detail.appendChild(recPlaceholder);
+  const recCleanup = mountWhenVisible(recPlaceholder, () => {
+    renderRecommendation(recPlaceholder, movie);
+  });
+
+  return recCleanup;
 }

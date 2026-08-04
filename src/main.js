@@ -25,6 +25,7 @@ import { renderMovieDetail } from './components/MovieDetail.js';
 import { renderGrid } from './modules/Grid/Grid.js';
 import { renderSearchOverlay } from './modules/SearchOverlay/SearchOverlay.js';
 import { createSkeletonCards, createSkeletonHero } from './modules/Skeleton/Skeleton.js';
+import { mountWhenVisible } from './lib/lazyMount.js';
 
 function showRuntimeError(message) {
   const errorEl = document.createElement('div');
@@ -173,16 +174,26 @@ async function renderHomePage() {
       });
     }
 
-    renderCarousel(page, {
-      title: 'Phim Lẻ',
-      items: phimLe.items,
-      seeAllLink: '/danh-sach/phim-le',
+    // Below the fold on virtually every viewport — defer their DOM build
+    // (and poster image requests) until the user scrolls near them.
+    const phimLePlaceholder = document.createElement('div');
+    page.appendChild(phimLePlaceholder);
+    const phimLeCleanup = mountWhenVisible(phimLePlaceholder, () => {
+      renderCarousel(phimLePlaceholder, {
+        title: 'Phim Lẻ',
+        items: phimLe.items,
+        seeAllLink: '/danh-sach/phim-le',
+      });
     });
 
-    renderCarousel(page, {
-      title: 'Phim Bộ',
-      items: phimBo.items,
-      seeAllLink: '/danh-sach/phim-bo',
+    const phimBoPlaceholder = document.createElement('div');
+    page.appendChild(phimBoPlaceholder);
+    const phimBoCleanup = mountWhenVisible(phimBoPlaceholder, () => {
+      renderCarousel(phimBoPlaceholder, {
+        title: 'Phim Bộ',
+        items: phimBo.items,
+        seeAllLink: '/danh-sach/phim-bo',
+      });
     });
 
     // Footer
@@ -190,6 +201,8 @@ async function renderHomePage() {
 
     return () => {
       if (heroCleanup) heroCleanup();
+      phimLeCleanup();
+      phimBoCleanup();
     };
   } catch (err) {
     page.innerHTML = '';
@@ -207,12 +220,13 @@ async function renderHomePage() {
 }
 
 // ─── Movie Detail Page ──────────────────────────────────
-function renderDetailPage({ params }) {
+async function renderDetailPage({ params }) {
   const page = getPageContainer();
   const detailWrap = document.createElement('div');
   page.appendChild(detailWrap);
-  renderMovieDetail(detailWrap, params.slug);
+  const recCleanup = await renderMovieDetail(detailWrap, params.slug);
   renderFooter(page);
+  return recCleanup;
 }
 
 // ─── Category / List Page ───────────────────────────────
