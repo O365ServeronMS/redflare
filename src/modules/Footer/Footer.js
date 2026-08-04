@@ -37,9 +37,9 @@ const COLUMNS = [
   {
     title: 'Thông Tin',
     items: [
-      { type: 'text', content: 'Film Bluesia' },
-      { type: 'text', content: 'Xem phim trực tuyến miễn phí' },
-      { type: 'text', content: 'Liên hệ: contact@filmbluesia.com' },
+      { type: 'text', content: 'Dự án cá nhân phi lợi nhuận, phục vụ mục đích học tập.' },
+      { type: 'text', content: 'Website không lưu trữ tệp phim; nội dung được dẫn từ máy chủ của bên thứ ba.' },
+      { type: 'text', content: 'Vấn đề bản quyền, vui lòng liên hệ: contact@filmbluesia.com để gỡ bỏ.' },
     ],
   },
 ];

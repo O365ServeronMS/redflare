@@ -1,4 +1,4 @@
-// home.js — builds /api/home-data as 6 independently-invoked shards instead
+// home.js — builds /api/home-data as 5 independently-invoked shards instead
 // of catalog-api's single buildHomeData() (home.js on the VPS). Ported logic:
 // getItems, buildTrendingItems (unchanged), the TMDB trending-window refresh
 // (unchanged 6h TTL semantics, now via KV's native expirationTtl instead of a
@@ -12,7 +12,7 @@
 // (each a real HTTP round-trip to this Worker's own /__cron/shard/:n route,
 // NOT a function call — that's what gives each one its own separate 10ms/50
 // budget), and an orchestrator (runHomeRefresh, called from a Cron Trigger)
-// that fetches all 6 and concatenates their pre-serialized JSON as STRINGS —
+// that fetches all 5 and concatenates their pre-serialized JSON as STRINGS —
 // see buildHomePayload() below for why that matters.
 //
 // DELIBERATE DEVIATIONS FROM THE VPS VERSION (all documented in
@@ -181,7 +181,10 @@ async function buildCardRail(env, upstreamUrl) {
 
 async function buildHeroShard(env) {
   const enrich = createEnrich(env);
-  const pool = await fetchPool();
+  // Hero ("Phim Hot Trong Tuần") deliberately excludes hoạt hình — the
+  // Hoạt Hình rail itself was removed from the homepage, keep it out of
+  // the trending-matched hero pool too.
+  const pool = (await fetchPool()).filter((item) => item?.type !== 'hoathinh');
   const weekIds = await getOrRefreshTrendingIds(env, 'week', TRENDING_WEEK_KEY);
   const hero = buildTrendingItems([pool], weekIds, HERO_COUNT);
   await enrich.enrichItemsCards(hero);
@@ -199,19 +202,18 @@ async function buildTrendingShard(env) {
 
 // Shard budget per invocation (all well under the free plan's 50 external
 // subrequests/invocation):
-//   0-3 (card rails): 1 OPhim + <=24 TMDB enrich           = <=25
+//   0-2 (card rails): 1 OPhim + <=24 TMDB enrich           = <=25
 //   4   (hero):       10 OPhim + <=2 TMDB trending + <=20  = <=32
 //   5   (trending):   10 OPhim + <=2 TMDB trending + <=24  = <=36
 export const CRON_SHARD_BUILDERS = {
   0: (env) => buildCardRail(env, `${OPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=1`),
   1: (env) => buildCardRail(env, `${OPHIM_BASE}/v1/api/danh-sach/phim-le?page=1`),
   2: (env) => buildCardRail(env, `${OPHIM_BASE}/v1/api/danh-sach/phim-bo?page=1`),
-  3: (env) => buildCardRail(env, `${OPHIM_BASE}/v1/api/danh-sach/hoat-hinh?page=1`),
   4: (env) => buildHeroShard(env),
   5: (env) => buildTrendingShard(env),
 };
 
-// --- Orchestrator: calls all 6 shards through the SELF service binding
+// --- Orchestrator: calls all 5 shards through the SELF service binding
 // (each still gets its own independent invocation budget — a function call
 // would NOT), then concatenates their pre-serialized JSON as STRINGS.
 // Parsing 6 fragments and re-stringifying a combined ~150KB object here
@@ -240,7 +242,6 @@ export async function runHomeRefresh(env) {
     const s0 = await callShard(env, 0);
     const s1 = await callShard(env, 1);
     const s2 = await callShard(env, 2);
-    const s3 = await callShard(env, 3);
     const s4 = await callShard(env, 4);
     const s5 = await callShard(env, 5);
 
@@ -250,7 +251,6 @@ export async function runHomeRefresh(env) {
       ',"newMovies":{"items":' + s0 + '}' +
       ',"phimLe":{"items":' + s1 + '}' +
       ',"phimBo":{"items":' + s2 + '}' +
-      ',"hoatHinh":{"items":' + s3 + '}' +
       ',"trending":{"items":' + s5 + '}}';
 
     // A failed shard throws before this line, so a partial/broken home
@@ -283,7 +283,6 @@ export async function buildHomeFallback(env) {
     newMovies: { items: mapped },
     phimLe: { items: [] },
     phimBo: { items: [] },
-    hoatHinh: { items: [] },
     trending: { items: [] },
   };
 }

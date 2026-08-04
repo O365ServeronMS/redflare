@@ -137,7 +137,6 @@ async function renderHomePage() {
     // We normalize the items so they match what the UI expects
     const phimLe = { items: (data.phimLe?.items || []).map(normalizeListItem) };
     const phimBo = { items: (data.phimBo?.items || []).map(normalizeListItem) };
-    const hoatHinh = { items: (data.hoatHinh?.items || []).map(normalizeListItem) };
     const trending = { items: (data.trending?.items || []).map(normalizeListItem) };
     const heroMovies = { items: (data.heroMovies || []).map(normalizeListItem) };
 
@@ -173,12 +172,6 @@ async function renderHomePage() {
       title: 'Phim Bộ',
       items: phimBo.items,
       seeAllLink: '/danh-sach/phim-bo',
-    });
-
-    renderCarousel(page, {
-      title: 'Hoạt Hình',
-      items: hoatHinh.items,
-      seeAllLink: '/danh-sach/hoat-hinh',
     });
 
     // Footer

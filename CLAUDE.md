@@ -343,8 +343,14 @@ name. Expect the two to disagree occasionally.
 **Home page is special: cron-built, never built on request.**
 `/api/home-data` would blow the 10ms CPU / 50-subrequest budget if built
 synchronously (it needs OPhim + TMDB across many categories). Instead an
-hourly cron (`0 * * * *` → `worker/lib/home.js` `runHomeRefresh`) calls 6
-`/__cron/shard/:n` routes — each its own Worker invocation with its own
+hourly cron (`0 * * * *` → `worker/lib/home.js` `runHomeRefresh`) calls 5
+`/__cron/shard/:n` routes (shards 0,1,2,4,5 — 3 was `hoat-hinh`'s card rail,
+removed 2026-08-04 since the Hoạt Hình rail was cut from the homepage; the
+`hoat-hinh` OPhim list is still fetched as part of the 10-URL pool shards 4/5
+match trending against, and shard 4's hero pool additionally filters out
+`item.type === 'hoathinh'` so animation titles don't appear in "Phim Hot
+Trong Tuần" — `/danh-sach/hoat-hinh` itself is unaffected) — each its own
+Worker invocation with its own
 CPU/subrequest budget — via the `SELF` **service binding** (not a public
 `fetch()`; a Worker fetching its own Custom Domain always 522s, a documented
 Cloudflare behavior), concatenates the resulting JSON without reparsing, and
