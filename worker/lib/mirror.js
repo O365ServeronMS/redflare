@@ -121,8 +121,19 @@ async function markMirrored(env, key) {
   ]);
 }
 
-// Returns 'exists' | 'mirrored' | 'give-up' | 'retry'.
-async function mirrorOne(env, key, sourceUrl) {
+// How long to keep insisting on WebP before settling for whatever TMDB serves.
+// The Accept-negotiation check below is worth a few retries (TMDB sends no
+// `Vary: Accept`, so a JPEG cached upstream can be handed back for a while),
+// but not forever: some images never negotiate at all — 4 of them as of
+// 2026-08-04, unchanged across ~50 consecutive attempts. Retrying those
+// forever costs twice over: the object never lands, so every view of that
+// title falls back to the TMDB origin; and since drainMirrorQueue pulls
+// `ORDER BY queued_at`, the stuck rows are the oldest and therefore reoccupy
+// a slot in *every* drain, permanently eating that share of the batch.
+const WEBP_GRACE_MS = 60 * 60 * 1000;
+
+// Returns 'exists' | 'mirrored' | 'mirrored-nonwebp' | 'give-up' | 'retry'.
+async function mirrorOne(env, key, sourceUrl, queuedAt) {
   // 1. Already in the bucket (the VPS mirrored it before we took over, or a
   //    previous run did)? Record it, no fetch/put. R2 HEAD is a cheap Class B
   //    op — this is what stops us re-downloading the ~734 objects already there.
@@ -159,11 +170,14 @@ async function mirrorOne(env, key, sourceUrl) {
     await env.DB.prepare('DELETE FROM mirror_queue WHERE key = ?1').bind(key).run();
     return 'give-up';
   }
-  // A key we're queuing as `<original>.webp` must actually be WebP bytes —
-  // otherwise a JPEG would land under a .webp key (e.g. TMDB serving JPEG
-  // despite the Accept header some future day). Retry rather than give-up:
-  // this is expected to be transient, not a permanent 4xx.
-  if (key.endsWith('.webp') && ct !== 'image/webp') {
+  // A key we're queuing as `<original>.webp` should hold WebP bytes, so a
+  // non-WebP response is worth retrying (see WEBP_GRACE_MS) — but only for a
+  // while. Past the grace window, store what we were given: the object carries
+  // its REAL content-type below, so browsers render it correctly regardless of
+  // the `.webp` in the key, and a slightly larger mirrored image beats one that
+  // never mirrors at all.
+  const nonWebp = key.endsWith('.webp') && ct !== 'image/webp';
+  if (nonWebp && Date.now() - queuedAt < WEBP_GRACE_MS) {
     return 'retry';
   }
   const clen = Number(res.headers.get('content-length') || 0);
@@ -182,12 +196,12 @@ async function mirrorOne(env, key, sourceUrl) {
     return 'retry';
   }
   await markMirrored(env, key);
-  return 'mirrored';
+  return nonWebp ? 'mirrored-nonwebp' : 'mirrored';
 }
 
 export async function drainMirrorQueue(env) {
   const { results } = await env.DB.prepare(
-    'SELECT key, source_url FROM mirror_queue ORDER BY queued_at LIMIT ?1'
+    'SELECT key, source_url, queued_at FROM mirror_queue ORDER BY queued_at LIMIT ?1'
   )
     .bind(MIRROR_BATCH)
     .all();
@@ -196,7 +210,7 @@ export async function drainMirrorQueue(env) {
 
   const counts = { exists: 0, mirrored: 0, 'give-up': 0, retry: 0 };
   await mapLimit(rows, MIRROR_CONCURRENCY, async (row) => {
-    const outcome = await mirrorOne(env, row.key, row.source_url);
+    const outcome = await mirrorOne(env, row.key, row.source_url, row.queued_at);
     counts[outcome] = (counts[outcome] || 0) + 1;
   });
   console.log('[mirror drain]', { pulled: rows.length, ...counts });
