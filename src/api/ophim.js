@@ -151,17 +151,10 @@ export async function getRecommendation(tmdbId, type = 'movie') {
 }
 
 // --- Image URL helpers ---
-// The Worker already emits full https:// R2 URLs, so these are pass-throughs.
-// Kept because every render path calls them; they're the single place to add
-// URL rewriting again if that's ever needed.
-
-export function posterUrl(path) {
-  return path || '';
-}
-
-export function thumbUrl(path) {
-  return path || '';
-}
+// The Worker already emits full https:// R2 URLs. For TMDB artwork these are
+// still pass-throughs; for OPhim artwork, posterUrl/thumbUrl below layer a
+// serve-time Cloudflare Image Transformation on top (Phase 5 of the WebP
+// migration — see state.md).
 
 // Artwork lives in R2 (redflarer2.bluesia.net), mirrored there by the Worker's
 // */10 cron (worker/lib/mirror.js). The copy is made in the background, so the
@@ -169,10 +162,49 @@ export function thumbUrl(path) {
 // upstream path, so the origin URL is rebuildable from the R2 URL alone — that
 // is the fallback below.
 const R2_BASE = 'https://redflarer2.bluesia.net/';
+const OPHIM_R2_PREFIX = `${R2_BASE}ophim/`;
+
+// img.ophim.live doesn't negotiate WebP (unlike image.tmdb.org, see
+// worker/lib/mirror.js), so OPhim art is mirrored into R2 as plain,
+// full-size JPEG — one sampled object was 3.1MB. Cloudflare Image
+// Transformations only accept same-zone sources (verified: a transform
+// request to img.ophim.live or image.tmdb.org 403s; the R2 mirror, same zone
+// as phim.bluesia.net, works — see state.md "Constraints" #1), so this reads
+// from the raw R2 copy rather than the OPhim origin directly. Applied here
+// rather than server-side in worker/lib/images.js r2ImageUrl() so
+// thumb_url/poster_url stay plain R2 URLs — that's what mirrorTargets keys
+// off to enqueue the raw mirror in the first place, and what upstreamFallback
+// below needs to reconstruct the origin URL on a miss.
+const CDN_CGI_PREFIX = 'https://phim.bluesia.net/cdn-cgi/image/';
+
+function ophimTransform(url, width) {
+  if (!url || !url.startsWith(OPHIM_R2_PREFIX)) return url || '';
+  return `${CDN_CGI_PREFIX}width=${width},format=auto/${url}`;
+}
+
+// posterUrl (wide/backdrop context) and thumbUrl (portrait/card context) get
+// different widths, mirroring the w1280/w500 split TMDB images already use
+// (worker/lib/enrich.js BACKDROP_SIZE/POSTER_SIZE) — TMDB URLs pass through
+// ophimTransform unchanged since they never start with OPHIM_R2_PREFIX.
+export function posterUrl(path) {
+  return ophimTransform(path, 1280);
+}
+
+export function thumbUrl(path) {
+  return ophimTransform(path, 500);
+}
 
 export function upstreamFallback(url) {
-  if (!url || !url.startsWith(R2_BASE)) return '';
-  let key = url.slice(R2_BASE.length);
+  if (!url) return '';
+  // Unwrap a transform URL back to the plain R2 URL it wraps (see
+  // ophimTransform above) before the usual R2 -> origin reconstruction.
+  let plain = url;
+  if (plain.startsWith(CDN_CGI_PREFIX)) {
+    const srcStart = plain.indexOf('https://', CDN_CGI_PREFIX.length);
+    plain = srcStart === -1 ? '' : plain.slice(srcStart);
+  }
+  if (!plain || !plain.startsWith(R2_BASE)) return '';
+  let key = plain.slice(R2_BASE.length);
   // TMDB images are served from the `.webp` variant (worker/lib/images.js
   // r2ImageUrl, Phase 3 of the WebP migration — see state.md); strip it back
   // off to rebuild the original TMDB URL. OPhim keys never carry the suffix.
