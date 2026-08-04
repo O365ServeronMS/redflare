@@ -434,9 +434,7 @@ async function handleCronPurgeRecs(request, env, url) {
   if (type === 'movie') paths.push(`/api/related/${id}`); // legacy alias, see parseRecommendationPath
   let cacheDeleted = 0;
   for (const p of paths) {
-    // Must go through cacheKeyFor — handleApi stores under the versioned key,
-    // so deleting the bare URL would silently evict nothing.
-    const deleted = await cache.delete(cacheKeyFor(new URL(url.origin + p)));
+    const deleted = await cache.delete(new Request(url.origin + p, { method: 'GET' }));
     if (deleted) cacheDeleted++;
   }
   let dbDeleted = 0;
@@ -450,27 +448,6 @@ async function handleCronPurgeRecs(request, env, url) {
   });
 }
 
-// Bump this whenever a change makes ALREADY-CACHED /api/* bodies wrong, as
-// opposed to merely stale — cached payloads embed absolute image URLs, so a
-// change like the 2026-08-04 image-domain migration silently keeps serving
-// dead URLs from before the deploy. A Cache API hit returns without ever
-// calling the builder, so such an entry does NOT self-heal when the title is
-// visited; it sits there until its own TTL runs out (up to 30 days for a
-// `full`-tier recommendation). `cache.delete()` can't fix that either — it
-// only evicts in the colo that handled the purge request. Changing this
-// constant retires every entry at every colo at once, which is the only
-// mechanism that does.
-const CACHE_VERSION = '2';
-
-// The Cache API key is derived from the URL, so a version param makes a new
-// key space. It is a KEY ONLY — never fetched, and never read by the
-// builders, which parse the original `url`.
-function cacheKeyFor(url) {
-  const keyUrl = new URL(url.toString());
-  keyUrl.searchParams.set('__v', CACHE_VERSION);
-  return new Request(keyUrl.toString(), { method: 'GET' });
-}
-
 async function handleApi(request, env, ctx, url) {
   const method = request.method;
   if (method !== 'GET' && method !== 'HEAD') {
@@ -478,7 +455,7 @@ async function handleApi(request, env, ctx, url) {
   }
 
   const cache = caches.default;
-  const cacheReq = cacheKeyFor(url);
+  const cacheReq = new Request(url.toString(), { method: 'GET' });
 
   const hit = await cache.match(cacheReq);
   if (hit) {
