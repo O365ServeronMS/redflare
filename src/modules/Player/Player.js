@@ -5,6 +5,13 @@
  * a server has no link_m3u8 (or ArtPlayer fails to load).
  */
 
+import {
+  setMediaSession,
+  clearMediaSession,
+  setMediaSessionPlaybackState,
+  setMediaSessionPosition
+} from '../../lib/mediaSession.js';
+
 function canUseNativeHls(video) {
   return video.canPlayType('application/vnd.apple.mpegurl') !== '';
 }
@@ -39,7 +46,7 @@ function showFallback(playerContainer) {
   playerContainer.appendChild(fallback);
 }
 
-async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl }) {
+async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl, movieName, episodeName, posterUrl }) {
   const { default: Artplayer } = await import('artplayer');
 
   const mount = document.createElement('div');
@@ -132,6 +139,23 @@ async function mountArtPlayer(playerContainer, { m3u8Url, backdropUrl }) {
     if (pos > 1) art.once('video:loadedmetadata', () => { art.currentTime = pos; });
   });
 
+  // Lock screen / control center now-playing info (iOS otherwise falls
+  // back to document.title + favicon).
+  setMediaSession({ movieName, episodeName, posterUrl });
+  art.on('video:play', () => setMediaSessionPlaybackState('playing'));
+  art.on('video:pause', () => setMediaSessionPlaybackState('paused'));
+  let lastPositionUpdate = 0;
+  art.on('video:timeupdate', () => {
+    const now = Date.now();
+    if (now - lastPositionUpdate < 2000) return;
+    lastPositionUpdate = now;
+    setMediaSessionPosition({
+      duration: art.video.duration,
+      position: art.video.currentTime,
+      playbackRate: art.video.playbackRate || 1
+    });
+  });
+
   return art;
 }
 
@@ -145,9 +169,10 @@ function destroyCurrentArt() {
     currentArt.destroy(false);
     currentArt = null;
   }
+  clearMediaSession();
 }
 
-export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episodeName, backdropUrl }) {
+export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episodeName, backdropUrl, movieName, posterUrl }) {
   destroyCurrentArt();
 
   const section = document.createElement('section');
@@ -193,7 +218,7 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
 
     if (m3u8Url) {
       try {
-        currentArt = await mountArtPlayer(playerContainer, { m3u8Url, backdropUrl });
+        currentArt = await mountArtPlayer(playerContainer, { m3u8Url, backdropUrl, movieName, episodeName, posterUrl });
         return;
       } catch (err) {
         // ArtPlayer failed to load (e.g. chunk fetch error) — fall back to
