@@ -408,6 +408,55 @@ instead). Remember `wrangler kv key list` / `d1 execute` / `r2 object`
 commands need `--remote` to see real data — without it they read an empty
 local simulation and make live resources look empty.
 
+## Lazy loading (images + below-fold sections)
+
+Two shared helpers make this consistent app-wide — route every new image and
+every new below-fold section through them rather than setting `loading`/
+`decoding`/`IntersectionObserver` ad hoc per module.
+
+- **`src/lib/image.js`** — `applyImagePolicy(img, { priority })`. Every
+  `<img>` in the app goes through this: `lazy` + `decoding="async"` by
+  default, `eager` + `fetchPriority="high"` only when `priority: true` (the
+  image is the page's LCP candidate — above the fold on first paint).
+  - `PosterCard.js` takes a `priority` param; `Carousel.js` takes a
+    `priorityCount` (marks the first N cards); `Grid.js` marks its first 6
+    cards priority (covers the widest desktop row). Home's first carousel
+    ("Phim Mới Cập Nhật") gets `priorityCount: 3`; the detail page's
+    `.detail__thumb` is always `priority: true` (it *is* the LCP element on
+    `/phim/:slug`). Everything else — rail thumbs past index 0, search
+    overlay results, recommendation cards — stays default (lazy).
+  - **HeroSlider is the one exception, not `<img>`-based.** Its 20 backdrops
+    are CSS `background-image`, so they can't use `loading="lazy"` at all —
+    instead `ensureBackdrop()` only ever loads the active slide + one
+    idle-prefetched neighbor; `goToSlide()` loads the new active + its next
+    neighbor on demand as the user rotates through. Don't revert this to
+    "set backdrop for all slides on mount" — that was firing ~20 full-size
+    image requests on every home page load.
+  - The hero's first backdrop is also the page's actual LCP element, so
+    `renderHomePage` (`src/main.js`) additionally injects a dynamic
+    `<link rel="preload" as="image" fetchpriority="high">` for it as soon as
+    `/api/home-data` resolves (its URL isn't known until then, so it can't be
+    a static tag in `index.html`).
+- **`src/lib/lazyMount.js`** — `mountWhenVisible(placeholder, renderFn)`.
+  IntersectionObserver-backed, self-disconnecting, `rootMargin: 600px`. Used
+  for sections that are reliably below the fold, to defer both DOM
+  construction and (where relevant) the network request that section makes:
+  home's 3rd/4th carousel rows (Phim Lẻ, Phim Bộ), and the detail page's
+  Recommendation block (`Recommendation.js`'s `/api/recommendation/*` fetch
+  previously fired unconditionally on every detail-page load regardless of
+  scroll position — now it only fires once the block nears the viewport).
+  Returns a disconnect fn — always wire it into the page handler's cleanup
+  (see `renderHomePage`'s returned cleanup, `renderDetailPage` awaiting
+  `renderMovieDetail`'s returned cleanup) so navigating away before the
+  section ever became visible doesn't leave an observer watching a detached
+  node.
+- Don't lazy-mount cheap, no-network sections (e.g. `Footer`) — the
+  IntersectionObserver/cleanup bookkeeping isn't worth it for a section with
+  no image/network payload.
+- `index.html`'s `<link rel="preconnect">` must point at the actual image
+  origin, `https://redflarer2.bluesia.net` — it once pointed at the retired
+  `img.bluesia.net` VPS host, which silently did nothing useful.
+
 ## Conventions & gotchas
 
 - **CSS specificity + media-query source order bites here.** Media queries add
