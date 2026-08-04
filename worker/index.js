@@ -81,7 +81,7 @@ import {
   classifyTier,
   ttlForTier,
 } from './lib/recommendation.js';
-import { enqueueMirror, drainMirrorQueue, drainGcBatch } from './lib/mirror.js';
+import { enqueueMirror, drainMirrorQueue } from './lib/mirror.js';
 
 const OPHIM_BASE = 'https://ophim1.com';
 
@@ -412,16 +412,6 @@ async function handleCronMirror(request, env) {
   return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
 }
 
-// TEMPORARY (2026-08 domain migration Phase 5, see state.md): deletes R2
-// objects still in the pre-migration key shape plus their `mirrored` rows.
-// Not on a cron — called manually in a loop until `drained: 0`, then this
-// route (and the drainGcBatch it calls) gets removed.
-async function handleCronGc(request, env) {
-  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
-  const result = await drainGcBatch(env);
-  return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
-}
-
 // Purge one title's recommendation cache at BOTH layers — added in the Phase 1
 // fix (state-sua-loi-recommendation.md) because the D1 `recs` row and the
 // Cache API copy are independent: deleting only the D1 row leaves real users
@@ -586,9 +576,6 @@ export default {
     }
     if (url.pathname === '/__cron/mirror') {
       return handleCronMirror(request, env);
-    }
-    if (url.pathname === '/__cron/gc-old-keys') {
-      return handleCronGc(request, env);
     }
     if (url.pathname === '/__cron/purge-recs') {
       return handleCronPurgeRecs(request, env, url);
