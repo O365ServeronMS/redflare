@@ -191,15 +191,52 @@ Two different paths, both entirely on Cloudflare — no other server involved:
   queue (`mirror_queue`), and a cron every 10 minutes drains up to 20 at a
   time — `env.BUCKET.head()` to skip ones already mirrored, otherwise fetch
   upstream and `env.BUCKET.put(key, res.body)` streamed straight through (no
-  in-JS hashing). R2 object keys mirror the upstream path (`t/p/w500/<hash>.jpg`),
-  so if a mirror hasn't landed yet (or R2 is somehow unreachable) the
-  frontend's `<img onerror>` handler rebuilds the original TMDB/OPhim URL
-  from the R2 URL and retries it directly — see
-  `upstreamFallback`/`attachImageFallback` in `src/api/ophim.js`. **No
-  lifecycle expiry rule on the bucket** — objects don't expire on their own
-  once mirrored (an earlier version of this doc claimed a 150-day TMDB
-  cache-duration expiry; that was never actually configured on the bucket —
-  corrected 2026-08-01).
+  in-JS hashing). **No lifecycle expiry rule on the bucket** — objects don't
+  expire on their own once mirrored (an earlier version of this doc claimed a
+  150-day TMDB cache-duration expiry; that was never actually configured on
+  the bucket — corrected 2026-08-01).
+
+  **TMDB artwork is mirrored as WebP** (2026-08-04 migration — the WHY/plan
+  lived in a now-deleted `state.md` during the work; this doc is the durable
+  record). `image.tmdb.org` does content negotiation — `Accept: image/webp`
+  gets a ~30-36% smaller response than the default JPEG — but sends **no
+  `Vary: Accept`**, so a cached JPEG can be handed back to a WebP request
+  regardless of the header; `worker/lib/mirror.js` works around this with
+  `cf: { cacheTtl: 0 }` on the fetch and asserts the response actually is
+  `image/webp` before writing (retrying otherwise, since a permanent
+  give-up would strand the object). R2 keys **append** rather than swap the
+  extension — `t/p/w500/<hash>.jpg` → `t/p/w500/<hash>.jpg.webp` — so the
+  inverse (`upstreamForKey` in `worker/lib/images.js`, `upstreamFallback` in
+  `src/api/ophim.js`) never has to guess the original extension; these two
+  functions are a load-bearing contract, keep them in lockstep. `img.ophim.live`
+  does **not** negotiate WebP, so OPhim-sourced keys are mirrored as plain
+  JPEG at their original extension, unmodified by this.
+
+  Every `w500` poster (`thumb_url`) also gets a `w154` sibling mirrored
+  alongside it (`worker/lib/images.js` `addW154Sibling`) — the hero rail
+  (`HeroSlider.js`) renders at 42px/30px wide and would otherwise load a
+  500px poster into a slot 12-16x smaller than the image.
+
+  **OPhim artwork is NOT mirrored as WebP** — instead, `posterUrl`/`thumbUrl`
+  in `src/api/ophim.js` wrap the plain R2 mirror in a same-zone Cloudflare
+  Image Transformation (`phim.bluesia.net/cdn-cgi/image/width=...,
+  format=auto/<r2-url>`) at serve time. This is a serve-time-only decision
+  deliberately kept out of `r2ImageUrl()`: `thumb_url`/`poster_url` in API
+  responses stay plain R2 URLs, which is what `mirrorTargets` keys off to
+  enqueue the raw mirror the transform reads from. **Image Transformations
+  only accept same-zone sources** — a transform request with
+  `image.tmdb.org` or `img.ophim.live` as the source 403s; only a source
+  already inside this account's R2/zone works, confirmed by direct test.
+  Free tier is 5,000 unique transformations/month; this project is the sole
+  consumer on the account.
+
+  R2 object keys otherwise still mirror the upstream path
+  (`t/p/w500/<hash>.jpg[.webp]`, `ophim/<path>`), so if a mirror hasn't
+  landed yet (or R2 is somehow unreachable) the frontend's `<img onerror>`
+  handler rebuilds the original TMDB/OPhim URL from the R2 URL (unwrapping
+  the `.webp` suffix and/or the transform wrapper first, as applicable) and
+  retries it directly — see `upstreamFallback`/`attachImageFallback` in
+  `src/api/ophim.js`.
 
 ### Endpoints the frontend calls
 
@@ -231,8 +268,8 @@ renders — just with OPhim values.
 |---|---|---|
 | `name` | TMDB vi-VN title → OPhim | See readability rule below |
 | `origin_name` | TMDB `original_title` → OPhim | Same rule; OPhim's is reliably English |
-| `poster_url` | TMDB `w1280` backdrop → OPhim | Wide image. Signed after enrich |
-| `thumb_url` | TMDB `w780` poster → OPhim | Portrait image |
+| `poster_url` | TMDB `w1280` backdrop → OPhim | Wide image. R2-mapped after enrich (`worker/lib/images.js`) |
+| `thumb_url` | TMDB `w500` poster → OPhim | Portrait image. `w154` sibling also mirrored for the hero rail — see "Images" above |
 | `vote_average` | TMDB (1 dp) → OPhim | Detail badge is hardcoded "TMDB" even on fallback |
 | `content` | TMDB `overview` vi-VN → OPhim | **Detail only** — cards never carry it |
 | `year` | TMDB release/first-air → OPhim | Detail only |
