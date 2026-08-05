@@ -39,12 +39,12 @@ const OBJECT_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
 // accept: image/webp is a holdover from when this fetch was the ONLY thing
 // negotiating WebP out of TMDB directly (see WSRV block below for why that's
-// no longer how `.webp` keys get their bytes) — harmless to keep for the
-// non-wsrv paths (OPhim, and the fallback-disabled case), since it just adds
-// a header TMDB may or may not honor. cacheTtl: 0 bypasses Cloudflare's
-// shared subrequest cache: TMDB sends no `Vary: Accept`, so a JPEG cached
-// from an older request could otherwise be handed back here despite the
-// Accept header (see state.md "Constraints discovered while planning" #2).
+// no longer how any `.webp` key gets its bytes, TMDB or OPhim) — harmless to
+// keep, since the only path still hitting an origin directly is
+// WSRV_ENABLED=false (rollback). cacheTtl: 0 bypasses Cloudflare's shared
+// subrequest cache: TMDB sends no `Vary: Accept`, so a JPEG cached from an
+// older request could otherwise be handed back here despite the Accept
+// header (see state.md "Constraints discovered while planning" #2).
 async function fetchWithTimeout(url, ms = 8000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
@@ -62,7 +62,7 @@ async function fetchWithTimeout(url, ms = 8000) {
   }
 }
 
-// --- wsrv.nl: the actual source of `.webp` bytes for TMDB keys -------------
+// --- wsrv.nl: the actual source of every `.webp` object's bytes ------------
 //
 // TMDB negotiates WebP via `Accept`, but sends no `Vary: Accept` — a JPEG
 // response cached anywhere in front of it can be handed back regardless of
@@ -77,19 +77,39 @@ async function fetchWithTimeout(url, ms = 8000) {
 // 2026-08-06 against this project's real TMDB images: byte-identical output
 // across 5 consecutive requests, `content-length` present (streams straight
 // through below — no buffering needed, unlike OPhim's chunked responses),
-// dimensions unchanged from source, q=75 came out smaller than TMDB's own
-// negotiated WebP for every sample. Free-tier limit is 2,500 uncached
-// images/10min/IP; MIRROR_BATCH below uses well under 1% of that.
+// dimensions unchanged from source when no `w` is requested, q=75 came out
+// smaller than TMDB's own negotiated WebP for every sample.
 //
-// TMDB-only: only keys ending `.webp` route through this (see
-// webpKeyFor/images.js — OPhim keys never carry that suffix). Full rationale
-// + the decision not to also route OPhim through this yet: bluesiaOM
-// context/plan-redflare-webp-wsrv.md.
+// OPhim (added same day, once the above held up in production): OPhim has no
+// TMDB-style size variants — one URL, one native resolution, sometimes
+// several MB (a raw thumb source sampled 2026-08-06 was 1.8MB). Old design
+// mirrored that raw size and resized at SERVE time via a Cloudflare Image
+// Transformation (`cdn-cgi/image/width=...`, see src/api/ophim.js history).
+// wsrv.nl's `&w=` does the resize in the SAME pass as the WebP conversion, so
+// the mirror step now stores an already-correctly-sized object and that
+// serve-time transform is gone entirely — one less moving part, and it frees
+// up the zone's Image Transformations quota for something else later.
+// `&we` (without-enlargement) matters here: verified 2026-08-06 that wsrv.nl
+// upscales past native resolution by default when `&w=` exceeds it (common
+// for OPhim's landscape "poster" field, native as small as 500px wide) —
+// without `&we` that came out LARGER than the old Cloudflare transform for
+// every sample; with it, smaller in every case tested (thumb AND poster).
+//
+// Free-tier limit is 2,500 uncached images/10min/IP; MIRROR_BATCH below uses
+// well under 1% of that even with OPhim included.
+//
+// Width is baked into OPhim keys as a `w<width>/` segment (see
+// objectKeyFor/images.js) precisely so it can be recovered here at drain
+// time without a D1 schema change — TMDB keys need no such segment, their
+// upstream URL already has the right size in its path.
 const WSRV_ENABLED = true; // flip to false + deploy to roll back instantly
 const WSRV_QUALITY = 75; // chosen 2026-08-06 by eyeballing real posters/backdrops
+const OPHIM_WIDTH_RE = /^ophim\/w(\d+)\//;
 
-function wsrvWebpUrl(upstreamUrl) {
-  return `https://wsrv.nl/?url=${encodeURIComponent(upstreamUrl)}&output=webp&q=${WSRV_QUALITY}`;
+function wsrvWebpUrl(upstreamUrl, width) {
+  let url = `https://wsrv.nl/?url=${encodeURIComponent(upstreamUrl)}&output=webp&q=${WSRV_QUALITY}`;
+  if (width) url += `&w=${width}&we`;
+  return url;
 }
 
 // A 4xx/5xx from wsrv.nl is ambiguous: the ORIGIN image could genuinely be
@@ -179,37 +199,24 @@ async function markMirrored(env, key) {
   ]);
 }
 
-// How long to keep insisting on WebP before settling for whatever TMDB serves.
-// The Accept-negotiation check below is worth a few retries (TMDB sends no
-// `Vary: Accept`, so a JPEG cached upstream can be handed back for a while),
-// but not forever: some images never negotiate at all — 4 of them as of
-// 2026-08-04, unchanged across ~50 consecutive attempts. Retrying those
-// forever costs twice over: the object never lands, so every view of that
-// title falls back to the TMDB origin; and since drainMirrorQueue pulls
-// `ORDER BY queued_at`, the stuck rows are the oldest and therefore reoccupy
-// a slot in *every* drain, permanently eating that share of the batch.
-const WEBP_GRACE_MS = 60 * 60 * 1000;
-
 // How long a row may keep coming back `retry` before it is dropped from the
-// queue entirely. Every retry path below is silent by design (transient R2 /
-// network errors), so a row that fails *permanently* for a reason we didn't
-// anticipate looks exactly like one that will succeed next tick — and, because
-// drainMirrorQueue pulls `ORDER BY queued_at`, it reoccupies a slot in every
-// subsequent drain. This is the same head-of-queue starvation WEBP_GRACE_MS
-// fixes for one specific cause, generalized to all of them (that grace only
-// covers `.webp` keys, so OPhim rows had no escape hatch at all). Dropping the
-// row is not "give up forever": the key isn't recorded in `mirrored`, so the
-// next build referencing it re-enqueues it with a fresh queued_at — i.e. it
-// retries from the BACK of the queue instead of blocking the front.
+// queue entirely. Every retry path above is silent by design (transient R2 /
+// network / wsrv.nl errors), so a row that fails *permanently* for a reason
+// we didn't anticipate looks exactly like one that will succeed next tick —
+// and, because drainMirrorQueue pulls `ORDER BY queued_at`, it reoccupies a
+// slot in every subsequent drain, starving the head of the queue. Dropping
+// the row is not "give up forever": the key isn't recorded in `mirrored`, so
+// the next build referencing it re-enqueues it with a fresh queued_at — i.e.
+// it retries from the BACK of the queue instead of blocking the front.
 const MAX_RETRY_AGE_MS = 6 * 60 * 60 * 1000;
 
 // Returns { outcome, detail } where outcome is
-// 'exists' | 'mirrored' | 'mirrored-nonwebp' | 'give-up' | 'retry'.
+// 'exists' | 'mirrored' | 'give-up' | 'retry'.
 // `detail` names the step that failed on a retry, so a drain can report WHY a
 // row is stuck instead of just how many are (console.log isn't visible in
 // `wrangler tail` here — see redflare/CLAUDE.md — so this rides back in the
 // /__cron/mirror response body).
-async function mirrorOne(env, key, sourceUrl, queuedAt) {
+async function mirrorOne(env, key, sourceUrl) {
   // 1. Already in the bucket (the VPS mirrored it before we took over, or a
   //    previous run did)? Record it, no fetch/put. R2 HEAD is a cheap Class B
   //    op — this is what stops us re-downloading the ~734 objects already there.
@@ -224,11 +231,14 @@ async function mirrorOne(env, key, sourceUrl, queuedAt) {
     return { outcome: 'exists' };
   }
 
-  // 2. Not there — fetch upstream and stream it in. TMDB (`.webp`) keys go
-  //    through wsrv.nl for guaranteed WebP bytes; everything else (OPhim)
-  //    fetches the origin directly, unchanged.
+  // 2. Not there — fetch upstream and stream it in. Every `.webp` key (TMDB
+  //    and OPhim alike) goes through wsrv.nl; OPhim keys additionally carry
+  //    a `w<width>/` segment telling wsrv.nl what size to resize to (see the
+  //    WSRV block above and objectKeyFor/images.js — TMDB needs no width,
+  //    its own path already has the right size baked in).
   const useWsrv = WSRV_ENABLED && key.endsWith('.webp');
-  const fetchUrl = useWsrv ? wsrvWebpUrl(sourceUrl) : sourceUrl;
+  const widthMatch = key.match(OPHIM_WIDTH_RE);
+  const fetchUrl = useWsrv ? wsrvWebpUrl(sourceUrl, widthMatch ? Number(widthMatch[1]) : undefined) : sourceUrl;
   let res;
   try {
     res = await fetchWithTimeout(fetchUrl);
@@ -260,15 +270,15 @@ async function mirrorOne(env, key, sourceUrl, queuedAt) {
     await env.DB.prepare('DELETE FROM mirror_queue WHERE key = ?1').bind(key).run();
     return { outcome: 'give-up', detail: `content-type ${ct || 'none'}` };
   }
-  // A key we're queuing as `<original>.webp` should hold WebP bytes, so a
-  // non-WebP response is worth retrying (see WEBP_GRACE_MS) — but only for a
-  // while. Past the grace window, store what we were given: the object carries
-  // its REAL content-type below, so browsers render it correctly regardless of
-  // the `.webp` in the key, and a slightly larger mirrored image beats one that
-  // never mirrors at all.
-  const nonWebp = key.endsWith('.webp') && ct !== 'image/webp';
-  if (nonWebp && Date.now() - queuedAt < WEBP_GRACE_MS) {
-    return { outcome: 'retry', detail: `not-webp (${ct}), within grace` };
+  // Invariant: a key ending `.webp` MUST hold WebP bytes — never save
+  // anything else under it. wsrv.nl makes format a property of the URL
+  // (&output=webp), so a mismatch here means wsrv.nl itself glitched, not
+  // that WebP is unavailable — always worth a retry, never worth settling
+  // for less. (Before 2026-08-06 this had a grace window that gave up and
+  // saved whatever content-type TMDB negotiated; that's gone along with
+  // content negotiation — see bluesiaOM plan-redflare-webp-wsrv.md.)
+  if (key.endsWith('.webp') && ct !== 'image/webp') {
+    return { outcome: 'retry', detail: `not-webp (${ct})` };
   }
   const clen = Number(res.headers.get('content-length') || 0);
   if (clen && clen > MAX_IMAGE_BYTES) {
@@ -305,7 +315,7 @@ async function mirrorOne(env, key, sourceUrl, queuedAt) {
     return { outcome: 'retry', detail: `r2-put: ${e.message}` };
   }
   await markMirrored(env, key);
-  return { outcome: nonWebp ? 'mirrored-nonwebp' : 'mirrored' };
+  return { outcome: 'mirrored' };
 }
 
 export async function drainMirrorQueue(env) {
@@ -322,7 +332,7 @@ export async function drainMirrorQueue(env) {
   // one line per row, so a single manual drain diagnoses the queue.
   const retries = [];
   await mapLimit(rows, MIRROR_CONCURRENCY, async (row) => {
-    let { outcome, detail } = await mirrorOne(env, row.key, row.source_url, row.queued_at);
+    let { outcome, detail } = await mirrorOne(env, row.key, row.source_url);
     if (outcome === 'retry') {
       const ageMs = Date.now() - row.queued_at;
       retries.push({ key: row.key, why: detail || 'unknown', ageMin: Math.round(ageMs / 60000) });

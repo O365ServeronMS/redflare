@@ -164,56 +164,44 @@ export async function getRecommendation(tmdbId, type = 'movie') {
 // upstream path, so the origin URL is rebuildable from the R2 URL alone — that
 // is the fallback below.
 const R2_BASE = 'https://img.bluesia.net/';
-const OPHIM_R2_PREFIX = `${R2_BASE}ophim/`;
 
-// img.ophim.live doesn't negotiate WebP (unlike image.tmdb.org, see
-// worker/lib/mirror.js), so OPhim art is mirrored into R2 as plain,
-// full-size JPEG — one sampled object was 3.1MB. Cloudflare Image
-// Transformations only accept same-zone sources (verified: a transform
-// request to img.ophim.live or image.tmdb.org 403s; the R2 mirror, same zone
-// as phim.bluesia.net, works — see state.md "Constraints" #1), so this reads
-// from the raw R2 copy rather than the OPhim origin directly. Applied here
-// rather than server-side in worker/lib/images.js r2ImageUrl() so
-// thumb_url/poster_url stay plain R2 URLs — that's what mirrorTargets keys
-// off to enqueue the raw mirror in the first place, and what upstreamFallback
-// below needs to reconstruct the origin URL on a miss.
-const CDN_CGI_PREFIX = 'https://phim.bluesia.net/cdn-cgi/image/';
-
-function ophimTransform(url, width) {
-  if (!url || !url.startsWith(OPHIM_R2_PREFIX)) return url || '';
-  return `${CDN_CGI_PREFIX}width=${width},format=auto/${url}`;
+// posterUrl/thumbUrl used to wrap OPhim R2 urls in a Cloudflare Image
+// Transformation (`cdn-cgi/image/width=...`) here at serve time — OPhim has
+// no TMDB-style size variants of its own, so resizing had to happen
+// somewhere, and this was the only same-zone source Image Transformations
+// would accept (a transform request straight to img.ophim.live 403s).
+//
+// Since 2026-08-06 (bluesiaOM plan-redflare-webp-wsrv.md) that resize
+// happens once, at MIRROR time, via wsrv.nl's `&w=` — the R2 object worker/
+// lib/images.js points at is already the right size. Both functions are now
+// pure passthroughs, same as they always were for TMDB urls (which never
+// matched the old OPhim-only wrapper). Kept as named functions rather than
+// inlined at every call site: every image-rendering call in this codebase
+// goes through one of these two, which is where serve-time processing would
+// go again if this project ever needs it.
+export function posterUrl(url) {
+  return url || '';
 }
 
-// posterUrl (wide/backdrop context) and thumbUrl (portrait/card context) get
-// different widths, mirroring the w1280/w500 split TMDB images already use
-// (worker/lib/enrich.js BACKDROP_SIZE/POSTER_SIZE) — TMDB URLs pass through
-// ophimTransform unchanged since they never start with OPHIM_R2_PREFIX.
-export function posterUrl(path) {
-  return ophimTransform(path, 1280);
-}
-
-export function thumbUrl(path) {
-  return ophimTransform(path, 500);
+export function thumbUrl(url) {
+  return url || '';
 }
 
 export function upstreamFallback(url) {
-  if (!url) return '';
-  // Unwrap a transform URL back to the plain R2 URL it wraps (see
-  // ophimTransform above) before the usual R2 -> origin reconstruction.
-  let plain = url;
-  if (plain.startsWith(CDN_CGI_PREFIX)) {
-    const srcStart = plain.indexOf('https://', CDN_CGI_PREFIX.length);
-    plain = srcStart === -1 ? '' : plain.slice(srcStart);
-  }
-  if (!plain || !plain.startsWith(R2_BASE)) return '';
-  let key = plain.slice(R2_BASE.length);
-  // TMDB images are served from the `.webp` variant (worker/lib/images.js
-  // r2ImageUrl, key swaps `.jpg` -> `.webp`); swap it back to rebuild the
-  // original TMDB URL. OPhim keys never carry the suffix.
+  if (!url || !url.startsWith(R2_BASE)) return '';
+  let key = url.slice(R2_BASE.length);
+  // Both hosts are mirrored as `.webp` (worker/lib/images.js r2ImageUrl);
+  // swap back to `.jpg` to rebuild the real origin URL — TMDB source images
+  // are confirmed always `.jpg`, and so is everything OPhim serves.
   if (key.endsWith('.webp')) key = `${key.slice(0, -'.webp'.length)}.jpg`;
-  return key.startsWith('ophim/')
-    ? `https://img.ophim.live/${key.slice(6)}`
-    : `https://image.tmdb.org/${key}`;
+  if (key.startsWith('ophim/')) {
+    // Strip the `w<width>/` bookkeeping segment worker/lib/images.js adds —
+    // OPhim has no size variants of its own, that segment isn't part of the
+    // real upstream path (see upstreamForKey, the server-side twin of this).
+    const rest = key.slice('ophim/'.length).replace(/^w\d+\//, '');
+    return `https://img.ophim.live/${rest}`;
+  }
+  return `https://image.tmdb.org/${key}`;
 }
 
 // Point an <img> at its upstream origin if the R2 copy is not there yet.

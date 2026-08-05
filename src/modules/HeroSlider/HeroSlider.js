@@ -26,8 +26,10 @@ export function getBackdropUrl(movie) {
 // (see state.md audit) for a 42px box. w154 covers up to DPR 3 at that size
 // and is mirrored alongside every w500 poster (worker/lib/images.js
 // addW154Sibling), so rewrite to it here rather than loading w500 and
-// discarding 90% of the pixels. Only touches TMDB-shaped R2 URLs — OPhim URLs
-// (no w-size segment) pass through untouched.
+// discarding 90% of the pixels. Only matches this exact TMDB path shape —
+// OPhim R2 keys look like `ophim/w500/...` (worker/lib/images.js
+// objectKeyFor), which this regex doesn't match, so they pass through
+// untouched (no w154 sibling exists for OPhim; not in scope here).
 const TMDB_W500_RE = /\/t\/p\/w500\//;
 function toRailSize(url) {
   return TMDB_W500_RE.test(url) ? url.replace(TMDB_W500_RE, '/t/p/w154/') : url;

@@ -59,38 +59,53 @@ function canonicalizeImageUrl(raw) {
 // the client's upstreamFallback() (src/api/ophim.js), which rebuilds the
 // original TMDB/OPhim URL from this same key. Changing this breaks the
 // fallback for every object not yet mirrored.
-function objectKeyFor(canonicalUrl) {
+//
+// OPhim keys carry a `w<width>/` segment TMDB keys don't need: TMDB source
+// URLs already bake size into the path (/t/p/w500/, /t/p/w1280/), so the
+// SAME upstream URL never needs two differently-sized R2 objects. OPhim has
+// no size variants at all — one URL, one native resolution — so sizing has
+// to happen at mirror time (wsrv.nl `&w=`, see worker/lib/mirror.js) and the
+// key has to say which size a given object is, the same way TMDB's path
+// does natively. `width` is REQUIRED for img.ophim.live, ignored for TMDB.
+function objectKeyFor(canonicalUrl, width) {
   const url = new URL(canonicalUrl);
   const path = url.pathname.replace(/^\/+/, '');
   if (!path) return '';
   if (url.hostname === 'image.tmdb.org') return path;
-  if (url.hostname === 'img.ophim.live') return `ophim/${path}`;
+  if (url.hostname === 'img.ophim.live') return `ophim/w${width}/${path}`;
   return '';
 }
 
 // Public: raw upstream URL -> R2 URL, or '' if the host isn't mirrored.
+// `width` is the target display width — required for OPhim (see
+// objectKeyFor), ignored for TMDB (already sized by its own path).
 //
-// Phase 3 (WebP migration, see state.md): TMDB keys are served from their
-// `.webp` variant, mirrored by worker/lib/mirror.js since Phase 1/2. OPhim
-// keys are NOT — img.ophim.live doesn't negotiate WebP and Phase 1 never
-// mirrors an OPhim `.webp` object, so pointing at one here would 404 every
-// OPhim image permanently (Phase 5 covers OPhim separately, via a serve-time
-// transform of the existing raw mirror, not a stored `.webp` object).
-export function r2ImageUrl(rawUrl) {
+// Since 2026-08-06 (bluesiaOM plan-redflare-webp-wsrv.md) EVERY mirrored key
+// is `.webp` — TMDB (via wsrv.nl replacing content negotiation) and now
+// OPhim too (wsrv.nl doing resize+convert in one pass, replacing the
+// serve-time `cdn-cgi/image/` transform this file used to require the
+// client to wrap around a plain R2 url). No more per-host branching here.
+export function r2ImageUrl(rawUrl, width) {
   const canonical = canonicalizeImageUrl(rawUrl);
   if (!canonical) return '';
-  const key = objectKeyFor(canonical);
+  const key = objectKeyFor(canonical, width);
   if (!key) return '';
-  const servedKey = key.startsWith('ophim/') ? key : webpKeyFor(key);
+  const servedKey = webpKeyFor(key);
   return `${R2_PUBLIC_BASE}/${servedKey}`;
 }
+
+// Matches the two contexts src/api/ophim.js's posterUrl()/thumbUrl() used to
+// apply at serve time (wide/backdrop vs portrait/card) — same numbers, same
+// meaning, just decided here now instead of per-request on the client.
+const THUMB_WIDTH = 500;
+const POSTER_WIDTH = 1280;
 
 // Maps an item's thumb_url/poster_url in place, mirroring sign.js's
 // signItem() fallback order (thumb falls back to poster and vice versa).
 export function mapItemImages(item) {
   if (!item || typeof item !== 'object') return item;
-  const thumb_url = r2ImageUrl(item.thumb_url || item.poster_url || '');
-  const poster_url = r2ImageUrl(item.poster_url || item.thumb_url || '');
+  const thumb_url = r2ImageUrl(item.thumb_url || item.poster_url || '', THUMB_WIDTH);
+  const poster_url = r2ImageUrl(item.poster_url || item.thumb_url || '', POSTER_WIDTH);
   return { ...item, thumb_url, poster_url };
 }
 
@@ -107,7 +122,13 @@ export function mapItemsImages(items) {
 export function upstreamForKey(key) {
   if (!key) return '';
   const base = key.endsWith('.webp') ? `${key.slice(0, -'.webp'.length)}.jpg` : key;
-  if (base.startsWith('ophim/')) return `https://img.ophim.live/${base.slice('ophim/'.length)}`;
+  if (base.startsWith('ophim/')) {
+    // Strip BOTH the `ophim/` prefix AND the `w<width>/` segment
+    // objectKeyFor adds — that segment is our own bookkeeping (OPhim has no
+    // size variants of its own), not part of the real upstream path.
+    const rest = base.slice('ophim/'.length).replace(/^w\d+\//, '');
+    return `https://img.ophim.live/${rest}`;
+  }
   return `https://image.tmdb.org/${base}`;
 }
 
@@ -137,14 +158,12 @@ function addW154Sibling(out, key, sourceUrl) {
 // R2. Runs on mapped items so every build path (list/detail/home/rec) feeds
 // the queue uniformly without re-deriving upstream URLs.
 //
-// TMDB targets are queued as their WebP variant (worker/lib/mirror.js
-// negotiates WebP via Accept when it drains these) — image.tmdb.org supports
-// content negotiation, so no separate transform step is needed. OPhim targets
-// are queued as-is: img.ophim.live does not negotiate WebP, and the raw
-// mirror is what Phase 5's serve-time transformation reads from. Every w500
-// poster also gets its w154 sibling queued (see addW154Sibling) so newly
-// discovered titles stay covered for the hero rail, not just the ones caught
-// by Phase 2's one-off backfill.
+// Both hosts land as `.webp` now (worker/lib/mirror.js fetches every `.webp`
+// key through wsrv.nl — TMDB for guaranteed-real WebP bytes, OPhim for that
+// PLUS the resize wsrv.nl's `&w=` does in the same pass, replacing the
+// serve-time `cdn-cgi/image/` transform this project used to need). Every
+// w500 TMDB poster also gets its w154 sibling queued (see addW154Sibling) so
+// newly discovered titles stay covered for the hero rail.
 export function mirrorTargets(items) {
   const out = new Map();
   const prefix = `${R2_PUBLIC_BASE}/`;
@@ -153,19 +172,17 @@ export function mirrorTargets(items) {
       if (typeof u !== 'string' || !u.startsWith(prefix)) continue;
       const servedKey = u.slice(prefix.length).split('?')[0];
       if (!servedKey) continue;
-      const isOphim = servedKey.startsWith('ophim/');
-      // thumb_url/poster_url already carry the SERVED key -- r2ImageUrl swaps
-      // .jpg -> .webp for TMDB targets. Restore the .jpg-shaped base key
-      // before re-deriving the webp target key (webpKeyFor/upstreamForKey
-      // both expect a .jpg-shaped input).
-      const key = !isOphim && servedKey.endsWith('.webp')
+      // thumb_url/poster_url already carry the SERVED (.webp) key. Restore
+      // the .jpg-shaped base key before re-deriving the webp target key —
+      // webpKeyFor/upstreamForKey both expect a .jpg-shaped input.
+      const key = servedKey.endsWith('.webp')
         ? `${servedKey.slice(0, -'.webp'.length)}.jpg`
         : servedKey;
-      const targetKey = isOphim ? key : webpKeyFor(key);
+      const targetKey = webpKeyFor(key);
       const sourceUrl = out.has(targetKey) ? null : upstreamForKey(key);
       if (sourceUrl) {
         out.set(targetKey, { key: targetKey, sourceUrl });
-        if (!isOphim) addW154Sibling(out, key, sourceUrl);
+        addW154Sibling(out, key, sourceUrl); // no-op unless key is TMDB t/p/w500/
       }
     }
   }
