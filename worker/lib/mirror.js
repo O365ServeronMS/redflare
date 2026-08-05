@@ -17,7 +17,9 @@
 //   cron */10 → drainMirrorQueue() → for each queued key:
 //     HEAD R2 — already there (e.g. mirrored by the VPS before we took over)?
 //       → just record it in `mirrored`, no fetch/put.
-//     else → fetch upstream (streaming) → BUCKET.put(key, res.body) → record.
+//     else → fetch upstream (streamed when the response carries a
+//            content-length, buffered when it doesn't — see mirrorOne)
+//            → BUCKET.put(key, body) → record.
 //
 // NO 150-day re-queue is implemented: the bucket has no expiry lifecycle rule
 // (checked 2026-08-01 — only the default multipart-abort), so objects never
@@ -132,7 +134,25 @@ async function markMirrored(env, key) {
 // a slot in *every* drain, permanently eating that share of the batch.
 const WEBP_GRACE_MS = 60 * 60 * 1000;
 
-// Returns 'exists' | 'mirrored' | 'mirrored-nonwebp' | 'give-up' | 'retry'.
+// How long a row may keep coming back `retry` before it is dropped from the
+// queue entirely. Every retry path below is silent by design (transient R2 /
+// network errors), so a row that fails *permanently* for a reason we didn't
+// anticipate looks exactly like one that will succeed next tick — and, because
+// drainMirrorQueue pulls `ORDER BY queued_at`, it reoccupies a slot in every
+// subsequent drain. This is the same head-of-queue starvation WEBP_GRACE_MS
+// fixes for one specific cause, generalized to all of them (that grace only
+// covers `.webp` keys, so OPhim rows had no escape hatch at all). Dropping the
+// row is not "give up forever": the key isn't recorded in `mirrored`, so the
+// next build referencing it re-enqueues it with a fresh queued_at — i.e. it
+// retries from the BACK of the queue instead of blocking the front.
+const MAX_RETRY_AGE_MS = 6 * 60 * 60 * 1000;
+
+// Returns { outcome, detail } where outcome is
+// 'exists' | 'mirrored' | 'mirrored-nonwebp' | 'give-up' | 'retry'.
+// `detail` names the step that failed on a retry, so a drain can report WHY a
+// row is stuck instead of just how many are (console.log isn't visible in
+// `wrangler tail` here — see redflare/CLAUDE.md — so this rides back in the
+// /__cron/mirror response body).
 async function mirrorOne(env, key, sourceUrl, queuedAt) {
   // 1. Already in the bucket (the VPS mirrored it before we took over, or a
   //    previous run did)? Record it, no fetch/put. R2 HEAD is a cheap Class B
@@ -140,20 +160,20 @@ async function mirrorOne(env, key, sourceUrl, queuedAt) {
   let head;
   try {
     head = await env.BUCKET.head(key);
-  } catch {
-    return 'retry'; // transient R2 error — leave queued
+  } catch (e) {
+    return { outcome: 'retry', detail: `r2-head: ${e.message}` }; // transient R2 error — leave queued
   }
   if (head) {
     await markMirrored(env, key);
-    return 'exists';
+    return { outcome: 'exists' };
   }
 
   // 2. Not there — fetch upstream and stream it in.
   let res;
   try {
     res = await fetchWithTimeout(sourceUrl);
-  } catch {
-    return 'retry'; // network blip — try next cron
+  } catch (e) {
+    return { outcome: 'retry', detail: `fetch: ${e.name}: ${e.message}` }; // network blip — try next cron
   }
   if (!res || !res.ok) {
     // A permanent 4xx (image genuinely gone) — give up so it doesn't clog the
@@ -161,14 +181,14 @@ async function mirrorOne(env, key, sourceUrl, queuedAt) {
     // and the client falls back to upstream meanwhile.
     if (res && res.status >= 400 && res.status < 500) {
       await env.DB.prepare('DELETE FROM mirror_queue WHERE key = ?1').bind(key).run();
-      return 'give-up';
+      return { outcome: 'give-up', detail: `upstream ${res.status}` };
     }
-    return 'retry';
+    return { outcome: 'retry', detail: `upstream ${res ? res.status : 'no-response'}` };
   }
   const ct = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   if (!ct.startsWith('image/')) {
     await env.DB.prepare('DELETE FROM mirror_queue WHERE key = ?1').bind(key).run();
-    return 'give-up';
+    return { outcome: 'give-up', detail: `content-type ${ct || 'none'}` };
   }
   // A key we're queuing as `<original>.webp` should hold WebP bytes, so a
   // non-WebP response is worth retrying (see WEBP_GRACE_MS) — but only for a
@@ -178,25 +198,44 @@ async function mirrorOne(env, key, sourceUrl, queuedAt) {
   // never mirrors at all.
   const nonWebp = key.endsWith('.webp') && ct !== 'image/webp';
   if (nonWebp && Date.now() - queuedAt < WEBP_GRACE_MS) {
-    return 'retry';
+    return { outcome: 'retry', detail: `not-webp (${ct}), within grace` };
   }
   const clen = Number(res.headers.get('content-length') || 0);
   if (clen && clen > MAX_IMAGE_BYTES) {
     await env.DB.prepare('DELETE FROM mirror_queue WHERE key = ?1').bind(key).run();
-    return 'give-up';
+    return { outcome: 'give-up', detail: `too big (${clen})` };
+  }
+
+  // R2's put() only accepts a ReadableStream whose length is known up front (a
+  // response body carrying content-length, or a FixedLengthStream). TMDB sends
+  // content-length, so its body streams straight through. img.ophim.live sits
+  // behind Cloudflare and answers CHUNKED with no content-length at all — so
+  // streaming it failed with "Provided readable stream must have a known
+  // length" on EVERY OPhim image, invisibly, since the catch below merely
+  // re-queues the row. Buffering is the only option without a length; it's
+  // confined to that case, and images here are capped at MAX_IMAGE_BYTES.
+  let body = res.body;
+  if (!clen) {
+    try {
+      body = await res.arrayBuffer();
+    } catch (e) {
+      return { outcome: 'retry', detail: `buffer: ${e.message}` };
+    }
+    if (body.byteLength > MAX_IMAGE_BYTES) {
+      await env.DB.prepare('DELETE FROM mirror_queue WHERE key = ?1').bind(key).run();
+      return { outcome: 'give-up', detail: `too big (${body.byteLength}, buffered)` };
+    }
   }
 
   try {
-    // Streaming put — res.body is a ReadableStream; no JS-side hashing or full
-    // buffering. This is the CPU cost that used to dominate the VPS, gone.
-    await env.BUCKET.put(key, res.body, {
+    await env.BUCKET.put(key, body, {
       httpMetadata: { contentType: ct, cacheControl: OBJECT_CACHE_CONTROL },
     });
-  } catch {
-    return 'retry';
+  } catch (e) {
+    return { outcome: 'retry', detail: `r2-put: ${e.message}` };
   }
   await markMirrored(env, key);
-  return nonWebp ? 'mirrored-nonwebp' : 'mirrored';
+  return { outcome: nonWebp ? 'mirrored-nonwebp' : 'mirrored' };
 }
 
 export async function drainMirrorQueue(env) {
@@ -208,11 +247,24 @@ export async function drainMirrorQueue(env) {
   const rows = results || [];
   if (!rows.length) return { drained: 0 };
 
-  const counts = { exists: 0, mirrored: 0, 'give-up': 0, retry: 0 };
+  const counts = { exists: 0, mirrored: 0, 'give-up': 0, retry: 0, expired: 0 };
+  // Why each retried row is stuck, returned to the caller (/__cron/mirror) —
+  // one line per row, so a single manual drain diagnoses the queue.
+  const retries = [];
   await mapLimit(rows, MIRROR_CONCURRENCY, async (row) => {
-    const outcome = await mirrorOne(env, row.key, row.source_url, row.queued_at);
+    let { outcome, detail } = await mirrorOne(env, row.key, row.source_url, row.queued_at);
+    if (outcome === 'retry') {
+      const ageMs = Date.now() - row.queued_at;
+      retries.push({ key: row.key, why: detail || 'unknown', ageMin: Math.round(ageMs / 60000) });
+      // Stuck too long — drop it so it stops starving the head of the queue.
+      // A later build that still references the key re-queues it at the back.
+      if (ageMs > MAX_RETRY_AGE_MS) {
+        await env.DB.prepare('DELETE FROM mirror_queue WHERE key = ?1').bind(row.key).run();
+        outcome = 'expired';
+      }
+    }
     counts[outcome] = (counts[outcome] || 0) + 1;
   });
   console.log('[mirror drain]', { pulled: rows.length, ...counts });
-  return { drained: rows.length, ...counts };
+  return { drained: rows.length, ...counts, retries };
 }
