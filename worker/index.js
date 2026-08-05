@@ -402,6 +402,69 @@ async function handleCronRefreshHome(request, env) {
   });
 }
 
+// Health of the two cron jobs, judged by their OUTPUT rather than by whether
+// they threw: Cloudflare's own Cron Events / Workers Logs report a run that
+// completed without an exception as a success, which is exactly what the OPhim
+// mirror bug looked like for a day (every drain "succeeded", every OPhim image
+// silently failed to land — see worker/lib/mirror.js). So:
+//   home    — how old the KV copy of /api/home-data is. The hourly cron leaves
+//             the old key untouched when a refresh fails, so an ageing
+//             timestamp IS the failure signal. >2h = missed 2 ticks.
+//   mirror  — queue depth and the age of the OLDEST queued row. Depth alone is
+//             meaningless (a build enqueues in bursts); a row older than an
+//             hour means the */10 drain is not clearing the head of the queue.
+// Returns 503 when unhealthy so a plain uptime monitor can watch it with no
+// auth and no JSON parsing. Deliberately ungated: it exposes counts only.
+const HOME_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+const QUEUE_MAX_AGE_MS = 60 * 60 * 1000;
+
+async function handleHealth(env) {
+  const now = Date.now();
+  const problems = [];
+  const out = { ok: true, checked_at: new Date(now).toISOString() };
+
+  try {
+    // The payload starts `{"timestamp":<ms>,` (worker/lib/home.js) — read it off
+    // the head of the string rather than JSON.parse-ing the whole home page.
+    const body = await env.CATALOG_KV.get(HOME_KV_KEY);
+    const ts = body && Number((body.slice(0, 64).match(/"timestamp":(\d+)/) || [])[1]);
+    const ageMs = ts ? now - ts : null;
+    out.home = { age_min: ageMs == null ? null : Math.round(ageMs / 60000) };
+    if (ageMs == null) problems.push('home:current missing or unparseable');
+    else if (ageMs > HOME_MAX_AGE_MS) problems.push(`home:current is ${Math.round(ageMs / 60000)}min old`);
+  } catch (e) {
+    problems.push(`home check failed: ${e.message}`);
+  }
+
+  try {
+    const row = await env.DB.prepare(
+      `SELECT (SELECT COUNT(*) FROM mirror_queue) AS queued,
+              (SELECT MIN(queued_at) FROM mirror_queue) AS oldest,
+              (SELECT COUNT(*) FROM mirrored WHERE created_at > ?1) AS mirrored_1h`
+    )
+      .bind(now - 60 * 60 * 1000)
+      .first();
+    const oldestMs = row.oldest ? now - row.oldest : 0;
+    out.mirror = {
+      queued: row.queued,
+      oldest_queued_min: Math.round(oldestMs / 60000),
+      mirrored_last_hour: row.mirrored_1h,
+    };
+    if (oldestMs > QUEUE_MAX_AGE_MS) {
+      problems.push(`mirror queue head stuck ${Math.round(oldestMs / 60000)}min (${row.queued} queued)`);
+    }
+  } catch (e) {
+    problems.push(`mirror check failed: ${e.message}`);
+  }
+
+  out.ok = problems.length === 0;
+  out.problems = problems;
+  return new Response(JSON.stringify(out), {
+    status: out.ok ? 200 : 503,
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+  });
+}
+
 // Manual trigger for the R2 mirror drain — same call the */10 cron makes.
 // Exposed so a drain can be forced on demand (verifying Phase 6 without waiting
 // for the cron tick).
@@ -578,6 +641,11 @@ export default {
     }
     if (url.pathname === '/__cron/purge-recs') {
       return handleCronPurgeRecs(request, env, url);
+    }
+    // Ahead of the /api/ branch on purpose: handleApi would put this behind the
+    // Cache API, and a cached health check reports the past, not the present.
+    if (url.pathname === '/api/health') {
+      return handleHealth(env);
     }
     if (url.pathname.startsWith('/api/')) {
       return handleApi(request, env, ctx, url);
