@@ -37,12 +37,14 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 // reads off the bucket (served from CDN cache instead) — see plan §5.
 const OBJECT_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
-// Accept: image/webp negotiates a WebP response from image.tmdb.org (it does
-// content negotiation; img.ophim.live does not, so this is a no-op for it —
-// harmless). cacheTtl: 0 bypasses Cloudflare's shared subrequest cache: TMDB
-// sends no `Vary: Accept`, so a JPEG cached from an older request could
-// otherwise be handed back here despite the Accept header (see state.md
-// "Constraints discovered while planning" #2).
+// accept: image/webp is a holdover from when this fetch was the ONLY thing
+// negotiating WebP out of TMDB directly (see WSRV block below for why that's
+// no longer how `.webp` keys get their bytes) — harmless to keep for the
+// non-wsrv paths (OPhim, and the fallback-disabled case), since it just adds
+// a header TMDB may or may not honor. cacheTtl: 0 bypasses Cloudflare's
+// shared subrequest cache: TMDB sends no `Vary: Accept`, so a JPEG cached
+// from an older request could otherwise be handed back here despite the
+// Accept header (see state.md "Constraints discovered while planning" #2).
 async function fetchWithTimeout(url, ms = 8000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
@@ -55,6 +57,60 @@ async function fetchWithTimeout(url, ms = 8000) {
       },
       cf: { cacheTtl: 0 },
     });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// --- wsrv.nl: the actual source of `.webp` bytes for TMDB keys -------------
+//
+// TMDB negotiates WebP via `Accept`, but sends no `Vary: Accept` — a JPEG
+// response cached anywhere in front of it can be handed back regardless of
+// the header. That made the `.webp` key an unreliable promise: measured
+// 2026-08-06, ~1.7% of already-mirrored objects held JPEG bytes under a
+// `.webp` key, silently (browsers go by content-type, not the extension, so
+// nothing looked broken).
+//
+// wsrv.nl (open source, BSD-3-Clause, self-hostable — https://wsrv.nl) makes
+// format a property of the URL (`&output=webp`), not a negotiated header, so
+// it can't disagree with itself the way content negotiation did. Verified
+// 2026-08-06 against this project's real TMDB images: byte-identical output
+// across 5 consecutive requests, `content-length` present (streams straight
+// through below — no buffering needed, unlike OPhim's chunked responses),
+// dimensions unchanged from source, q=75 came out smaller than TMDB's own
+// negotiated WebP for every sample. Free-tier limit is 2,500 uncached
+// images/10min/IP; MIRROR_BATCH below uses well under 1% of that.
+//
+// TMDB-only: only keys ending `.webp` route through this (see
+// webpKeyFor/images.js — OPhim keys never carry that suffix). Full rationale
+// + the decision not to also route OPhim through this yet: bluesiaOM
+// context/plan-redflare-webp-wsrv.md.
+const WSRV_ENABLED = true; // flip to false + deploy to roll back instantly
+const WSRV_QUALITY = 75; // chosen 2026-08-06 by eyeballing real posters/backdrops
+
+function wsrvWebpUrl(upstreamUrl) {
+  return `https://wsrv.nl/?url=${encodeURIComponent(upstreamUrl)}&output=webp&q=${WSRV_QUALITY}`;
+}
+
+// A 4xx/5xx from wsrv.nl is ambiguous: the ORIGIN image could genuinely be
+// gone (safe to give up on) or wsrv.nl itself could be having a bad moment
+// (should retry, not delete the queue row). This resolves that by checking
+// the origin directly — one extra subrequest, only spent on the error path.
+// `false` on our own network hiccup is deliberate: we can't prove the image
+// is dead, so default to "still alive" and let the row retry rather than
+// wrongly deleting it.
+async function isUpstreamDead(url, ms = 5000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      signal: ctrl.signal,
+      headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
+    });
+    return res.status >= 400 && res.status < 500;
+  } catch {
+    return false;
   } finally {
     clearTimeout(timer);
   }
@@ -168,14 +224,28 @@ async function mirrorOne(env, key, sourceUrl, queuedAt) {
     return { outcome: 'exists' };
   }
 
-  // 2. Not there — fetch upstream and stream it in.
+  // 2. Not there — fetch upstream and stream it in. TMDB (`.webp`) keys go
+  //    through wsrv.nl for guaranteed WebP bytes; everything else (OPhim)
+  //    fetches the origin directly, unchanged.
+  const useWsrv = WSRV_ENABLED && key.endsWith('.webp');
+  const fetchUrl = useWsrv ? wsrvWebpUrl(sourceUrl) : sourceUrl;
   let res;
   try {
-    res = await fetchWithTimeout(sourceUrl);
+    res = await fetchWithTimeout(fetchUrl);
   } catch (e) {
     return { outcome: 'retry', detail: `fetch: ${e.name}: ${e.message}` }; // network blip — try next cron
   }
   if (!res || !res.ok) {
+    if (useWsrv) {
+      // Don't trust a wsrv.nl error to mean the image is gone — check the
+      // TMDB origin itself before deleting the queue row (see isUpstreamDead).
+      const originDead = await isUpstreamDead(sourceUrl);
+      if (originDead) {
+        await env.DB.prepare('DELETE FROM mirror_queue WHERE key = ?1').bind(key).run();
+        return { outcome: 'give-up', detail: `origin dead, wsrv ${res ? res.status : 'no-response'}` };
+      }
+      return { outcome: 'retry', detail: `wsrv ${res ? res.status : 'no-response'}` };
+    }
     // A permanent 4xx (image genuinely gone) — give up so it doesn't clog the
     // queue forever. It'll re-enqueue naturally if an item still references it,
     // and the client falls back to upstream meanwhile.
