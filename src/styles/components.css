@@ -1703,7 +1703,24 @@
     grid-template-columns: repeat(2, 1fr);
     gap: 8px;
   }
-  
+
+  .category-grid__pagination {
+    gap: 4px;
+  }
+
+  .pagination__btn {
+    min-width: 28px;
+    height: 28px;
+    padding: 0 4px;
+    font-size: 12px;
+  }
+
+  .pagination__dots {
+    font-size: 12px;
+    height: 28px;
+    padding: 0 2px;
+  }
+
   /* Always show titles on mobile since there is no hover */
   .movie-card__overlay {
     opacity: 1;
