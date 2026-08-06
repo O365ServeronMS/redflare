@@ -14,7 +14,9 @@
 //
 // Flow:
 //   build (list/detail/home/rec) → enqueueMirror(targets)   [fire-and-forget]
-//   cron */10 → drainMirrorQueue() → for each queued key:
+//   cron */10 → runMirrorRefresh() → MIRROR_SHARD_COUNT parallel
+//     drainMirrorQueueShard() invocations (plan-hit-rate.md Phase 3) → for
+//     each queued key in that shard's partition of the queue:
 //     HEAD R2 — already there (e.g. mirrored by the VPS before we took over)?
 //       → just record it in `mirrored`, no fetch/put.
 //     else → fetch upstream (streamed when the response carries a
@@ -333,13 +335,10 @@ async function mirrorOne(env, key, sourceUrl) {
   return { outcome: 'mirrored' };
 }
 
-export async function drainMirrorQueue(env) {
-  const { results } = await env.DB.prepare(
-    'SELECT key, source_url, queued_at FROM mirror_queue ORDER BY queued_at LIMIT ?1'
-  )
-    .bind(MIRROR_BATCH)
-    .all();
-  const rows = results || [];
+// Processes an already-selected batch of rows through mirrorOne, shared by
+// every sharded /__cron/mirror-shard/:n invocation below — the per-row logic
+// (and its 4xx-give-up / 6h-expiry rules) must not fork between shards.
+async function drainRows(env, rows) {
   if (!rows.length) return { drained: 0 };
 
   const counts = { exists: 0, mirrored: 0, 'give-up': 0, retry: 0, expired: 0 };
@@ -360,6 +359,64 @@ export async function drainMirrorQueue(env) {
     }
     counts[outcome] = (counts[outcome] || 0) + 1;
   });
-  console.log('[mirror drain]', { pulled: rows.length, ...counts });
   return { drained: rows.length, ...counts, retries };
+}
+
+// --- Sharded drain (plan-hit-rate.md Phase 3) --------------------------------
+// Before this, a single un-sharded drain pulled MIRROR_BATCH=20 rows every
+// */10 cron tick (<=2,880/day theoretical) — too slow to clear a backlog the
+// size the 2026-08-06 KKPhim source swap produced (~1,200 rows, entirely new
+// keys).
+// Same fix as home.js/warm.js: split into MIRROR_SHARD_COUNT independent
+// Worker invocations (via env.SELF, not a plain fetch() — see home.js's
+// comment on why), each with its own 50-subrequest budget, so throughput
+// scales by shard count instead of being capped by one invocation's budget.
+//
+// Partitioning is `rowid % MIRROR_SHARD_COUNT`, not a plain
+// `OFFSET n*MIRROR_BATCH` — an OFFSET-based split would be wrong under
+// concurrent writers: as shard 0 deletes the rows it finishes, every row
+// after it shifts left, so shard 1's OFFSET would skip or re-read rows that
+// moved into shard 0's old range mid-cycle. A stable partition key sidesteps
+// that: which shard a row belongs to never changes for the row's lifetime in
+// the queue, regardless of what other shards insert or delete concurrently.
+// `mirror_queue` has no INTEGER PRIMARY KEY, so SQLite still assigns it an
+// implicit `rowid` (only `WITHOUT ROWID` tables lack one) — safe to filter on.
+export const MIRROR_SHARD_COUNT = 5;
+
+export async function drainMirrorQueueShard(env, n) {
+  const { results } = await env.DB.prepare(
+    'SELECT key, source_url, queued_at FROM mirror_queue WHERE (rowid % ?1) = ?2 ORDER BY queued_at LIMIT ?3'
+  )
+    .bind(MIRROR_SHARD_COUNT, n, MIRROR_BATCH)
+    .all();
+  const result = await drainRows(env, results || []);
+  console.log('[mirror drain shard]', n, { pulled: (results || []).length, ...result });
+  return result;
+}
+
+async function callMirrorShard(env, n) {
+  const res = await env.SELF.fetch(`https://phim.bluesia.net/__cron/mirror-shard/${n}`, {
+    headers: { 'x-cron-key': env.CRON_KEY },
+  });
+  if (!res.ok) return { drained: 0, error: `shard ${n} http ${res.status}` };
+  return res.json();
+}
+
+// Orchestrator: MIRROR_SHARD_COUNT parallel SELF calls (Promise.all, unlike
+// home.js/warm.js's sequential shards — those build against KKPhim/TMDB and
+// share the 6-simultaneous-outgoing-connection cap across their OWN
+// subrequests; this orchestrator's only job is dispatching 5 independent
+// HTTP round-trips to itself, which is exactly what the connection cap
+// exists to parallelize). Called by the */10 cron in place of the single-shot
+// drain above.
+export async function runMirrorRefresh(env) {
+  const results = await Promise.all(
+    Array.from({ length: MIRROR_SHARD_COUNT }, (_, n) => callMirrorShard(env, n))
+  );
+  const summary = { drained: 0, exists: 0, mirrored: 0, 'give-up': 0, retry: 0, expired: 0 };
+  for (const r of results) {
+    for (const k of Object.keys(summary)) summary[k] += r[k] || 0;
+  }
+  console.log('[mirror refresh]', summary);
+  return { ...summary, shards: results.map(({ retries, ...rest }) => rest) };
 }

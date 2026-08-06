@@ -14,9 +14,9 @@ xong chờ deploy — xem bảng phase bên dưới
 | Phase | Nội dung | Trạng thái | Ngày | Ghi chú |
 |---|---|---|---|---|
 | **0** | Khôi phục background refresh (cron chết) | 🟢 **Đóng — không phải sự cố** | 2026-08-06 | Chẩn đoán ban đầu sai, xem nhật ký bên dưới |
-| **1** | Bỏ `s-maxage`, bật `stale-while-revalidate` | 🟡 **Code xong, chưa deploy** | 2026-08-06 | Còn 1 phần chặn O1 (Browser TTL override) |
+| **1** | Bỏ `s-maxage`, bật `stale-while-revalidate` | 🟢 **Deploy xong, verify production OK** | 2026-08-06 | Còn 1 phần chặn O1 (Browser TTL override) |
 | **2** | Bật Tiered Cache (Smart Topology) | 🟢 **Xong** | 2026-08-06 | User đã bật trên dashboard |
-| **3** | Shard mirror drain + dọn ~1.200 ảnh tồn | ⚪ Chưa bắt đầu | — | **Việc thật sự cần làm** — xem Phase 0 log |
+| **3** | Shard mirror drain + dọn ~1.200 ảnh tồn | 🟢 **Deploy xong** | 2026-08-06 | 5x throughput (100/tick thay vì 20/tick); backlog tự dọn dần |
 | **4** | Warm set theo popularity (LRU) | ⚪ Chưa bắt đầu | — | Cần Phase 0 xong trước |
 | **5** | Edge warming | ⚪ Chưa bắt đầu | — | **Bắt buộc sau Phase 2** |
 | **6** | Đo lường tách theo class | ⚪ Chưa bắt đầu | — | Cần quyền Analytics |
@@ -62,6 +62,52 @@ npx wrangler d1 execute redflare-db --remote --command "SELECT (SELECT COUNT(*) 
 
 ## Nhật ký quyết định
 
+### 2026-08-06 — Phase 3: shard mirror drain
+
+**Thay đổi:** [worker/lib/mirror.js](../worker/lib/mirror.js) — tách logic xử
+lý per-row ra hàm dùng chung `drainRows(env, rows)`; thêm
+`drainMirrorQueueShard(env, n)` (đọc một phần của hàng đợi) và
+`runMirrorRefresh(env)` (orchestrator gọi 5 shard song song qua
+`env.SELF`, cùng pattern `home.js`/`warm.js`). Xoá hàm `drainMirrorQueue`
+đơn (single-shot) cũ — không còn nơi nào gọi nó sau khi thay thế, giữ lại là
+dead code với comment sai sự thật nên xoá luôn thay vì để lại.
+[worker/index.js](../worker/index.js) — thêm route
+`/__cron/mirror-shard/:n`; `/__cron/mirror` (cron `*/10` + trigger tay) đổi
+sang gọi `runMirrorRefresh` thay vì drain đơn.
+
+**Quyết định thiết kế: partition theo `rowid % 5`, không phải `OFFSET`.**
+Một hàng đợi FIFO dùng chung, nếu chia theo `OFFSET n*20` sẽ sai dưới ghi/xoá
+đồng thời — khi shard 0 xoá xong các hàng nó xử lý, mọi hàng phía sau dịch
+trái, khiến `OFFSET` của shard 1 đọc trúng hàng đã dịch vào phạm vi shard 0,
+bỏ sót hoặc đọc trùng. `rowid % 5` ổn định: một hàng luôn thuộc đúng 1 shard
+suốt vòng đời của nó trong hàng đợi, bất kể shard khác ghi/xoá gì.
+`mirror_queue` không có `INTEGER PRIMARY KEY` (PK là `key TEXT`) nhưng SQLite
+vẫn tự gán `rowid` ngầm định trừ khi khai báo `WITHOUT ROWID` — bảng này
+không khai báo, nên lọc theo `rowid` an toàn.
+
+**Verify trước khi deploy** (không có CRON_KEY để test route đầy đủ qua
+`wrangler dev --remote`, vì `env.SELF` ở chế độ `--remote` trỏ thẳng vào
+Worker **production**, không phải bản dev — nên `runMirrorRefresh` không thể
+test full round-trip cục bộ khi route mới còn chưa có trên production):
+- Route `/__cron/mirror-shard/0` tồn tại và bị chặn đúng bởi CRON_KEY (404
+  với key sai) — xác nhận qua `wrangler dev --remote` cục bộ.
+- Query `rowid % 5` chạy thật trên D1 production: phân bố đều
+  246/245/246/248/249 trên 5 shard (~1.234 hàng lúc đo) — không lệch.
+- `node --check` cả hai file pass.
+
+**Trạng thái: đã commit, push `origin main`, deploy.** Ngân sách subrequest
+không đổi so với trước (mỗi shard vẫn xử lý tối đa `MIRROR_BATCH=20` hàng,
+y hệt batch size của drain đơn cũ) — cải thiện đến từ TẦN SUẤT (5 lần/tick
+thay vì 1 lần/tick), không phải từ tăng kích thước batch mỗi invocation, nên
+không tăng rủi ro chạm trần 50 subrequest/invocation so với hành vi đã chạy
+ổn định trong production trước đó.
+
+**Cần theo dõi sau deploy** (không tự động — chưa có quyền Analytics để
+tự động hoá, xem O1): `/api/health` → `mirror.queued` giảm dần,
+`mirrored_last_hour` tăng rõ so với baseline (40/giờ trước Phase 3).
+
+---
+
 ### 2026-08-06 — Phase 1: triển khai, O3 trả lời được không cần Cache Rule
 
 **Thay đổi:** [worker/index.js](../worker/index.js) — thêm `clientCacheControlFor(pathname)`,
@@ -96,9 +142,32 @@ nữa. Chỉ còn một việc dashboard duy nhất: zone đang override
 ở baseline §1.1 của plan) — cần chuyển Browser Cache TTL/Cache Rule đó sang
 "respect origin" để `max-age=60` mới thật sự có tác dụng ở trình duyệt.
 
-**Trạng thái:** code đã viết, `node --check` pass, **chưa commit, chưa
-deploy** — theo quy tắc dự án (chỉ commit/push khi được yêu cầu rõ). Cần
-deploy để verify `cf-cache-status: UPDATING` sau khi hết `max-age=60`.
+**Trạng thái: đã commit (`2aebc08`), push `origin main`, deploy xong, verify
+production OK.** Fast-forward qua 1 commit mới trên `origin/main`
+(`7ae7104`, sửa `worker/lib/recommendation.js`, không đụng `worker/index.js`
+— merge sạch, không conflict) trước khi commit.
+
+Verify production (curl trực tiếp sau deploy):
+```
+/api/list?type=phim-le&page=2 (miss)
+  → cache-control: public, max-age=60, stale-while-revalidate=3600, stale-if-error=86400
+/api/movie/bach-ho-diep (miss)
+  → cache-control: public, max-age=60, stale-while-revalidate=7200, stale-if-error=86400
+/api/search?keyword=rong&page=3 (miss)
+  → cache-control: public, max-age=60, stale-while-revalidate=600
+/api/movie/khong-ton-tai-xyz (404)
+  → cache-control: public, max-age=30
+```
+Đúng như thiết kế cho mọi route family. `/api/home-data` vẫn trả header cũ
+(`max-age=1800, s-maxage=1800`) ngay sau deploy — **đúng như dự kiến**: đó là
+entry `caches.default` được ghi TRƯỚC deploy này, chưa hết TTL (tối đa 30
+phút) nên chưa rebuild qua code mới. Tự lành, không cần hành động — sẽ đổi
+header khi entry đó tự hết hạn.
+
+**Chưa verify được** (cần đợi >60s để entry hết `max-age=60` mới thử):
+`cf-cache-status: UPDATING` thay vì `EXPIRED` sau khi hết TTL, và liệu
+Browser Cache TTL override 1800s ở zone có còn ghi đè `max-age=60` hay không
+(vẫn cần O1).
 
 ---
 

@@ -390,15 +390,22 @@ Dashboard, miễn phí, không đụng code. **Đòn bẩy free lớn nhất cò
 **Verify:** đo MISS rate của cùng một tập ảnh trước/sau, từ ≥2 vùng.
 **Rollback:** tắt toggle.
 
-### Phase 3 — Shard mirror drain, dọn nốt backlog ~1.200 ảnh
+### Phase 3 — Shard mirror drain, dọn nốt backlog ~1.200 ảnh *(đã triển khai)*
 
-Hiện tại: 1 invocation × 20 ảnh / 10 phút = 2.880/ngày lý thuyết, **đang chạy
-đúng** (xem Phase 0) nhưng không đủ nhanh so với backlog phát sinh từ đợt đổi
-nguồn KKPhim hôm nay.
+Trước: 1 invocation × 20 ảnh / 10 phút = 2.880/ngày lý thuyết, **chạy đúng**
+(xem Phase 0) nhưng không đủ nhanh so với backlog phát sinh từ đợt đổi nguồn
+KKPhim hôm nay.
 
-- Tách `/__cron/mirror-shard/:n`, gọi qua `SELF` — **đúng pattern
-  `home.js`/`warm.js` đã dùng và đã chứng minh** (mỗi shard có budget 50
-  subrequest riêng).
+- ✅ Tách `/__cron/mirror-shard/:n` ([worker/lib/mirror.js](../worker/lib/mirror.js)
+  `drainMirrorQueueShard`), gọi qua `SELF` từ orchestrator `runMirrorRefresh`
+  — **đúng pattern `home.js`/`warm.js`** (mỗi shard có budget 50 subrequest
+  riêng). Khác một chỗ: 5 shard gọi **song song** (`Promise.all`), không tuần
+  tự như home/warm — orchestrator chỉ dispatch 5 HTTP round-trip tới chính
+  nó, không tự làm việc nặng nên không cần né giới hạn 6 kết nối đồng thời.
+- ✅ Partition hàng đợi bằng `rowid % 5`, không phải `OFFSET` — xem lý do
+  (race điều kiện dưới ghi/xoá đồng thời) và số liệu phân bố đều
+  (246/245/246/248/249 trên 5 shard, đo thật trên D1 production) ở
+  [state-hit-rate.md](state-hit-rate.md).
 - 5 shard × 20 ảnh / 10 phút = **14.400 ảnh/ngày** → dọn sạch backlog trong
   vài tick thay vì rải rác cả ngày.
 - `phimimg.com` (100/~1.200 hàng đợi): **đã đúng, không cần sửa** — Phase 0 xác
@@ -406,8 +413,9 @@ nguồn KKPhim hôm nay.
   `phimimg.com`) và fetch thẳng origin; test trực tiếp một URL mẫu trả về
   `200, image/webp, content-length` bình thường. Các dòng này chỉ đang chờ tới
   lượt FIFO, không bị lỗi.
-- Cân nhắc: chặn N1 tận gốc bằng cách **không map sang R2 khi chưa mirror**
-  (tra bảng `mirrored`) → tránh 404. Đánh đổi: thêm 1 query D1 mỗi build.
+- **Chưa làm, để lại cho sau:** chặn N1 tận gốc bằng cách **không map sang R2
+  khi chưa mirror** (tra bảng `mirrored`) → tránh 404. Đánh đổi: thêm 1 query
+  D1 mỗi build. Không cấp thiết vì backlog giờ tự dọn nhanh hơn nhiều.
 
 **Verify:** `mirror_queue` → ~0; `mirrored_last_hour` > 0; sampling 50 URL ảnh
 trong home payload → 0 cái trả 404.

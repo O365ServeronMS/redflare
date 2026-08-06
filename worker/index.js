@@ -38,15 +38,17 @@
 //              `recs` and the Cache API) — see handleCronPurgeRecs below for
 //              why both are required.
 //   /__cron/shard/:n, /__cron/refresh-home, /__cron/mirror,
-//   /__cron/warm-shard/:n, /__cron/warm
+//   /__cron/mirror-shard/:n, /__cron/warm-shard/:n, /__cron/warm
 //              → internal, gated by the CRON_KEY secret. Not part of the
 //              public API surface — see worker/lib/home.js,
 //              worker/lib/mirror.js, and worker/lib/warm.js. The home shards
 //              also opportunistically populate the `idx` reverse index; the
 //              hourly cron sweeps expired idx/recs rows; a */10 cron drains
-//              the R2 image-mirror queue (Phase 6); a */30 cron refreshes
-//              the page:v1:* warm set (ADR-0001 Phase 4), sharded the same
-//              way home-data is, one target per invocation.
+//              the R2 image-mirror queue across 5 parallel shards
+//              (plan-hit-rate.md Phase 3, same pattern as the home/warm
+//              shards below); a */30 cron refreshes the page:v1:* warm set
+//              (ADR-0001 Phase 4), sharded the same way home-data is, one
+//              target per invocation.
 //   Images: every build (list/detail/home/rec) enqueues its artwork into the
 //              `mirror_queue` D1 table; the mirror cron copies them into R2 via
 //              the binding (worker/lib/mirror.js) — served from
@@ -93,7 +95,7 @@ import {
   classifyTier,
   ttlForTier,
 } from './lib/recommendation.js';
-import { enqueueMirror, drainMirrorQueue } from './lib/mirror.js';
+import { enqueueMirror, drainMirrorQueueShard, runMirrorRefresh } from './lib/mirror.js';
 import { WARM_TARGETS, WARM_META_KEY, runWarmShard, runWarmRefresh } from './lib/warm.js';
 
 const KKPHIM_BASE = 'https://phimapi.com';
@@ -597,12 +599,24 @@ async function handleHealth(env) {
   });
 }
 
-// Manual trigger for the R2 mirror drain — same call the */10 cron makes.
-// Exposed so a drain can be forced on demand (verifying Phase 6 without waiting
-// for the cron tick).
+// Manual trigger for the R2 mirror drain — same call the */10 cron makes
+// (plan-hit-rate.md Phase 3: now the SHARDED refresh, not the single-shot
+// drain). Exposed so a drain can be forced on demand (verifying Phase 3/6
+// without waiting for the cron tick).
 async function handleCronMirror(request, env) {
   if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
-  const result = await drainMirrorQueue(env);
+  const result = await runMirrorRefresh(env);
+  return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
+}
+
+// One mirror-drain shard, one invocation (plan-hit-rate.md Phase 3) — same
+// pattern as /__cron/shard/:n (home.js) and /__cron/warm-shard/:n (warm.js):
+// each gets its own 50-subrequest budget via env.SELF, dispatched by
+// runMirrorRefresh. Exposed standalone too, for testing one shard in
+// isolation without running the whole refresh.
+async function handleCronMirrorShard(request, env, n) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const result = await drainMirrorQueueShard(env, Number(n));
   return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
 }
 
@@ -897,6 +911,10 @@ export default {
     if (url.pathname === '/__cron/mirror') {
       return handleCronMirror(request, env);
     }
+    if (url.pathname.startsWith('/__cron/mirror-shard/')) {
+      const n = url.pathname.slice('/__cron/mirror-shard/'.length);
+      return handleCronMirrorShard(request, env, n);
+    }
     if (url.pathname.startsWith('/__cron/warm-shard/')) {
       const n = url.pathname.slice('/__cron/warm-shard/'.length);
       return handleCronWarmShard(request, env, ctx, n);
@@ -928,8 +946,9 @@ export default {
       ctx.waitUntil(cleanupRecTables(env).catch((e) => console.error('[rec cleanup]', e.message)));
     }
     if (event.cron === '*/10 * * * *') {
-      // Drain the R2 image-mirror queue (Phase 6).
-      ctx.waitUntil(drainMirrorQueue(env).catch((e) => console.error('[mirror drain]', e.message)));
+      // Drain the R2 image-mirror queue, sharded (Phase 6, sharded further in
+      // plan-hit-rate.md Phase 3 — 5x the single-shot throughput).
+      ctx.waitUntil(runMirrorRefresh(env).catch((e) => console.error('[mirror refresh]', e.message)));
     }
     if (event.cron === '*/30 * * * *') {
       // Refresh the page:v1:* warm set (ADR-0001 Phase 4).
