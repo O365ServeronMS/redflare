@@ -118,6 +118,39 @@ function ttlFor(pathname) {
   return TTL.list; // list, genre, country
 }
 
+// --- Client/zone-facing Cache-Control (plan-hit-rate.md Phase 1) ------------
+// `s-maxage` disables `stale-while-revalidate` for shared caches (Cloudflare
+// docs, confirmed 2026-08-06: "s-maxage disables stale-while-revalidate") —
+// so the header returned to the actual HTTP response (what the zone CDN
+// caches) must NOT carry s-maxage, only max-age + SWR + stale-if-error.
+// Edge freshness for the zone tier now comes from `max-age` alone (Origin
+// Cache Control is on by default for Free/Pro/Business, confirmed via docs)
+// rather than a per-response s-maxage — a short max-age is fine because SWR
+// means "revalidate" here almost always means "ask this Worker", which is
+// itself fast (KV/D1/Cache-API-backed), not a KKPhim/TMDB round-trip.
+//
+// This is DELIBERATELY separate from the s-maxage-bearing Cache-Control still
+// written to `caches.default` below (unchanged) — that Worker-owned per-colo
+// tier doesn't support SWR at all ("not supported when using the Cache API
+// methods cache.match or cache.put", Cloudflare docs), so it keeps using
+// s-maxage/ttl as its freshness signal exactly as before. Two different
+// Response objects, two different jobs: caches.default shields origin builds
+// (needs precise per-tier TTL, e.g. the 30d/6h/1h recommendation tiers);
+// the client-facing header lets the zone edge serve stale + revalidate in
+// the background instead of blocking on a MISS.
+function clientCacheControlFor(pathname) {
+  if (pathname.startsWith('/api/movie/')) {
+    return 'public, max-age=60, stale-while-revalidate=7200, stale-if-error=86400';
+  }
+  if (pathname.startsWith('/api/search')) {
+    return 'public, max-age=60, stale-while-revalidate=600';
+  }
+  if (pathname.startsWith('/api/recommendation/') || pathname.startsWith('/api/related/')) {
+    return 'public, max-age=60, stale-while-revalidate=86400, stale-if-error=604800';
+  }
+  return 'public, max-age=60, stale-while-revalidate=3600, stale-if-error=86400'; // list, genre, country, home-data
+}
+
 const HOME_PATH = '/api/home-data';
 
 function isSearch(pathname) {
@@ -274,12 +307,10 @@ async function handleHomeData(env, ctx, cache, cacheReq, method) {
     ctx.waitUntil(env.CATALOG_KV.put(HOME_KV_KEY, body));
   }
 
-  // ADR-0001 Phase 1: the client-facing response carries the SAME
-  // Cache-Control as the copy written to caches.default. Before this, only
-  // the cache.put() copy was cacheable — a colo's first request (the one
-  // that actually runs this function) returned no Cache-Control at all, so
-  // the zone edge never had a reason to hold onto it. Same header, single
-  // source of truth, so the two can't drift apart again.
+  // ADR-0001 Phase 1: caches.default keeps s-maxage — that layer doesn't
+  // support stale-while-revalidate, so it needs a plain TTL. plan-hit-rate.md
+  // Phase 1: the client-facing response deliberately carries a DIFFERENT
+  // Cache-Control (no s-maxage, has SWR) — see clientCacheControlFor above.
   const homeCacheControl = 'public, max-age=60, s-maxage=1800';
   const cacheableRes = new Response(body, {
     headers: {
@@ -294,7 +325,7 @@ async function handleHomeData(env, ctx, cache, cacheReq, method) {
     headers: {
       'content-type': 'application/json',
       'x-catalog-cache': cacheStatus,
-      'cache-control': homeCacheControl,
+      'cache-control': clientCacheControlFor(HOME_PATH),
     },
   });
 }
@@ -369,8 +400,11 @@ async function handleRecommendation(env, ctx, cache, cacheReq, method, type, tmd
     }
   }
 
-  // ADR-0001 Phase 1: same Cache-Control on both copies — see handleHomeData's
-  // comment for why the asymmetry mattered.
+  // ADR-0001 Phase 1 + plan-hit-rate.md Phase 1: caches.default keeps
+  // s-maxage=ttl (the 30d/6h/1h completeness tier from classifyTier — SWR
+  // isn't supported there anyway); the client-facing header uses a flat SWR
+  // window instead (clientCacheControlFor) since per-tier granularity can't
+  // flow through the zone edge's freshness signal without s-maxage.
   const recCacheControl = `public, max-age=60, s-maxage=${ttl}`;
   const cacheableRes = new Response(body, {
     headers: {
@@ -385,7 +419,7 @@ async function handleRecommendation(env, ctx, cache, cacheReq, method, type, tmd
     headers: {
       'content-type': 'application/json',
       'x-catalog-cache': cacheStatus,
-      'cache-control': recCacheControl,
+      'cache-control': clientCacheControlFor('/api/recommendation/'),
     },
   });
 }
@@ -676,6 +710,9 @@ async function warmKvLookup(env, ctx, cache, cacheReq, cacheKey, pathname, ttl, 
   // one, so it gets the same TTL and also seeds the per-colo Cache API tier
   // for this colo's next request (KV is never the layer a plain cache hit
   // consults directly — see ADR-0001's "KV is never the first layer" rule).
+  // plan-hit-rate.md Phase 1: caches.default entry keeps s-maxage=ttl; the
+  // client-facing response uses the SWR scheme instead — see
+  // clientCacheControlFor.
   const cacheControl = `public, max-age=60, s-maxage=${ttl}`;
   const cacheableRes = new Response(body, {
     headers: {
@@ -690,7 +727,7 @@ async function warmKvLookup(env, ctx, cache, cacheReq, cacheKey, pathname, ttl, 
     headers: {
       'content-type': 'application/json',
       'x-catalog-cache': 'warm',
-      'cache-control': cacheControl,
+      'cache-control': clientCacheControlFor(pathname),
     },
   });
 }
@@ -732,19 +769,19 @@ async function handleApi(request, env, ctx, url) {
     // Thrown synchronously by localBuilder for a malformed request (missing
     // required query param) — matches catalog-api's own validation, which
     // also returns 4xx directly with no durable-fallback lookup. Still worth
-    // a short Cache-Control (ADR-0001 Phase 1): the exact same malformed URL
-    // hitting this repeatedly (a broken client, a crawler) shouldn't redo
-    // this work every time.
+    // a short Cache-Control (ADR-0001 Phase 1, shortened in plan-hit-rate.md
+    // Phase 1): the exact same malformed URL hitting this repeatedly (a
+    // broken client, a crawler) shouldn't redo this work every time.
     return new Response(JSON.stringify({ error: err.message }), {
       status: err.status || 400,
-      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=60' },
+      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=30' },
     });
   }
 
   if (!build) {
     return new Response(JSON.stringify({ error: 'Not found' }), {
       status: 404,
-      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=60' },
+      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=30' },
     });
   }
 
@@ -771,12 +808,13 @@ async function handleApi(request, env, ctx, url) {
       );
     }
 
-    // ADR-0001 Phase 1: same Cache-Control on both copies — see
-    // handleHomeData's comment for why the asymmetry mattered. This was the
-    // main offender: every list/genre/country/movie/search miss returned
-    // with NO Cache-Control at all, so the zone edge never cached a colo's
-    // first request — only a later Cache API hit ever replayed a cacheable
-    // header.
+    // ADR-0001 Phase 1 + plan-hit-rate.md Phase 1: caches.default keeps
+    // s-maxage=ttl (no SWR support there anyway); the client-facing response
+    // uses the SWR scheme (clientCacheControlFor) instead — see the comment
+    // on that function for why the two must differ. Before ADR-0001 Phase 1
+    // every list/genre/country/movie/search miss returned with NO
+    // Cache-Control at all, so the zone edge never cached a colo's first
+    // request — only a later Cache API hit ever replayed a cacheable header.
     const buildCacheControl = `public, max-age=60, s-maxage=${ttl}`;
     const cacheableRes = new Response(body, {
       headers: {
@@ -794,19 +832,19 @@ async function handleApi(request, env, ctx, url) {
       headers: {
         'content-type': 'application/json',
         'x-catalog-cache': 'miss',
-        'cache-control': buildCacheControl,
+        'cache-control': clientCacheControlFor(url.pathname),
       },
     });
   } catch (err) {
     // A genuine 4xx from KKPhim itself (e.g. an unknown genre/country slug) —
     // matches catalog-api's own behavior: return the real status, no
     // durable-fallback lookup (a 404 isn't "the origin is down"). Short
-    // Cache-Control added (ADR-0001 Phase 1) so a bad slug hammered
-    // repeatedly doesn't redo the KKPhim round-trip every time.
+    // Cache-Control (shortened further in plan-hit-rate.md Phase 1) so a bad
+    // slug hammered repeatedly doesn't redo the KKPhim round-trip every time.
     if (err.status && err.status >= 400 && err.status < 500) {
       return new Response(method === 'HEAD' ? null : JSON.stringify({ error: err.message }), {
         status: err.status,
-        headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=60' },
+        headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=30' },
       });
     }
 
@@ -817,26 +855,30 @@ async function handleApi(request, env, ctx, url) {
       console.error('[stale read]', url.pathname, readErr.message);
     }
     if (stale != null) {
-      // Short Cache-Control (ADR-0001 Phase 1), not written to caches.default
-      // (that stays a Phase-3 negative-caching decision, see the system-design
-      // brief) — but the header alone lets the zone edge absorb repeated hits
-      // during an upstream outage instead of every request re-attempting a
-      // doomed KKPhim/TMDB round-trip. 60s so it drops the stale copy quickly
-      // once the origin recovers.
+      // plan-hit-rate.md Phase 1: no s-maxage (SWR/stale-if-error need it
+      // absent), not written to caches.default (that stays a Phase-3
+      // negative-caching decision, see the system-design brief). `max-age=30`
+      // so the zone edge revalidates quickly once the origin recovers;
+      // `stale-if-error=86400` lets the zone keep serving this same stale
+      // body if the NEXT request also fails at the Worker, instead of
+      // surfacing a fresh error to the client on every single miss during an
+      // extended outage.
       return new Response(method === 'HEAD' ? null : stale, {
         headers: {
           'content-type': 'application/json',
           'x-catalog-cache': 'stale-vps-down',
-          'cache-control': 'public, max-age=60, s-maxage=60',
+          'cache-control': 'public, max-age=30, stale-if-error=86400',
         },
       });
     }
     // Total failure — no live build, no durable fallback either. Shorter TTL
     // than the stale-vps-down branch above: that one still serves real (if
-    // old) data, this one serves nothing, so recover from it faster.
+    // old) data, this one serves nothing, so recover from it faster. No
+    // stale-if-error: there is no prior good response for THIS request to
+    // fall back to.
     return new Response(method === 'HEAD' ? null : JSON.stringify({ error: 'catalog unavailable' }), {
       status: 502,
-      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=30, s-maxage=30' },
+      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=30' },
     });
   }
 }
