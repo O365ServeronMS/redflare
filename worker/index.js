@@ -12,7 +12,11 @@
 //   /api/list, /api/genre, /api/country, /api/search, /api/movie/:slug
 //              → built HERE: fetch KKPhim directly, enrich with TMDB
 //              (worker/lib/enrich.js), map images to R2 (worker/lib/images.js).
-//              No VPS involved on a cache miss (Phase 3).
+//              No VPS involved on a cache miss (Phase 3). For list/genre/
+//              country specifically, a Cache API miss checks KV for a
+//              pre-built `page:v1:*` copy (warmKvLookup, ADR-0001 Phase 3)
+//              before falling through to this live build — read-only until
+//              the warm cron (Phase 4) exists to write those keys.
 //   /api/home-data
 //              → built HERE too, but NOT per-request (Phase 4). A Cron
 //              Trigger (scheduled() below) rebuilds it hourly across 6
@@ -33,12 +37,16 @@
 //              Evicts one title's recommendation cache at BOTH layers (D1
 //              `recs` and the Cache API) — see handleCronPurgeRecs below for
 //              why both are required.
-//   /__cron/shard/:n, /__cron/refresh-home, /__cron/mirror
+//   /__cron/shard/:n, /__cron/refresh-home, /__cron/mirror,
+//   /__cron/warm-shard/:n, /__cron/warm
 //              → internal, gated by the CRON_KEY secret. Not part of the
-//              public API surface — see worker/lib/home.js and
-//              worker/lib/mirror.js. The shards also opportunistically populate
-//              the `idx` reverse index; the hourly cron sweeps expired idx/recs
-//              rows; a */10 cron drains the R2 image-mirror queue (Phase 6).
+//              public API surface — see worker/lib/home.js,
+//              worker/lib/mirror.js, and worker/lib/warm.js. The home shards
+//              also opportunistically populate the `idx` reverse index; the
+//              hourly cron sweeps expired idx/recs rows; a */10 cron drains
+//              the R2 image-mirror queue (Phase 6); a */30 cron refreshes
+//              the page:v1:* warm set (ADR-0001 Phase 4), sharded the same
+//              way home-data is, one target per invocation.
 //   Images: every build (list/detail/home/rec) enqueues its artwork into the
 //              `mirror_queue` D1 table; the mirror cron copies them into R2 via
 //              the binding (worker/lib/mirror.js) — served from
@@ -86,6 +94,7 @@ import {
   ttlForTier,
 } from './lib/recommendation.js';
 import { enqueueMirror, drainMirrorQueue } from './lib/mirror.js';
+import { WARM_TARGETS, WARM_META_KEY, runWarmShard, runWarmRefresh } from './lib/warm.js';
 
 const KKPHIM_BASE = 'https://phimapi.com';
 
@@ -265,17 +274,28 @@ async function handleHomeData(env, ctx, cache, cacheReq, method) {
     ctx.waitUntil(env.CATALOG_KV.put(HOME_KV_KEY, body));
   }
 
+  // ADR-0001 Phase 1: the client-facing response carries the SAME
+  // Cache-Control as the copy written to caches.default. Before this, only
+  // the cache.put() copy was cacheable — a colo's first request (the one
+  // that actually runs this function) returned no Cache-Control at all, so
+  // the zone edge never had a reason to hold onto it. Same header, single
+  // source of truth, so the two can't drift apart again.
+  const homeCacheControl = 'public, max-age=60, s-maxage=1800';
   const cacheableRes = new Response(body, {
     headers: {
       'content-type': 'application/json',
       'x-catalog-cache': cacheStatus,
-      'cache-control': 'public, s-maxage=1800',
+      'cache-control': homeCacheControl,
     },
   });
   ctx.waitUntil(cache.put(cacheReq, cacheableRes.clone()));
 
   return new Response(method === 'HEAD' ? null : body, {
-    headers: { 'content-type': 'application/json', 'x-catalog-cache': cacheStatus },
+    headers: {
+      'content-type': 'application/json',
+      'x-catalog-cache': cacheStatus,
+      'cache-control': homeCacheControl,
+    },
   });
 }
 
@@ -349,17 +369,24 @@ async function handleRecommendation(env, ctx, cache, cacheReq, method, type, tmd
     }
   }
 
+  // ADR-0001 Phase 1: same Cache-Control on both copies — see handleHomeData's
+  // comment for why the asymmetry mattered.
+  const recCacheControl = `public, max-age=60, s-maxage=${ttl}`;
   const cacheableRes = new Response(body, {
     headers: {
       'content-type': 'application/json',
       'x-catalog-cache': cacheStatus,
-      'cache-control': `public, s-maxage=${ttl}`,
+      'cache-control': recCacheControl,
     },
   });
   ctx.waitUntil(cache.put(cacheReq, cacheableRes.clone()));
 
   return new Response(method === 'HEAD' ? null : body, {
-    headers: { 'content-type': 'application/json', 'x-catalog-cache': cacheStatus },
+    headers: {
+      'content-type': 'application/json',
+      'x-catalog-cache': cacheStatus,
+      'cache-control': recCacheControl,
+    },
   });
 }
 
@@ -407,7 +434,38 @@ async function handleCronRefreshHome(request, env) {
   });
 }
 
-// Health of the two cron jobs, judged by their OUTPUT rather than by whether
+// One warm-set target, one invocation (ADR-0001 Phase 4) — see
+// worker/lib/warm.js's module comment for why this is sharded the same way
+// home-data's shards are. Builds+writes here; the R2-mirror enqueue is
+// owned by THIS route handler (not warm.js, which has no ExecutionContext)
+// so it happens in the same invocation as the build, same as every other
+// build path in this file.
+async function handleCronWarmShard(request, env, ctx, n) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const result = await runWarmShard(env, Number(n));
+  if (result.status === 'not-found') return new Response('Not found', { status: 404 });
+  if (result.status === 'written' && result.items?.length) {
+    ctx.waitUntil(
+      enqueueMirror(env, mirrorTargets(result.items)).catch((e) =>
+        console.error('[warm shard mirror]', n, e.message)
+      )
+    );
+  }
+  const { items, ...body } = result; // items was only needed for the mirror enqueue above
+  return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+}
+
+// Manual trigger for runWarmRefresh — same orchestrator scheduled() calls
+// on the */30 cron, exposed so a warm cycle can be forced on demand (right
+// after a deploy, or to verify Phase 3's warmKvLookup end-to-end without
+// waiting for the next tick).
+async function handleCronWarmRefresh(request, env) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const result = await runWarmRefresh(env);
+  return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
+}
+
+// Health of the cron jobs, judged by their OUTPUT rather than by whether
 // they threw: Cloudflare's own Cron Events / Workers Logs report a run that
 // completed without an exception as a success, which is exactly what the OPhim
 // mirror bug looked like for a day (every drain "succeeded", every OPhim image
@@ -418,10 +476,22 @@ async function handleCronRefreshHome(request, env) {
 //   mirror  — queue depth and the age of the OLDEST queued row. Depth alone is
 //             meaningless (a build enqueues in bursts); a row older than an
 //             hour means the */10 drain is not clearing the head of the queue.
+//   warm    — how old warm:last-run is (ADR-0001 Phase 5), same ageing-
+//             timestamp logic as home: a failed WRITE of that key (e.g. the
+//             KV 1,000-writes/day cap exhausted — previously a SILENT
+//             failure, which is the whole reason this check exists) shows
+//             up here as the timestamp simply not advancing. Also flags a
+//             last run that reported every target failed — the cron ran
+//             and reported honestly, but something (KKPhim fully down,
+//             CRON_KEY misconfigured) took out the whole cycle, not just
+//             one flaky genre. A few partial failures are NOT flagged: the
+//             per-key last-known-good design means a stale-but-real page:v1:*
+//             key already degrades gracefully on its own — see warm.js.
 // Returns 503 when unhealthy so a plain uptime monitor can watch it with no
 // auth and no JSON parsing. Deliberately ungated: it exposes counts only.
 const HOME_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const QUEUE_MAX_AGE_MS = 60 * 60 * 1000;
+const WARM_MAX_AGE_MS = 90 * 60 * 1000; // 2 missed */30 ticks, same margin as home's "2 ticks"
 
 async function handleHealth(env) {
   const now = Date.now();
@@ -460,6 +530,29 @@ async function handleHealth(env) {
     }
   } catch (e) {
     problems.push(`mirror check failed: ${e.message}`);
+  }
+
+  try {
+    const raw = await env.CATALOG_KV.get(WARM_META_KEY);
+    if (!raw) {
+      out.warm = { age_min: null, written: null, skipped: null, failed: null };
+      problems.push('warm:last-run missing (warm cron has not completed a cycle yet)');
+    } else {
+      const meta = JSON.parse(raw);
+      const ageMs = now - meta.ranAt;
+      out.warm = {
+        age_min: Math.round(ageMs / 60000),
+        written: meta.written,
+        skipped: meta.skipped,
+        failed: meta.failed,
+      };
+      if (ageMs > WARM_MAX_AGE_MS) problems.push(`warm:last-run is ${Math.round(ageMs / 60000)}min old`);
+      if (meta.failed >= WARM_TARGETS.length) {
+        problems.push(`warm cron failed all ${meta.failed} targets on its last run`);
+      }
+    }
+  } catch (e) {
+    problems.push(`warm check failed: ${e.message}`);
   }
 
   out.ok = problems.length === 0;
@@ -516,6 +609,92 @@ async function handleCronPurgeRecs(request, env, url) {
   });
 }
 
+// ADR-0001 Phase 2: canonicalize the cache key. Before this, the Cache API
+// key (and the D1 `stale` key, which reuses it) was the raw request URL —
+// so `?type=x&page=1` and `?page=1&type=x` were two separate cache entries
+// for identical content, and a tracking param like `?fbclid=...` minted a
+// brand new entry (and a brand new `stale` row) on every visit instead of
+// ever hitting the one that already existed. Each route below lists ONLY
+// the query params that actually affect its response, in a fixed order —
+// everything else (unknown params, empty values) is dropped. home-data,
+// recommendation, and movie/:slug take no query params that matter, so
+// they fall through to the `pathname`-only default.
+const CACHE_PARAMS_BY_PATH = {
+  '/api/list': ['type', 'page'],
+  '/api/genre': ['slug', 'page'],
+  '/api/country': ['slug', 'page'],
+  '/api/search': ['keyword', 'page'],
+};
+
+function canonicalCacheKey(url) {
+  const allowed = CACHE_PARAMS_BY_PATH[url.pathname];
+  if (!allowed) return url.pathname;
+  const params = new URLSearchParams();
+  for (const name of allowed) {
+    const v = url.searchParams.get(name);
+    if (v) params.set(name, v);
+  }
+  const qs = params.toString();
+  return qs ? `${url.pathname}?${qs}` : url.pathname;
+}
+
+// --- KV warm-set read path (ADR-0001 Phase 3) --------------------------------
+// Read-only for now: no cron writes `page:v1:*` keys yet (that's Phase 4).
+// This deliberately does NOT hardcode which pages are warm — it just checks
+// whatever key the canonicalized request maps to. An unwarmed key means
+// env.CATALOG_KV.get() returns null and the request falls through to the
+// live build exactly as it did before this phase existed. That split (a
+// generic read path landing before any cron writes to it) is what lets one
+// key be seeded by hand — `wrangler kv key put --remote CATALOG_KV
+// "page:v1:/api/list?type=phim-le&page=1" '<json>'` — to prove
+// `x-catalog-cache: warm` end-to-end without deploying a cron at all.
+//
+// Scope: only list/genre/country — the three route types the eventual warm
+// set (Phase 4/5) draws from. movie/:slug and search are deliberately never
+// checked: movie isn't in the candidate warm set (KV write budget, see
+// ADR-0001's arithmetic) and search has no durable layer at all, by design.
+// Runs only on a Cache API MISS (handleApi already checked cache.match), so
+// its KV-read cost is bounded by distinct-key miss traffic, not total
+// requests — well inside the 100,000 KV reads/day free-plan budget even if
+// every list/genre/country miss checks it, warmed or not.
+const KV_WARM_PATHS = new Set(['/api/list', '/api/genre', '/api/country']);
+const KV_WARM_PREFIX = 'page:v1:';
+
+async function warmKvLookup(env, ctx, cache, cacheReq, cacheKey, pathname, ttl, method) {
+  if (!KV_WARM_PATHS.has(pathname)) return null;
+  let body;
+  try {
+    body = await env.CATALOG_KV.get(KV_WARM_PREFIX + cacheKey);
+  } catch (err) {
+    console.error('[kv warm read]', cacheKey, err.message);
+    return null;
+  }
+  if (body == null) return null;
+
+  // Same Cache-Control shape a live build would set (ADR-0001 Phase 1) — a
+  // warm hit is a FRESHER source for this data, not a differently-scoped
+  // one, so it gets the same TTL and also seeds the per-colo Cache API tier
+  // for this colo's next request (KV is never the layer a plain cache hit
+  // consults directly — see ADR-0001's "KV is never the first layer" rule).
+  const cacheControl = `public, max-age=60, s-maxage=${ttl}`;
+  const cacheableRes = new Response(body, {
+    headers: {
+      'content-type': 'application/json',
+      'x-catalog-cache': 'warm',
+      'cache-control': cacheControl,
+    },
+  });
+  ctx.waitUntil(cache.put(cacheReq, cacheableRes.clone()));
+
+  return new Response(method === 'HEAD' ? null : body, {
+    headers: {
+      'content-type': 'application/json',
+      'x-catalog-cache': 'warm',
+      'cache-control': cacheControl,
+    },
+  });
+}
+
 async function handleApi(request, env, ctx, url) {
   const method = request.method;
   if (method !== 'GET' && method !== 'HEAD') {
@@ -523,7 +702,8 @@ async function handleApi(request, env, ctx, url) {
   }
 
   const cache = caches.default;
-  const cacheReq = new Request(url.toString(), { method: 'GET' });
+  const cacheKey = canonicalCacheKey(url);
+  const cacheReq = new Request(url.origin + cacheKey, { method: 'GET' });
 
   const hit = await cache.match(cacheReq);
   if (hit) {
@@ -540,8 +720,10 @@ async function handleApi(request, env, ctx, url) {
     return handleRecommendation(env, ctx, cache, cacheReq, method, rec.type, rec.tmdbId);
   }
 
-  const cacheKey = url.pathname + url.search;
   const ttl = ttlFor(url.pathname);
+
+  const warm = await warmKvLookup(env, ctx, cache, cacheReq, cacheKey, url.pathname, ttl, method);
+  if (warm) return warm;
 
   let build = null;
   try {
@@ -549,17 +731,20 @@ async function handleApi(request, env, ctx, url) {
   } catch (err) {
     // Thrown synchronously by localBuilder for a malformed request (missing
     // required query param) — matches catalog-api's own validation, which
-    // also returns 4xx directly with no caching.
+    // also returns 4xx directly with no durable-fallback lookup. Still worth
+    // a short Cache-Control (ADR-0001 Phase 1): the exact same malformed URL
+    // hitting this repeatedly (a broken client, a crawler) shouldn't redo
+    // this work every time.
     return new Response(JSON.stringify({ error: err.message }), {
       status: err.status || 400,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=60' },
     });
   }
 
   if (!build) {
     return new Response(JSON.stringify({ error: 'Not found' }), {
       status: 404,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=60' },
     });
   }
 
@@ -586,11 +771,18 @@ async function handleApi(request, env, ctx, url) {
       );
     }
 
+    // ADR-0001 Phase 1: same Cache-Control on both copies — see
+    // handleHomeData's comment for why the asymmetry mattered. This was the
+    // main offender: every list/genre/country/movie/search miss returned
+    // with NO Cache-Control at all, so the zone edge never cached a colo's
+    // first request — only a later Cache API hit ever replayed a cacheable
+    // header.
+    const buildCacheControl = `public, max-age=60, s-maxage=${ttl}`;
     const cacheableRes = new Response(body, {
       headers: {
         'content-type': 'application/json',
         'x-catalog-cache': 'miss',
-        'cache-control': `public, s-maxage=${ttl}`,
+        'cache-control': buildCacheControl,
       },
     });
     ctx.waitUntil(cache.put(cacheReq, cacheableRes.clone()));
@@ -599,16 +791,22 @@ async function handleApi(request, env, ctx, url) {
     }));
 
     return new Response(method === 'HEAD' ? null : body, {
-      headers: { 'content-type': 'application/json', 'x-catalog-cache': 'miss' },
+      headers: {
+        'content-type': 'application/json',
+        'x-catalog-cache': 'miss',
+        'cache-control': buildCacheControl,
+      },
     });
   } catch (err) {
     // A genuine 4xx from KKPhim itself (e.g. an unknown genre/country slug) —
-    // matches catalog-api's own behavior: return the real status, no caching,
-    // no durable-fallback lookup (a 404 isn't "the origin is down").
+    // matches catalog-api's own behavior: return the real status, no
+    // durable-fallback lookup (a 404 isn't "the origin is down"). Short
+    // Cache-Control added (ADR-0001 Phase 1) so a bad slug hammered
+    // repeatedly doesn't redo the KKPhim round-trip every time.
     if (err.status && err.status >= 400 && err.status < 500) {
       return new Response(method === 'HEAD' ? null : JSON.stringify({ error: err.message }), {
         status: err.status,
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=60' },
       });
     }
 
@@ -619,13 +817,26 @@ async function handleApi(request, env, ctx, url) {
       console.error('[stale read]', url.pathname, readErr.message);
     }
     if (stale != null) {
+      // Short Cache-Control (ADR-0001 Phase 1), not written to caches.default
+      // (that stays a Phase-3 negative-caching decision, see the system-design
+      // brief) — but the header alone lets the zone edge absorb repeated hits
+      // during an upstream outage instead of every request re-attempting a
+      // doomed KKPhim/TMDB round-trip. 60s so it drops the stale copy quickly
+      // once the origin recovers.
       return new Response(method === 'HEAD' ? null : stale, {
-        headers: { 'content-type': 'application/json', 'x-catalog-cache': 'stale-vps-down' },
+        headers: {
+          'content-type': 'application/json',
+          'x-catalog-cache': 'stale-vps-down',
+          'cache-control': 'public, max-age=60, s-maxage=60',
+        },
       });
     }
+    // Total failure — no live build, no durable fallback either. Shorter TTL
+    // than the stale-vps-down branch above: that one still serves real (if
+    // old) data, this one serves nothing, so recover from it faster.
     return new Response(method === 'HEAD' ? null : JSON.stringify({ error: 'catalog unavailable' }), {
       status: 502,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=30, s-maxage=30' },
     });
   }
 }
@@ -644,6 +855,13 @@ export default {
     if (url.pathname === '/__cron/mirror') {
       return handleCronMirror(request, env);
     }
+    if (url.pathname.startsWith('/__cron/warm-shard/')) {
+      const n = url.pathname.slice('/__cron/warm-shard/'.length);
+      return handleCronWarmShard(request, env, ctx, n);
+    }
+    if (url.pathname === '/__cron/warm') {
+      return handleCronWarmRefresh(request, env);
+    }
     if (url.pathname === '/__cron/purge-recs') {
       return handleCronPurgeRecs(request, env, url);
     }
@@ -659,8 +877,9 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // Two schedules share this handler (see wrangler.toml [triggers]); dispatch
-    // by which one fired. Both can coincide at :00 — event.cron disambiguates.
+    // Three schedules share this handler (see wrangler.toml [triggers]);
+    // dispatch by which one fired. Can coincide at :00/:30 — event.cron
+    // disambiguates.
     if (event.cron === '0 * * * *') {
       ctx.waitUntil(runHomeRefresh(env));
       // Sweep expired idx (>45d) / recs rows in the same hourly cron (Phase 5).
@@ -669,6 +888,10 @@ export default {
     if (event.cron === '*/10 * * * *') {
       // Drain the R2 image-mirror queue (Phase 6).
       ctx.waitUntil(drainMirrorQueue(env).catch((e) => console.error('[mirror drain]', e.message)));
+    }
+    if (event.cron === '*/30 * * * *') {
+      // Refresh the page:v1:* warm set (ADR-0001 Phase 4).
+      ctx.waitUntil(runWarmRefresh(env).catch((e) => console.error('[warm refresh]', e.message)));
     }
   },
 };
