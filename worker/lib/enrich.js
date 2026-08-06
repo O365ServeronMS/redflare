@@ -199,7 +199,7 @@ export function createEnrich(env) {
       const ref = await resolveRef(item);
       if (ref) m = await getMeta(ref);
     } catch {
-      return item; // any failure -> keep OPhim values
+      return item; // any failure -> keep KKPhim values
     }
     if (!m) return item;
     item.name = first(m.name, item.name);

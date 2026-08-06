@@ -1,4 +1,4 @@
-// mirror.js — copies TMDB/OPhim artwork into R2 via the Worker's own binding
+// mirror.js — copies TMDB/KKPhim artwork into R2 via the Worker's own binding
 // (Phase 6), replacing catalog-api/src/r2.js. THE point of this phase: the
 // VPS's r2.js signed every upload with hand-rolled AWS SigV4, which sha256's
 // the entire image body in JS — the single heaviest CPU cost on the VPS. The
@@ -39,9 +39,10 @@ const OBJECT_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
 // accept: image/webp is a holdover from when this fetch was the ONLY thing
 // negotiating WebP out of TMDB directly (see WSRV block below for why that's
-// no longer how any `.webp` key gets its bytes, TMDB or OPhim) — harmless to
-// keep, since the only path still hitting an origin directly is
-// WSRV_ENABLED=false (rollback). cacheTtl: 0 bypasses Cloudflare's shared
+// no longer how a TMDB `.webp` key gets its bytes) — harmless to keep, since
+// the only path still hitting an origin directly is WSRV_ENABLED=false
+// (rollback) or a KKPhim fetch (never goes through wsrv.nl — see below).
+// cacheTtl: 0 bypasses Cloudflare's shared
 // subrequest cache: TMDB sends no `Vary: Accept`, so a JPEG cached from an
 // older request could otherwise be handed back here despite the Accept
 // header (see state.md "Constraints discovered while planning" #2).
@@ -98,18 +99,21 @@ async function fetchWithTimeout(url, ms = 8000) {
 // Free-tier limit is 2,500 uncached images/10min/IP; MIRROR_BATCH below uses
 // well under 1% of that even with OPhim included.
 //
-// Width is baked into OPhim keys as a `w<width>/` segment (see
-// objectKeyFor/images.js) precisely so it can be recovered here at drain
-// time without a D1 schema change — TMDB keys need no such segment, their
-// upstream URL already has the right size in its path.
+// OPhim's catalog died 2026-08-06 (500s on every endpoint) and was replaced
+// by KKPhim same day (docs/plan-kkphim-migration.md) — the `ophim/w<width>/`
+// key segment described above no longer exists (KKPhim keys are `kkphim/`,
+// see worker/lib/images.js). wsrv.nl now applies to TMDB ONLY. KKPhim was
+// deliberately NOT routed through it: (1) wsrv.nl actively rejects
+// phimimg.com — "Domain or TLD blocked by policy" (measured 2026-08-06) —
+// and (2) it wouldn't have helped anyway, since KKPhim source images arrive
+// already correctly sized (tens of KB, not OPhim's multi-MB) and aren't
+// missing WebP the way TMDB's negotiated ones sometimes were. See the
+// isKkphim gate in mirrorOne below.
 const WSRV_ENABLED = true; // flip to false + deploy to roll back instantly
 const WSRV_QUALITY = 75; // chosen 2026-08-06 by eyeballing real posters/backdrops
-const OPHIM_WIDTH_RE = /^ophim\/w(\d+)\//;
 
-function wsrvWebpUrl(upstreamUrl, width) {
-  let url = `https://wsrv.nl/?url=${encodeURIComponent(upstreamUrl)}&output=webp&q=${WSRV_QUALITY}`;
-  if (width) url += `&w=${width}&we`;
-  return url;
+function wsrvWebpUrl(upstreamUrl) {
+  return `https://wsrv.nl/?url=${encodeURIComponent(upstreamUrl)}&output=webp&q=${WSRV_QUALITY}`;
 }
 
 // A 4xx/5xx from wsrv.nl is ambiguous: the ORIGIN image could genuinely be
@@ -231,14 +235,18 @@ async function mirrorOne(env, key, sourceUrl) {
     return { outcome: 'exists' };
   }
 
-  // 2. Not there — fetch upstream and stream it in. Every `.webp` key (TMDB
-  //    and OPhim alike) goes through wsrv.nl; OPhim keys additionally carry
-  //    a `w<width>/` segment telling wsrv.nl what size to resize to (see the
-  //    WSRV block above and objectKeyFor/images.js — TMDB needs no width,
-  //    its own path already has the right size baked in).
-  const useWsrv = WSRV_ENABLED && key.endsWith('.webp');
-  const widthMatch = key.match(OPHIM_WIDTH_RE);
-  const fetchUrl = useWsrv ? wsrvWebpUrl(sourceUrl, widthMatch ? Number(widthMatch[1]) : undefined) : sourceUrl;
+  // 2. Not there — fetch upstream and stream it in. Only TMDB `.webp` keys go
+  //    through wsrv.nl. KKPhim keys are gated OUT here even though they can
+  //    also end in `.webp` — wsrv.nl blocks phimimg.com outright ("Domain or
+  //    TLD blocked by policy", measured 2026-08-06), and KKPhim doesn't need
+  //    the conversion/resize wsrv.nl provides anyway (see the WSRV block
+  //    above and worker/lib/images.js module comment). Gating by key prefix
+  //    rather than by extension is what makes this correct: a KKPhim source
+  //    that happens to already be `.webp` must NOT be routed through a
+  //    blocked domain.
+  const isKkphim = key.startsWith('kkphim/');
+  const useWsrv = WSRV_ENABLED && !isKkphim && key.endsWith('.webp');
+  const fetchUrl = useWsrv ? wsrvWebpUrl(sourceUrl) : sourceUrl;
   let res;
   try {
     res = await fetchWithTimeout(fetchUrl);
@@ -271,12 +279,17 @@ async function mirrorOne(env, key, sourceUrl) {
     return { outcome: 'give-up', detail: `content-type ${ct || 'none'}` };
   }
   // Invariant: a key ending `.webp` MUST hold WebP bytes — never save
-  // anything else under it. wsrv.nl makes format a property of the URL
-  // (&output=webp), so a mismatch here means wsrv.nl itself glitched, not
-  // that WebP is unavailable — always worth a retry, never worth settling
-  // for less. (Before 2026-08-06 this had a grace window that gave up and
-  // saved whatever content-type TMDB negotiated; that's gone along with
-  // content negotiation — see bluesiaOM plan-redflare-webp-wsrv.md.)
+  // anything else under it. For the TMDB (useWsrv) branch this mismatch
+  // means wsrv.nl itself glitched — always worth a retry, never worth
+  // settling for less. (Before 2026-08-06 this had a grace window that gave
+  // up and saved whatever content-type TMDB negotiated; that's gone along
+  // with content negotiation — see bluesiaOM plan-redflare-webp-wsrv.md.)
+  // The check still applies verbatim to a KKPhim `.webp` key even though
+  // that path skips wsrv.nl entirely (see isKkphim above): the key only
+  // ever gets a `.webp` extension because the KKPhim source URL itself was
+  // `.webp` (worker/lib/images.js keeps the source extension as-is), so a
+  // mismatch here would mean phimimg.com is misreporting its own
+  // content-type — equally worth catching, equally worth a retry.
   if (key.endsWith('.webp') && ct !== 'image/webp') {
     return { outcome: 'retry', detail: `not-webp (${ct})` };
   }
@@ -288,12 +301,14 @@ async function mirrorOne(env, key, sourceUrl) {
 
   // R2's put() only accepts a ReadableStream whose length is known up front (a
   // response body carrying content-length, or a FixedLengthStream). TMDB sends
-  // content-length, so its body streams straight through. img.ophim.live sits
-  // behind Cloudflare and answers CHUNKED with no content-length at all — so
-  // streaming it failed with "Provided readable stream must have a known
-  // length" on EVERY OPhim image, invisibly, since the catch below merely
-  // re-queues the row. Buffering is the only option without a length; it's
-  // confined to that case, and images here are capped at MAX_IMAGE_BYTES.
+  // content-length, so its body streams straight through; so does phimimg.com
+  // for its `uploads/movies/` paths. Its `upload/vod/` paths, however, answer
+  // CHUNKED with no content-length at all (measured 2026-08-06, same failure
+  // mode img.ophim.live used to have) — streaming those fails with "Provided
+  // readable stream must have a known length", invisibly, since the catch
+  // below merely re-queues the row. Buffering is the only option without a
+  // length; it's confined to that case, and images here are capped at
+  // MAX_IMAGE_BYTES.
   let body = res.body;
   if (!clen) {
     try {

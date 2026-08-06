@@ -1,7 +1,7 @@
 /**
  * Catalog API client
  * Base: same-origin /api/* — the Worker (worker/index.js) builds every catalog
- * response itself (OPhim + TMDB, cached in Cache API / KV / D1). There is no
+ * response itself (KKPhim + TMDB, cached in Cache API / KV / D1). There is no
  * VPS behind it any more; the old VPS host was img.bluesia.net (retired
  * 2026-08-01), a different thing from the R2 image host reusing that same
  * hostname since the 2026-08 domain migration — see R2_BASE below.
@@ -153,10 +153,8 @@ export async function getRecommendation(tmdbId, type = 'movie') {
 }
 
 // --- Image URL helpers ---
-// The Worker already emits full https:// R2 URLs. For TMDB artwork these are
-// still pass-throughs; for OPhim artwork, posterUrl/thumbUrl below layer a
-// serve-time Cloudflare Image Transformation on top (Phase 5 of the WebP
-// migration — see state.md).
+// The Worker already emits full https:// R2 URLs; posterUrl/thumbUrl are pure
+// passthroughs for both TMDB and KKPhim artwork (see below).
 
 // Artwork lives in R2 (img.bluesia.net), mirrored there by the Worker's
 // */10 cron (worker/lib/mirror.js). The copy is made in the background, so the
@@ -166,16 +164,16 @@ export async function getRecommendation(tmdbId, type = 'movie') {
 const R2_BASE = 'https://img.bluesia.net/';
 
 // posterUrl/thumbUrl used to wrap OPhim R2 urls in a Cloudflare Image
-// Transformation (`cdn-cgi/image/width=...`) here at serve time — OPhim has
+// Transformation (`cdn-cgi/image/width=...`) here at serve time — OPhim had
 // no TMDB-style size variants of its own, so resizing had to happen
 // somewhere, and this was the only same-zone source Image Transformations
-// would accept (a transform request straight to img.ophim.live 403s).
+// would accept (a transform request straight to img.ophim.live 403s). Since
+// 2026-08-06 that resize happened once, at MIRROR time, via wsrv.nl's `&w=`.
 //
-// Since 2026-08-06 (bluesiaOM plan-redflare-webp-wsrv.md) that resize
-// happens once, at MIRROR time, via wsrv.nl's `&w=` — the R2 object worker/
-// lib/images.js points at is already the right size. Both functions are now
-// pure passthroughs, same as they always were for TMDB urls (which never
-// matched the old OPhim-only wrapper). Kept as named functions rather than
+// Catalog source moved OPhim -> KKPhim same day (docs/plan-kkphim-migration.md,
+// OPhim was 500ing on every endpoint). KKPhim artwork arrives already
+// correctly sized, so it never needed the wsrv.nl resize step either — both
+// functions stay pure passthroughs. Kept as named functions rather than
 // inlined at every call site: every image-rendering call in this codebase
 // goes through one of these two, which is where serve-time processing would
 // go again if this project ever needs it.
@@ -187,21 +185,22 @@ export function thumbUrl(url) {
   return url || '';
 }
 
+// Exact client-side twin of worker/lib/images.js's upstreamForKey — the two
+// MUST stay in lockstep, or a not-yet-mirrored image's fallback breaks
+// silently. The kkphim/ branch runs before any .webp->.jpg swap for the same
+// reason it does server-side: KKPhim source extensions aren't uniformly
+// .jpg (see worker/lib/images.js module comment), so swapping first would
+// corrupt a genuinely-.webp KKPhim source's extension.
 export function upstreamFallback(url) {
   if (!url || !url.startsWith(R2_BASE)) return '';
-  let key = url.slice(R2_BASE.length);
-  // Both hosts are mirrored as `.webp` (worker/lib/images.js r2ImageUrl);
-  // swap back to `.jpg` to rebuild the real origin URL — TMDB source images
-  // are confirmed always `.jpg`, and so is everything OPhim serves.
-  if (key.endsWith('.webp')) key = `${key.slice(0, -'.webp'.length)}.jpg`;
-  if (key.startsWith('ophim/')) {
-    // Strip the `w<width>/` bookkeeping segment worker/lib/images.js adds —
-    // OPhim has no size variants of its own, that segment isn't part of the
-    // real upstream path (see upstreamForKey, the server-side twin of this).
-    const rest = key.slice('ophim/'.length).replace(/^w\d+\//, '');
-    return `https://img.ophim.live/${rest}`;
+  const key = url.slice(R2_BASE.length);
+  if (key.startsWith('kkphim/')) {
+    return `https://phimimg.com/${key.slice('kkphim/'.length)}`;
   }
-  return `https://image.tmdb.org/${key}`;
+  // TMDB source images are confirmed always `.jpg`; a `.webp` key is
+  // rebuilt by swapping the suffix back, not stripping it.
+  const base = key.endsWith('.webp') ? `${key.slice(0, -'.webp'.length)}.jpg` : key;
+  return `https://image.tmdb.org/${base}`;
 }
 
 // Point an <img> at its upstream origin if the R2 copy is not there yet.

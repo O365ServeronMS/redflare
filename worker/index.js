@@ -1,11 +1,16 @@
-// worker/index.js — builds the whole /api/* catalog itself (OPhim + TMDB
+// worker/index.js — builds the whole /api/* catalog itself (KKPhim + TMDB
 // fetched directly, D1/KV/R2 for caching and image mirroring). The VPS
 // catalog-api this used to front is retired; see
 // bluesiaOM/context/state-redflare-cf-worker.md for the migration history.
+// Catalog source was OPhim (ophim1.com) through 2026-08-06, when it started
+// returning HTTP 500 on every endpoint — dead, not a blip. Switched to
+// KKPhim (phimapi.com) same day; see docs/plan-kkphim-migration.md for the
+// full migration plan and the differences that mattered (image host/shape,
+// slug namespace).
 // Short version of what this file does today:
 //
 //   /api/list, /api/genre, /api/country, /api/search, /api/movie/:slug
-//              → built HERE: fetch OPhim directly, enrich with TMDB
+//              → built HERE: fetch KKPhim directly, enrich with TMDB
 //              (worker/lib/enrich.js), map images to R2 (worker/lib/images.js).
 //              No VPS involved on a cache miss (Phase 3).
 //   /api/home-data
@@ -16,9 +21,9 @@
 //              worker/lib/home.js for why home-data can't be built
 //              synchronously per-request the way list/genre/etc. are.
 //   /api/recommendation/:type/:id, /api/related/:type/:id, /api/related/:id
-//              → built HERE (Phase 5): TMDB recommendations matched to OPhim
+//              → built HERE (Phase 5): TMDB recommendations matched to KKPhim
 //              via a tmdb.id → item reverse index in D1 (table `idx`), with a
-//              bounded live OPhim search fallback, cached in D1 table `recs`
+//              bounded live KKPhim search fallback, cached in D1 table `recs`
 //              with a 3-tier TTL based on result completeness (30d full / 6h
 //              partial / 1h empty — see worker/lib/recommendation.js
 //              classifyTier/ttlForTier, added in the Phase 1 fix for
@@ -45,7 +50,7 @@
 // Every /api/* response goes through the SAME caching shell: Cache API (hot
 // tier, no daily write quota — see the note below) in front, with a durable
 // last-known-good fallback (D1 for list/genre/country/movie/recommendation,
-// nothing for search) for when OPhim/TMDB itself is unreachable.
+// nothing for search) for when KKPhim/TMDB itself is unreachable.
 // /api/home-data no longer goes through that generic fallback — see
 // handleHomeData() below, its durable copy IS the KV value the cron
 // maintains, there's no separate "upstream fetch failed" case to fall back
@@ -82,10 +87,10 @@ import {
 } from './lib/recommendation.js';
 import { enqueueMirror, drainMirrorQueue } from './lib/mirror.js';
 
-const OPHIM_BASE = 'https://ophim1.com';
+const KKPHIM_BASE = 'https://phimapi.com';
 
 // Mirrors catalog-api's own Valkey TTLs (catalog-api/src/server.js) — no
-// reason to diverge, OPhim/TMDB freshness expectations haven't changed just
+// reason to diverge, KKPhim/TMDB freshness expectations haven't changed just
 // because the fetch now happens here instead of on the VPS. home-data isn't
 // in this table any more — handleHomeData() sets its own Cache-Control.
 const TTL = {
@@ -110,11 +115,11 @@ function isSearch(pathname) {
   return pathname.startsWith('/api/search');
 }
 
-// --- OPhim fetch + local list/detail builders (Phase 3) ---------------------
+// --- KKPhim fetch + local list/detail builders (Phase 3) --------------------
 // Ported from catalog-api/src/server.js's route handlers. Each builder does
-// exactly one OPhim fetch, then enrich.enrichListPayload/enrichDetailPayload
+// exactly one KKPhim fetch, then enrich.enrichListPayload/enrichDetailPayload
 // (up to ~24 TMDB fetches, bounded to 6 concurrent — worker/lib/enrich.js)
-// runs against it. Worst case subrequest budget for a 24-item page: 1 OPhim +
+// runs against it. Worst case subrequest budget for a 24-item page: 1 KKPhim +
 // 24 TMDB meta + (rare) up to 24 IMDB-resolve fallbacks = 49, under the free
 // plan's 50/invocation cap — see state.md Phase 3 log for how this was sized.
 
@@ -122,15 +127,15 @@ function httpError(message, status) {
   return Object.assign(new Error(message), { status });
 }
 
-async function fetchOphimJson(url) {
+async function fetchCatalogJson(url) {
   const res = await fetch(url, {
     headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
   });
-  if (!res.ok) throw httpError(`OPhim upstream ${res.status}`, res.status);
+  if (!res.ok) throw httpError(`KKPhim upstream ${res.status}`, res.status);
   return res.json();
 }
 
-// Map images inside an OPhim list payload ({ items } or { data: { items } }),
+// Map images inside a KKPhim list payload ({ items } or { data: { items } }),
 // mirrors catalog-api's signListPayload minus the signing (and minus the
 // reverse-index side effect — that's Phase 5).
 function mapListPayloadImages(data) {
@@ -155,7 +160,7 @@ function mapDetailPayloadImages(data) {
 }
 
 async function buildEnrichedList(enrich, upstreamUrl) {
-  const data = await fetchOphimJson(upstreamUrl);
+  const data = await fetchCatalogJson(upstreamUrl);
   await enrich.enrichListPayload(data);
   return mapListPayloadImages(data);
 }
@@ -172,8 +177,8 @@ function localBuilder(env, url) {
     const page = url.searchParams.get('page') || '1';
     if (!type) throw httpError('Missing type', 400);
     const upstream = type === 'phim-moi-cap-nhat'
-      ? `${OPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=${page}`
-      : `${OPHIM_BASE}/v1/api/danh-sach/${type}?page=${page}`;
+      ? `${KKPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=${page}`
+      : `${KKPHIM_BASE}/v1/api/danh-sach/${type}?page=${page}`;
     return () => buildEnrichedList(createEnrich(env), upstream);
   }
 
@@ -182,7 +187,7 @@ function localBuilder(env, url) {
     const page = url.searchParams.get('page') || '1';
     if (!slug) throw httpError('Missing slug', 400);
     return () =>
-      buildEnrichedList(createEnrich(env), `${OPHIM_BASE}/v1/api/the-loai/${slug}?page=${page}`);
+      buildEnrichedList(createEnrich(env), `${KKPHIM_BASE}/v1/api/the-loai/${slug}?page=${page}`);
   }
 
   if (pathname === '/api/country') {
@@ -190,7 +195,7 @@ function localBuilder(env, url) {
     const page = url.searchParams.get('page') || '1';
     if (!slug) throw httpError('Missing slug', 400);
     return () =>
-      buildEnrichedList(createEnrich(env), `${OPHIM_BASE}/v1/api/quoc-gia/${slug}?page=${page}`);
+      buildEnrichedList(createEnrich(env), `${KKPHIM_BASE}/v1/api/quoc-gia/${slug}?page=${page}`);
   }
 
   if (pathname === '/api/search') {
@@ -200,7 +205,7 @@ function localBuilder(env, url) {
     return () =>
       buildEnrichedList(
         createEnrich(env),
-        `${OPHIM_BASE}/v1/api/tim-kiem?keyword=${encodeURIComponent(keyword)}&page=${page}`
+        `${KKPHIM_BASE}/v1/api/tim-kiem?keyword=${encodeURIComponent(keyword)}&page=${page}`
       );
   }
 
@@ -209,7 +214,7 @@ function localBuilder(env, url) {
     if (!slug) throw httpError('Missing slug', 400);
     return async () => {
       const enrich = createEnrich(env);
-      const data = await fetchOphimJson(`${OPHIM_BASE}/phim/${slug}`);
+      const data = await fetchCatalogJson(`${KKPHIM_BASE}/phim/${slug}`);
       await enrich.enrichDetailPayload(data);
       return mapDetailPayloadImages(data);
     };
@@ -241,7 +246,7 @@ function writeStale(env, pathname, cacheKey, body) {
 
 // --- /api/home-data (Phase 4) ------------------------------------------------
 // Reads the KV value the cron (worker/lib/home.js's runHomeRefresh) already
-// maintains — no per-request OPhim/TMDB fetch, no JSON.parse of the ~150KB
+// maintains — no per-request KKPhim/TMDB fetch, no JSON.parse of the ~150KB
 // payload. Still goes through the Cache API hot tier below it (cheaper than
 // a KV read on every request, and free of any daily quota). The only case
 // that does real work here is a KV miss, which should only ever happen once
@@ -255,7 +260,7 @@ async function handleHomeData(env, ctx, cache, cacheReq, method) {
     body = JSON.stringify(payload);
     cacheStatus = 'miss-fallback';
     // Warms KV so concurrent/subsequent requests during this bootstrap
-    // window don't each redo the same OPhim fetch; the next successful cron
+    // window don't each redo the same KKPhim fetch; the next successful cron
     // cycle overwrites this with the real trending-matched build regardless.
     ctx.waitUntil(env.CATALOG_KV.put(HOME_KV_KEY, body));
   }
@@ -567,7 +572,7 @@ async function handleApi(request, env, ctx, url) {
       [payload?.data?.item || payload?.item || payload?.movie].filter(Boolean);
     // Opportunistically index a freshly-built movie detail into the `idx`
     // reverse index (Phase 5) so recommendations can resolve it by tmdb.id
-    // without a live OPhim search — same side effect the VPS did on every
+    // without a live KKPhim search — same side effect the VPS did on every
     // signed movie payload. List/genre/country/search deliberately do NOT
     // index (see worker/lib/recommendation.js deviation #2).
     if (url.pathname.startsWith('/api/movie/') && items[0]?.tmdb?.id) {
@@ -597,7 +602,7 @@ async function handleApi(request, env, ctx, url) {
       headers: { 'content-type': 'application/json', 'x-catalog-cache': 'miss' },
     });
   } catch (err) {
-    // A genuine 4xx from OPhim itself (e.g. an unknown genre/country slug) —
+    // A genuine 4xx from KKPhim itself (e.g. an unknown genre/country slug) —
     // matches catalog-api's own behavior: return the real status, no caching,
     // no durable-fallback lookup (a 404 isn't "the origin is down").
     if (err.status && err.status >= 400 && err.status < 500) {

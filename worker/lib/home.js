@@ -26,10 +26,10 @@
 //    only for hero, cinema only for trending) to save subrequests, but that
 //    measured 6-10 matched items against a live VPS baseline of 13-15 for
 //    the same window — a real usability loss, not a rounding difference.
-//    Budget re-checked: 10 OPhim + <=2 TMDB-trending + <=24 enrich = <=36,
-//    still comfortably under 50/invocation. Costs some duplicate OPhim
+//    Budget re-checked: 10 KKPhim + <=2 TMDB-trending + <=24 enrich = <=36,
+//    still comfortably under 50/invocation. Costs some duplicate KKPhim
 //    fetching across shards (each of the 10 URLs gets fetched by its own
-//    card-rail shard AND once each by shards 4 and 5) — OPhim isn't
+//    card-rail shard AND once each by shards 4 and 5) — KKPhim isn't
 //    rate-limited or billed, so that's a non-issue.
 // 2. newMovies drops `pagination`/`pathImage` (confirmed unused by
 //    src/main.js — grepped before removing).
@@ -41,7 +41,7 @@
 import { createEnrich } from './enrich.js';
 import { mapItemsImages } from './images.js';
 
-const OPHIM_BASE = 'https://ophim1.com';
+const KKPHIM_BASE = 'https://phimapi.com';
 
 const HERO_COUNT = 20;
 const TRENDING_COUNT = 24;
@@ -56,15 +56,15 @@ function httpError(message, status) {
   return Object.assign(new Error(message), { status });
 }
 
-async function fetchOphimJson(url) {
+async function fetchCatalogJson(url) {
   const res = await fetch(url, {
     headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
   });
-  if (!res.ok) throw httpError(`OPhim upstream ${res.status}`, res.status);
+  if (!res.ok) throw httpError(`KKPhim upstream ${res.status}`, res.status);
   return res.json();
 }
 
-// Handles both OPhim list-payload shapes (mirrors home.js's getItems).
+// Handles both KKPhim list-payload shapes (mirrors home.js's getItems).
 function getItems(payload) {
   return payload?.data?.items || payload?.items || [];
 }
@@ -73,16 +73,16 @@ function getItems(payload) {
 // comment's deviation note #1. Bounded to 6 concurrent fetches (Workers free
 // plan's simultaneous-outgoing-connection cap), not Promise.all(10) directly.
 const POOL_URLS = [
-  `${OPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=1`,
-  `${OPHIM_BASE}/v1/api/danh-sach/phim-le?page=1`,
-  `${OPHIM_BASE}/v1/api/danh-sach/phim-bo?page=1`,
-  `${OPHIM_BASE}/v1/api/danh-sach/hoat-hinh?page=1`,
-  `${OPHIM_BASE}/v1/api/quoc-gia/au-my?page=1`,
-  `${OPHIM_BASE}/v1/api/quoc-gia/au-my?page=2`,
-  `${OPHIM_BASE}/v1/api/quoc-gia/au-my?page=3`,
-  `${OPHIM_BASE}/v1/api/danh-sach/phim-chieu-rap?page=1`,
-  `${OPHIM_BASE}/v1/api/danh-sach/phim-chieu-rap?page=2`,
-  `${OPHIM_BASE}/v1/api/danh-sach/phim-chieu-rap?page=3`,
+  `${KKPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=1`,
+  `${KKPHIM_BASE}/v1/api/danh-sach/phim-le?page=1`,
+  `${KKPHIM_BASE}/v1/api/danh-sach/phim-bo?page=1`,
+  `${KKPHIM_BASE}/v1/api/danh-sach/hoat-hinh?page=1`,
+  `${KKPHIM_BASE}/v1/api/quoc-gia/au-my?page=1`,
+  `${KKPHIM_BASE}/v1/api/quoc-gia/au-my?page=2`,
+  `${KKPHIM_BASE}/v1/api/quoc-gia/au-my?page=3`,
+  `${KKPHIM_BASE}/v1/api/danh-sach/phim-chieu-rap?page=1`,
+  `${KKPHIM_BASE}/v1/api/danh-sach/phim-chieu-rap?page=2`,
+  `${KKPHIM_BASE}/v1/api/danh-sach/phim-chieu-rap?page=3`,
 ];
 const POOL_FETCH_CONCURRENCY = 6;
 
@@ -93,7 +93,7 @@ async function fetchPool() {
     while (i < POOL_URLS.length) {
       const idx = i++;
       try {
-        results[idx] = getItems(await fetchOphimJson(POOL_URLS[idx]));
+        results[idx] = getItems(await fetchCatalogJson(POOL_URLS[idx]));
       } catch (err) {
         console.error('[home pool]', POOL_URLS[idx], err.message);
         results[idx] = [];
@@ -173,7 +173,7 @@ function buildTrendingItems(itemGroups, orderedIds, limit) {
 
 async function buildCardRail(env, upstreamUrl) {
   const enrich = createEnrich(env);
-  const data = await fetchOphimJson(upstreamUrl);
+  const data = await fetchCatalogJson(upstreamUrl);
   const items = getItems(data);
   await enrich.enrichItemsCards(items);
   return mapItemsImages(items);
@@ -202,13 +202,13 @@ async function buildTrendingShard(env) {
 
 // Shard budget per invocation (all well under the free plan's 50 external
 // subrequests/invocation):
-//   0-2 (card rails): 1 OPhim + <=24 TMDB enrich           = <=25
-//   4   (hero):       10 OPhim + <=2 TMDB trending + <=20  = <=32
-//   5   (trending):   10 OPhim + <=2 TMDB trending + <=24  = <=36
+//   0-2 (card rails): 1 KKPhim + <=24 TMDB enrich           = <=25
+//   4   (hero):       10 KKPhim + <=2 TMDB trending + <=20  = <=32
+//   5   (trending):   10 KKPhim + <=2 TMDB trending + <=24  = <=36
 export const CRON_SHARD_BUILDERS = {
-  0: (env) => buildCardRail(env, `${OPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=1`),
-  1: (env) => buildCardRail(env, `${OPHIM_BASE}/v1/api/danh-sach/phim-le?page=1`),
-  2: (env) => buildCardRail(env, `${OPHIM_BASE}/v1/api/danh-sach/phim-bo?page=1`),
+  0: (env) => buildCardRail(env, `${KKPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=1`),
+  1: (env) => buildCardRail(env, `${KKPHIM_BASE}/v1/api/danh-sach/phim-le?page=1`),
+  2: (env) => buildCardRail(env, `${KKPHIM_BASE}/v1/api/danh-sach/phim-bo?page=1`),
   4: (env) => buildHeroShard(env),
   5: (env) => buildTrendingShard(env),
 };
@@ -276,7 +276,7 @@ export async function runHomeRefresh(env) {
 // real trending-matched hero replaces this the moment cron completes once. ---
 
 export async function buildHomeFallback(env) {
-  const mapped = await buildCardRail(env, `${OPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=1`);
+  const mapped = await buildCardRail(env, `${KKPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=1`);
   return {
     timestamp: Date.now(),
     heroMovies: mapped.slice(0, HERO_COUNT),

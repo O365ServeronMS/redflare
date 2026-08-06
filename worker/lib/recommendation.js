@@ -36,7 +36,7 @@
 import { createEnrich } from './enrich.js';
 import { mapItemImages } from './images.js';
 
-const OPHIM_BASE = 'https://ophim1.com';
+const KKPHIM_BASE = 'https://phimapi.com';
 
 const RELATED_LIMIT = 8;
 const TMDB_CANDIDATES = 15;          // top-N TMDB recs to consider (matches VPS)
@@ -69,11 +69,11 @@ async function fetchWithTimeout(url, opts = {}, ms = 8000) {
   }
 }
 
-async function fetchOphimJson(url) {
+async function fetchCatalogJson(url) {
   const res = await fetch(url, {
     headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
   });
-  if (!res.ok) throw Object.assign(new Error(`OPhim upstream ${res.status}`), { status: res.status });
+  if (!res.ok) throw Object.assign(new Error(`KKPhim upstream ${res.status}`), { status: res.status });
   return res.json();
 }
 
@@ -201,8 +201,8 @@ async function matchViaSearch(env, enrich, rec, type) {
   for (const kw of [rec.keyword, rec.viTitle]) {
     if (!kw) continue;
     try {
-      const data = await fetchOphimJson(
-        `${OPHIM_BASE}/v1/api/tim-kiem?keyword=${encodeURIComponent(kw)}&limit=10`
+      const data = await fetchCatalogJson(
+        `${KKPHIM_BASE}/v1/api/tim-kiem?keyword=${encodeURIComponent(kw)}&limit=10`
       );
       const items = data?.data?.items || data?.items || [];
       const hit = items.find(
@@ -214,7 +214,7 @@ async function matchViaSearch(env, enrich, rec, type) {
         return { item: mapped, error: false };
       }
     } catch {
-      sawError = true; // this keyword's OPhim call failed — try the next one
+      sawError = true; // this keyword's KKPhim call failed — try the next one
     }
   }
   return { item: null, error: sawError };
