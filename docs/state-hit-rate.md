@@ -102,9 +102,27 @@ thay vì 1 lần/tick), không phải từ tăng kích thước batch mỗi invo
 không tăng rủi ro chạm trần 50 subrequest/invocation so với hành vi đã chạy
 ổn định trong production trước đó.
 
-**Cần theo dõi sau deploy** (không tự động — chưa có quyền Analytics để
-tự động hoá, xem O1): `/api/health` → `mirror.queued` giảm dần,
-`mirrored_last_hour` tăng rõ so với baseline (40/giờ trước Phase 3).
+**Verify sau deploy (07:34:36 UTC):**
+- Route `/__cron/mirror-shard/0` trả `404 text/plain` (đúng — bị `checkCronKey`
+  chặn vì không gửi header) thay vì `200 text/html` (SPA fallback của code cũ,
+  do route chưa tồn tại) — xác nhận deploy mới đã lên, route đã đăng ký đúng
+  vị trí (trước nhánh `ASSETS.fetch` fallback).
+- `mirrored_last_hour` tăng dần qua các lần đo: 40 (trước Phase 3) → 100
+  (07:36) → 122 (07:41, 07:48 — ổn định, đúng vì chưa có tick `*/10` mới nào
+  giữa hai lần đo này, tick kế tiếp là 07:50).
+- `mirrored_total`: 3.524 (07:02, trước Phase 3) → 3.606 (07:41–07:48).
+- `mirror.queued` dao động 1.297→1.311 — **chưa thấy giảm rõ**, vì traffic
+  thật liên tục enqueue ảnh mới song song (mỗi build KKPhim mới lại thêm
+  target). Số cần nhìn là `mirrored_last_hour`, không phải `queued` tuyệt đối.
+
+**Chưa đo được:** một delta "1 tick sạch" dưới code sharded mới (cần đợi qua
+tick 07:50 rồi so `mirrored_total`) để xác nhận đúng ~100/tick thay vì ~20-30/
+tick cũ — phiên làm việc dừng lại trước khi tick đó xảy ra, không muốn block
+lâu thêm. `/api/health` vẫn `ok:false` nhưng lý do là "mirror queue head stuck
+217min" — **không phải lỗi**, đúng theo thiết kế `MAX_RETRY_AGE_MS=6h`
+(360 phút), 217 phút vẫn trong ngưỡng bình thường (xem Phase 0 log về cơ chế
+này). Người dùng có thể tự `curl .../api/health` sau vài tick nữa để xác nhận
+`queued` bắt đầu giảm rõ.
 
 ---
 
