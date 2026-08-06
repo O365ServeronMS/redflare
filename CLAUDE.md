@@ -223,56 +223,86 @@ Two different paths, both entirely on Cloudflare — no other server involved:
   150-day TMDB cache-duration expiry; that was never actually configured on
   the bucket — corrected 2026-08-01).
 
-  **TMDB artwork is mirrored as WebP.** `image.tmdb.org` does content
-  negotiation — `Accept: image/webp` gets a ~30-36% smaller response than the
-  default JPEG — but sends **no `Vary: Accept`**, so a cached JPEG can be
-  handed back to a WebP request regardless of the header; `worker/lib/mirror.js`
-  works around this with `cf: { cacheTtl: 0 }` on the fetch and asserts the
-  response actually is `image/webp` before writing. That assertion retries
-  rather than gives up, but **only for `WEBP_GRACE_MS` (1 hour)** — a handful
-  of TMDB images never negotiate WebP no matter how often you ask, and
-  retrying those forever strands them twice over: the object never lands (so
-  the title falls back to the TMDB origin on every view) and, because
-  `drainMirrorQueue` pulls `ORDER BY queued_at`, the stuck rows are the oldest
-  and reoccupy a slot in *every* drain. Past the grace window the mirror
-  stores whatever image bytes it got, under the `.webp` key but with its real
-  `content-type` — browsers go by the header, not the extension, so it renders
-  correctly. Outcome shows as `mirrored-nonwebp` in the drain log. R2 keys **swap** the extension —
-  `t/p/w500/<hash>.jpg` → `t/p/w500/<hash>.webp` — so the inverse
-  (`upstreamForKey` in `worker/lib/images.js`, `upstreamFallback` in
-  `src/api/ophim.js`) reconstructs the original TMDB URL by swapping back to
-  `.jpg` (TMDB source images are confirmed always `.jpg`); these two
-  functions are a load-bearing contract, keep them in lockstep, and
-  `webpKeyFor()`/`r2ImageUrl()` are idempotent on a key that's already
-  `.webp`. `img.ophim.live` does **not** negotiate WebP, so OPhim-sourced
-  keys are mirrored as plain JPEG at their original extension, unmodified by
-  this.
+  **Every mirrored image is WebP, TMDB and OPhim alike, sourced from
+  wsrv.nl (since 2026-08-06).** Earlier this relied on `image.tmdb.org`'s
+  content negotiation (`Accept: image/webp`) — but TMDB sends **no `Vary:
+  Accept`**, so a JPEG cached anywhere in front of it could be handed back
+  regardless of the header. That made the `.webp` key an unreliable promise:
+  measured 2026-08-06, ~1.7% of already-mirrored objects silently held JPEG
+  bytes under a `.webp` key (browsers render by content-type, not extension,
+  so nothing looked broken until you checked). wsrv.nl
+  (`worker/lib/mirror.js` `wsrvWebpUrl()`, open source, BSD-3-Clause,
+  self-hostable — https://wsrv.nl) makes format a property of the URL
+  (`&output=webp&q=75`) instead of a negotiated header, so it can't disagree
+  with itself. **Invariant, no exceptions: a key ending `.webp` holds WebP
+  bytes, or the row stays queued** — there is no fallback path that saves
+  something else under that key anymore (the old `WEBP_GRACE_MS` grace
+  window / `mirrored-nonwebp` outcome are gone as of the same date; a
+  non-WebP response from wsrv.nl is always `retry`, never saved).
+  `WSRV_ENABLED` in `mirror.js` is a rollback flag — flip to `false` and
+  deploy to fall back to fetching origins directly, no data migration
+  needed.
 
-  Every `w500` poster (`thumb_url`) also gets a `w154` sibling mirrored
+  wsrv.nl also does the RESIZE in the same pass via `&w=<width>&we`
+  (`&we` = without-enlargement, load-bearing: without it wsrv.nl upscales
+  past native resolution by default when `&w=` exceeds it, which came out
+  *larger* than the old Cloudflare-transform output for OPhim's often-small
+  landscape "poster" images — with it, smaller in every sample tested,
+  TMDB and OPhim alike). TMDB URLs pass no `&w=` — their own path already
+  encodes size (`/t/p/w500/`, `/t/p/w1280/`). **OPhim URLs always pass a
+  width**, because OPhim has no TMDB-style size variants of its own — one
+  URL, one native resolution (sometimes several MB) — so sizing has to
+  happen somewhere, and it now happens once, at mirror time, instead of on
+  every request the way a Cloudflare Image Transformation used to.
+
+  A 4xx/5xx from wsrv.nl doesn't mean the image is gone — `isUpstreamDead()`
+  checks the real origin (TMDB/OPhim) directly before a queue row is ever
+  deleted, so a wsrv.nl hiccup retries instead of wrongly giving up on a
+  still-live image.
+
+  R2 keys **swap** the extension — `t/p/w500/<hash>.jpg` →
+  `t/p/w500/<hash>.webp`, and for OPhim additionally gain a `w<width>/`
+  segment ahead of the path — `ophim/uploads/movies/<name>.jpg` →
+  `ophim/w500/uploads/movies/<name>.webp` (`objectKeyFor` in
+  `worker/lib/images.js`; width is baked into the key precisely so
+  `drainMirrorQueue` can recover it at mirror time without a D1 schema
+  change — TMDB keys need no such segment). The inverse
+  (`upstreamForKey` in `worker/lib/images.js`, `upstreamFallback` in
+  `src/api/ophim.js`) reconstructs the original URL by swapping `.webp`
+  back to `.jpg` (source images are confirmed always `.jpg`, both hosts)
+  and, for OPhim, additionally stripping the `w<width>/` bookkeeping
+  segment — that segment isn't part of the real upstream path. These
+  functions are a load-bearing contract, keep them in lockstep;
+  `webpKeyFor()`/`r2ImageUrl()` are idempotent on a key that's already
+  `.webp`.
+
+  Every `w500` TMDB poster (`thumb_url`) also gets a `w154` sibling mirrored
   alongside it (`worker/lib/images.js` `addW154Sibling`) — the hero rail
   (`HeroSlider.js`) renders at 42px/30px wide and would otherwise load a
-  500px poster into a slot 12-16x smaller than the image.
+  500px poster into a slot 12-16x smaller than the image. OPhim doesn't get
+  a `w154` variant (not in scope — the hero rail rarely shows OPhim-only
+  artwork, since TMDB owns `poster_url`/`thumb_url` whenever it has a match).
 
-  **OPhim artwork is NOT mirrored as WebP** — instead, `posterUrl`/`thumbUrl`
-  in `src/api/ophim.js` wrap the plain R2 mirror in a same-zone Cloudflare
-  Image Transformation (`phim.bluesia.net/cdn-cgi/image/width=...,
-  format=auto/<r2-url>`) at serve time. This is a serve-time-only decision
-  deliberately kept out of `r2ImageUrl()`: `thumb_url`/`poster_url` in API
-  responses stay plain R2 URLs, which is what `mirrorTargets` keys off to
-  enqueue the raw mirror the transform reads from. **Image Transformations
-  only accept same-zone sources** — a transform request with
-  `image.tmdb.org` or `img.ophim.live` as the source 403s; only a source
-  already inside this account's R2/zone works, confirmed by direct test.
-  Free tier is 5,000 unique transformations/month; this project is the sole
-  consumer on the account.
+  **`posterUrl`/`thumbUrl` in `src/api/ophim.js` are now pure passthroughs**
+  for both hosts. Before 2026-08-06 they wrapped OPhim R2 URLs in a
+  same-zone Cloudflare Image Transformation
+  (`phim.bluesia.net/cdn-cgi/image/width=...,format=auto/<r2-url>`) at
+  serve time — the only way to resize OPhim art, since Image
+  Transformations only accept same-zone sources (a transform request with
+  `image.tmdb.org` or `img.ophim.live` as the source 403s). Resizing moved
+  to mirror time (wsrv.nl `&w=`, above), so the R2 object is already the
+  right size and there's nothing left to wrap. **This project no longer
+  uses Cloudflare Image Transformations at all** — freed intentionally, not
+  because of quota pressure (usage was ~2% of the 5,000/month free tier
+  when this was decided), to reserve the feature for something else later.
 
-  R2 object keys otherwise still mirror the upstream path
-  (`t/p/w500/<hash>[.webp]`, `ophim/<path>`), so if a mirror hasn't
-  landed yet (or R2 is somehow unreachable) the frontend's `<img onerror>`
-  handler rebuilds the original TMDB/OPhim URL from the R2 URL (unwrapping
-  the `.webp` suffix and/or the transform wrapper first, as applicable) and
-  retries it directly — see `upstreamFallback`/`attachImageFallback` in
-  `src/api/ophim.js`.
+  If a mirror hasn't landed yet (or R2 is somehow unreachable) the
+  frontend's `<img onerror>` handler rebuilds the original TMDB/OPhim URL
+  from the R2 URL and retries it directly — see
+  `upstreamFallback`/`attachImageFallback` in `src/api/ophim.js`. This
+  fallback goes straight to the real origin, never through wsrv.nl —
+  wsrv.nl is a mirror-time-only dependency, kept out of the request path a
+  real user's browser ever waits on.
 
   **Images: 2026-08-04 domain + key-shape migration.** Moved image serving
   from `redflarer2.bluesia.net` to `img.bluesia.net` in one hard cutover (no
@@ -303,6 +333,28 @@ Two different paths, both entirely on Cloudflare — no other server involved:
   un-WebP'd). The takeaway for any future change to how image URLs are built:
   **Purge Everything on the Cloudflare dashboard as part of that deploy** —
   the Cache API entries will not fix themselves. See "Caching layers" #2.
+
+  **2026-08-06 wsrv.nl migration.** Full rationale, every number measured,
+  and the phased rollout: `bluesiaOM/context/plan-redflare-webp-wsrv.md` +
+  `context/state-redflare-webp-wsrv.md` (progress/decisions log). Unlike the
+  2026-08-04 domain migration, **R2 keys for TMDB didn't change** (same
+  `.webp` suffix, same host) — only *how* the bytes get there changed, so no
+  re-mirror, no Cache API purge was strictly required for TMDB. OPhim keys
+  DID change shape (gained the `w<width>/` segment above), so the ~38
+  pre-existing OPhim objects were deleted from R2 + D1 `mirrored` outright
+  (not re-mirrored under the old shape — new builds compute the new key from
+  scratch; the client-side fallback covers the gap in between). Also cleaned
+  up ~53 TMDB objects left over from the old grace-window bug (JPEG bytes
+  under a `.webp` key) the same way. **Rollback**, if wsrv.nl ever needs to
+  be pulled out: set `WSRV_ENABLED = false` in `worker/lib/mirror.js` and
+  deploy — TMDB reverts to direct-fetch (content negotiation, no grace
+  window to reinstate — non-WebP responses just retry forever, which is a
+  regression but not a silent one, `RedflareMirrorStuck` on
+  `monitor.bluesia.net` will fire). OPhim reverts to plain-JPEG raw mirrors
+  the same way, but note `posterUrl`/`thumbUrl` no longer apply a
+  Cloudflare Image Transformation — a rollback that also needs images
+  resized again would have to reinstate that serve-time wrapper, not just
+  flip the flag.
 
 ### Endpoints the frontend calls
 
