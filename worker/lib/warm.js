@@ -267,6 +267,61 @@ async function evictStaleWarmKeys(env, keepTargets) {
   return evicted;
 }
 
+// --- Edge warming for /api/* (plan-hit-rate.md Phase 5, CF-native rewrite) --
+// The KV writes above make a page cheap to BUILD; this makes it cheap to
+// REACH, by pulling each warm page through Cloudflare's front door so the
+// zone edge cache (and, with Tiered Cache on, the shared upper tier) holds it
+// before a real visitor asks.
+//
+// This originally lived in a GitHub Actions workflow, because a Worker
+// fetching its own Custom Domain returns 522 and env.SELF bypasses the CDN —
+// neither could populate the edge. That workflow was then blocked by
+// Cloudflare's own bot management, which serves a managed challenge to
+// GitHub Actions runner IPs (shared CI ranges carry a poor bot score).
+// The `global_fetch_strictly_public` compatibility flag (see wrangler.toml)
+// removes the original constraint instead of working around the symptom: a
+// global fetch() to phim.bluesia.net now loops back through the front door
+// and traverses the real CDN path. So the warming runs here, on Cloudflare,
+// with no external caller, no shared secret and no WAF exception.
+//
+// Runs in its OWN invocation (/__cron/edge-warm via env.SELF, same pattern as
+// every other shard here) so its ~13 subrequests don't share a budget with
+// runWarmRefresh's 12 shard calls plus its KV list/delete/put traffic.
+const PUBLIC_ORIGIN = 'https://phim.bluesia.net';
+const HOME_PATH = '/api/home-data';
+
+export async function runEdgeWarm(env) {
+  const targets = await getTopWarmTargets(env, WARM_SET_SIZE);
+  const paths = [HOME_PATH, ...targets];
+  const results = await Promise.all(
+    paths.map(async (p) => {
+      try {
+        const res = await fetch(PUBLIC_ORIGIN + p, {
+          headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net edge-warm)' },
+        });
+        return { path: p, status: res.status, cache: res.headers.get('cf-cache-status') };
+      } catch (e) {
+        return { path: p, status: 'error', error: e.message };
+      }
+    })
+  );
+  const ok = results.filter((r) => r.status === 200).length;
+  console.log('[edge warm]', { requested: results.length, ok });
+  return { requested: results.length, ok, results };
+}
+
+async function callEdgeWarm(env) {
+  try {
+    const res = await env.SELF.fetch(`${PUBLIC_ORIGIN}/__cron/edge-warm`, {
+      headers: { 'x-cron-key': env.CRON_KEY },
+    });
+    if (!res.ok) return { requested: 0, ok: 0, error: `http ${res.status}` };
+    return res.json();
+  } catch (e) {
+    return { requested: 0, ok: 0, error: e.message };
+  }
+}
+
 export async function runWarmRefresh(env) {
   const results = [];
   for (let n = 0; n < WARM_SET_SIZE; n++) {
@@ -274,6 +329,10 @@ export async function runWarmRefresh(env) {
   }
   const currentTargets = await getTopWarmTargets(env, WARM_SET_SIZE);
   const evicted = await evictStaleWarmKeys(env, currentTargets);
+
+  // Only after the KV copies above are fresh — warming the edge first would
+  // just cache the previous cycle's body for another full TTL.
+  const edge = await callEdgeWarm(env);
 
   const summary = { written: 0, skipped: 0, failed: 0 };
   for (const r of results) {
@@ -285,6 +344,8 @@ export async function runWarmRefresh(env) {
     ranAt: Date.now(),
     ...summary,
     evicted,
+    edgeWarmed: edge.ok || 0,
+    edgeRequested: edge.requested || 0,
     targets: results.map(({ items, ...rest }) => rest),
   };
   // Best-effort: if THIS write is what's failing (e.g. the 1,000/day KV
@@ -296,6 +357,6 @@ export async function runWarmRefresh(env) {
   } catch (e) {
     console.error('[warm meta put]', e.message);
   }
-  console.log('[warm refresh]', { ...summary, evicted });
+  console.log('[warm refresh]', { ...summary, evicted, edgeWarmed: meta.edgeWarmed });
   return meta;
 }

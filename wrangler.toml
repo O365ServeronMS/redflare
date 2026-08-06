@@ -3,6 +3,32 @@ compatibility_date = "2026-08-01"
 workers_dev = false
 preview_urls = false
 
+# global_fetch_strictly_public (plan-hit-rate.md Phase 5): makes a global
+# fetch() to this Worker's OWN zone loop back to Cloudflare's "front door" and
+# be treated like a request from the Internet, instead of the default
+# behaviour where a fetch to the Worker's own Custom Domain returns 522
+# (documented under Error 522 / Error 1042). That loop-back through the front
+# door is exactly what edge-warming needs: the request traverses the real CDN
+# path, so it POPULATES the zone edge cache (and, with Tiered Cache on, the
+# shared upper tier) the way an external visitor's request would.
+#
+# Blast radius, checked before enabling:
+#   - Fetches to EXTERNAL hosts (phimapi.com, api.themoviedb.org, wsrv.nl):
+#     unaffected — "strictly public" is already how those resolve.
+#   - Fetches to img.bluesia.net (same zone, R2 custom domain): now
+#     guaranteed to go through the front door, which is what worker/lib/home.js
+#     warmHeroImages() wants; without the flag a same-zone fetch does not
+#     reliably traverse the CDN cache.
+#   - env.SELF service-binding calls (the home/warm/mirror shard fan-out):
+#     UNAFFECTED. Service bindings are a separate mechanism that never goes
+#     through a publicly-accessible URL, and this flag governs *global*
+#     fetch() only. This is the property that makes the flag safe here — all
+#     the cron sharding keeps working exactly as before.
+#   - Loop depth: the only self-fetches this Worker makes are to /api/* paths,
+#     and those handlers make no self-fetches of their own, so a warm request
+#     is depth-1, not a cycle.
+compatibility_flags = ["global_fetch_strictly_public"]
+
 # Pin the custom domain in config so each deploy re-attaches it — avoids the site
 # going down when the Git integration is disconnected/reconnected.
 routes = [

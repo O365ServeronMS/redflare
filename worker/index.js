@@ -96,7 +96,14 @@ import {
   ttlForTier,
 } from './lib/recommendation.js';
 import { enqueueMirror, drainMirrorQueueShard, runMirrorRefresh } from './lib/mirror.js';
-import { WARM_SET_SIZE, WARM_META_KEY, runWarmShard, runWarmRefresh, getTopWarmTargets } from './lib/warm.js';
+import {
+  WARM_SET_SIZE,
+  WARM_META_KEY,
+  runWarmShard,
+  runWarmRefresh,
+  getTopWarmTargets,
+  runEdgeWarm,
+} from './lib/warm.js';
 
 const KKPHIM_BASE = 'https://phimapi.com';
 
@@ -498,6 +505,19 @@ async function handleCronWarmShard(request, env, ctx, n) {
 async function handleCronWarmRefresh(request, env) {
   if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
   const result = await runWarmRefresh(env);
+  return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
+}
+
+// Pulls each warm page through Cloudflare's front door so the ZONE EDGE
+// cache holds it, not just KV (plan-hit-rate.md Phase 5). Its own invocation,
+// dispatched by runWarmRefresh via env.SELF, so its ~13 public fetches get a
+// fresh 50-subrequest budget rather than sharing the orchestrator's. Depends
+// on the global_fetch_strictly_public compatibility flag — see wrangler.toml
+// for why, and for why env.SELF (which this route is reached through) is
+// unaffected by it.
+async function handleCronEdgeWarm(request, env) {
+  if (!checkCronKey(request, env)) return new Response('Not found', { status: 404 });
+  const result = await runEdgeWarm(env);
   return new Response(JSON.stringify(result), { headers: { 'content-type': 'application/json' } });
 }
 
@@ -981,6 +1001,9 @@ export default {
     }
     if (url.pathname === '/__cron/warm') {
       return handleCronWarmRefresh(request, env);
+    }
+    if (url.pathname === '/__cron/edge-warm') {
+      return handleCronEdgeWarm(request, env);
     }
     if (url.pathname === '/__cron/purge-recs') {
       return handleCronPurgeRecs(request, env, url);
