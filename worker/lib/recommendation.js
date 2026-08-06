@@ -1,7 +1,7 @@
 // recommendation.js — "Bạn cũng có thể thích", ported from
 // catalog-api/src/recommendation.js. TMDB recommendations cross-referenced to
-// the OPhim catalog via a tmdb.id → item reverse index (D1 table `idx`), with
-// a live OPhim keyword-search fallback. Results are cached in D1 table `recs`
+// the KKPhim catalog via a tmdb.id → item reverse index (D1 table `idx`), with
+// a live KKPhim /tmdb/{type}/{id} lookup fallback. Results are cached in D1 table `recs`
 // with a 3-tier TTL based on how COMPLETE the result was, not just whether it
 // was non-empty — see "Result quality + TTL tiers" below. This is a deliberate
 // change from the VPS's 2-tier (30d real / 1h empty) TTL — see
@@ -23,15 +23,24 @@
 //    hits. NOT list/genre/country/search results. Keeps D1 writes bounded and
 //    predictable, and avoids re-introducing the /api/search unbounded-
 //    cardinality problem on the write side.
-// 3. The OPhim search fallback is capped at SEARCH_FALLBACK_BUDGET (10)
+// 3. The KKPhim lookup fallback is capped at LOOKUP_FALLBACK_BUDGET (10)
 //    candidates per request — total attempts, to stay under the Worker's
 //    ~50 external-subrequest limit; the VPS had no such cap. Simultaneous
-//    connections are a SEPARATE bound (SEARCH_CONCURRENCY=6, enforced by
+//    connections are a SEPARATE bound (LOOKUP_CONCURRENCY=6, enforced by
 //    mapLimit below) — the two used to be conflated when budget happened to
 //    equal 6, which meant a raw Promise.all only stayed under the
 //    connection limit by coincidence. See state.md Phase 2 log.
 // 4. Stored items are R2-mapped (mapItemImages), not HMAC-signed — r2 mode is
 //    the only mode this site runs now (worker/lib/images.js).
+// 5. The fallback used to be a live OPhim keyword search (2 subrequests/
+//    candidate: original title, then localized title, filtered by tmdb id +
+//    type). KKPhim's search index leans heavily Vietnamese — a keyword search
+//    on a TMDB original_title (usually English) came back empty even for
+//    titles that ARE on KKPhim (measured 2026-08-06: "Evil Dead Burn" -> 0
+//    results, despite the title existing under slug ma-cay-lua-dia-nguc).
+//    KKPhim's GET /tmdb/{type}/{id} exists precisely to sidestep that: an
+//    exact TMDB-id lookup, 1 subrequest, no keyword guessing at all. See
+//    docs/plan-kkphim-migration.md Phase 4.
 
 import { createEnrich } from './enrich.js';
 import { mapItemImages } from './images.js';
@@ -40,16 +49,17 @@ const KKPHIM_BASE = 'https://phimapi.com';
 
 const RELATED_LIMIT = 8;
 const TMDB_CANDIDATES = 15;          // top-N TMDB recs to consider (matches VPS)
-// Phase 2 (state.md): raised from 6. Measured via wrangler dev --remote
-// against genuinely cold titles (never-indexed trending movies + the 3
-// known worst-case titles from the Phase 1 audit) at a trial value of 11 —
-// all succeeded cleanly, no Cloudflare resource-limit errors, latency
-// 0.6-4.5s. Landed on 10 (not the full trial value) to keep a safety
-// margin under the ~50-subrequest/invocation cap rather than run at the
-// measured edge. SEARCH_CONCURRENCY (below) is what actually bounds
-// simultaneous OPhim connections now — this only bounds total attempts.
-const SEARCH_FALLBACK_BUDGET = 10;
-const SEARCH_CONCURRENCY = 6;        // Workers free plan: 6 simultaneous outgoing connections
+// Phase 2 (state.md): raised from 6 for the old OPhim keyword-search
+// fallback, which needed up to 2 subrequests/candidate. KKPhim's
+// /tmdb/{type}/{id} lookup (deviation #5 above) needs only 1, so this value
+// is now a safety margin with headroom to spare rather than a measured
+// edge — kept at 10 anyway on first deploy rather than raised further,
+// since the ~50-subrequest/invocation cap is shared with TMDB enrich calls
+// and there's no need to push it without a measured reason to. LOOKUP_CONCURRENCY
+// (below) is what actually bounds simultaneous KKPhim connections — this
+// only bounds total attempts.
+const LOOKUP_FALLBACK_BUDGET = 10;
+const LOOKUP_CONCURRENCY = 6;        // Workers free plan: 6 simultaneous outgoing connections
 export const TTL_RELATED = 30 * 24 * 60 * 60;         // 30 days — full result
 export const TTL_RELATED_PARTIAL = 6 * 60 * 60;       // 6 hours — incomplete result, re-check soon
 export const TTL_RELATED_EMPTY = 60 * 60;             // 1 hour — no matches at all
@@ -169,11 +179,11 @@ async function fetchTmdbRecommendations(env, type, tmdbId) {
   }));
 }
 
-// Bounded-concurrency map — mirrors enrich.js's own mapLimit. The search
-// fan-out below used to be a raw Promise.all over `toSearch`, which only
+// Bounded-concurrency map — mirrors enrich.js's own mapLimit. The lookup
+// fan-out below used to be a raw Promise.all over `toLookup`, which only
 // ever respected the Workers free plan's 6-simultaneous-connection cap by
-// coincidence: SEARCH_FALLBACK_BUDGET happened to be 6. Raising the budget
-// without this would silently blow past that limit under real concurrency.
+// coincidence: the budget happened to be 6. Raising the budget without this
+// would silently blow past that limit under real concurrency.
 async function mapLimit(items, limit, fn) {
   let i = 0;
   async function worker() {
@@ -185,46 +195,52 @@ async function mapLimit(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
-// Live OPhim keyword search for one index-miss candidate: original title then
-// localized title, filtered by tmdb id + type. On a hit, enrich + R2-map (to
-// match the rest of the catalog) and index it for next time. Direct port of
-// the VPS matchOphimByTmdb fallback branch, minus signItem.
+// Exact KKPhim lookup by TMDB id for one index-miss candidate — replaces the
+// old OPhim keyword-search fallback (deviation #5 above). GET /tmdb/{type}/{id}
+// resolves directly, no keyword guessing, 1 subrequest instead of up to 2. On
+// a hit, enrich + R2-map (to match the rest of the catalog) and index it for
+// next time.
 //
-// Returns { item, error }. `error` distinguishes "OPhim answered, this title
+// Returns { item, error }. `error` distinguishes "KKPhim answered, this title
 // genuinely isn't in the catalog" (item: null, error: false — a legitimate,
-// cacheable-long-term outcome) from "the OPhim call itself failed" (item:
+// cacheable-long-term outcome) from "the KKPhim call itself failed" (item:
 // null, error: true — transient, should NOT be trusted for a 30-day cache;
-// see classifyTier below). Before this, both cases were caught by the same
-// empty `catch {}` and looked identical to the caller.
-async function matchViaSearch(env, enrich, rec, type) {
-  let sawError = false;
-  for (const kw of [rec.keyword, rec.viTitle]) {
-    if (!kw) continue;
-    try {
-      const data = await fetchCatalogJson(
-        `${KKPHIM_BASE}/v1/api/tim-kiem?keyword=${encodeURIComponent(kw)}&limit=10`
-      );
-      const items = data?.data?.items || data?.items || [];
-      const hit = items.find(
-        (it) => String(it?.tmdb?.id) === rec.id && (!it?.tmdb?.type || it.tmdb.type === type)
-      );
-      if (hit) {
-        await enrich.enrichItemsCards([hit]);
-        const mapped = mapItemImages(hit);
-        return { item: mapped, error: false };
-      }
-    } catch {
-      sawError = true; // this keyword's KKPhim call failed — try the next one
-    }
+// see classifyTier below). Collapsing these into one empty `catch {}` was the
+// original OPhim-era bug this distinction exists to avoid.
+//
+// A genuine miss on KKPhim is a plain HTTP 404 (verified 2026-08-06:
+// {"status":false,"msg":"hmmm!"}), not a 200 with an empty body — so this
+// does NOT go through fetchCatalogJson (which throws on any !res.ok,
+// indistinguishable from a real network failure). 404 is handled as the
+// legitimate-miss case; anything else non-ok is treated as transient.
+async function matchViaTmdbLookup(env, enrich, rec, type) {
+  let res;
+  try {
+    res = await fetchWithTimeout(`${KKPHIM_BASE}/tmdb/${type}/${rec.id}`, {
+      headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net)' },
+    });
+  } catch {
+    return { item: null, error: true }; // network/timeout — transient
   }
-  return { item: null, error: sawError };
+  if (res.status === 404) return { item: null, error: false }; // genuine miss
+  if (!res.ok) return { item: null, error: true }; // transient (5xx etc.)
+  try {
+    const data = await res.json();
+    const hit = data?.movie || data?.data?.item;
+    if (!hit || !hit.slug) return { item: null, error: false };
+    await enrich.enrichItemsCards([hit]);
+    const mapped = mapItemImages(hit);
+    return { item: mapped, error: false };
+  } catch {
+    return { item: null, error: true }; // malformed response body — transient
+  }
 }
 
 // Build the recommendation list for a title. Resolution mirrors the VPS: each
 // candidate resolves index-first (D1, cheap, no external call), then a live
-// OPhim search fallback — and results are emitted in strict TMDB rank order
-// (the VPS's Promise.all(recs.map(...)) preserves position; so do we, via a
-// positional slots array).
+// KKPhim /tmdb/{type}/{id} lookup fallback — and results are emitted in
+// strict TMDB rank order (the VPS's Promise.all(recs.map(...)) preserves
+// position; so do we, via a positional slots array).
 //
 // Returns { items, candidates, resolved, skippedBudget, searchErrors } — the
 // three extra fields are the quality signal classifyTier() below uses to pick
@@ -240,24 +256,26 @@ export async function buildRecommendation(env, type, tmdbId) {
   const indexHits = await lookupIndexBatch(env, type, recs.map((r) => r.id));
 
   // 2. Positional slots, one per candidate. Index hits fill immediately; the
-  //    first SEARCH_FALLBACK_BUDGET index-misses are queued for a live OPhim
-  //    search (the cap keeps OPhim fan-out under the Worker's connection /
-  //    subrequest limits, enforced for real by mapLimit below). Misses
-  //    beyond the budget stay null and count toward skippedBudget.
+  //    first LOOKUP_FALLBACK_BUDGET index-misses are queued for a live
+  //    KKPhim /tmdb/{type}/{id} lookup (the cap keeps KKPhim fan-out under
+  //    the Worker's connection/subrequest limits, enforced for real by
+  //    mapLimit below). Misses beyond the budget stay null and count
+  //    toward skippedBudget.
   //
   //    NOT early-stopping once index hits reach RELATED_LIMIT (an earlier
   //    version of this did, and looked like a Phase 2 win in isolated
-  //    testing) — it's WRONG: queued searches aren't guaranteed to succeed,
+  //    testing) — it's WRONG: queued lookups aren't guaranteed to succeed,
   //    so treating them as certain and skipping lower-ranked candidates on
   //    that assumption drops candidates that would have matched. Caught
-  //    concretely on movie/278: candidates ranked #9+ (Papillon, Lawless —
-  //    both instant OPhim hits when searched directly) were never even
+  //    concretely on movie/278 (against the old OPhim keyword-search
+  //    fallback this replaced): candidates ranked #9+ were never even
   //    attempted because higher-ranked candidates were optimistically
-  //    "reserved" and then some of them failed to resolve. See state.md
-  //    Phase 2 log for the full trace.
+  //    "reserved" and then some of them failed to resolve. Still applies
+  //    with a per-id lookup, since a lookup can still fail transiently
+  //    (network/timeout) — see state.md Phase 2 log for the original trace.
   const enrich = createEnrich(env);
   const slots = new Array(recs.length).fill(null);
-  const toSearch = []; // { idx, rec }
+  const toLookup = []; // { idx, rec }
   let skippedBudget = 0;
   for (let i = 0; i < recs.length; i++) {
     const hit = indexHits.get(recs[i].id);
@@ -265,18 +283,18 @@ export async function buildRecommendation(env, type, tmdbId) {
       slots[i] = hit;
       continue;
     }
-    if (toSearch.length < SEARCH_FALLBACK_BUDGET) toSearch.push({ idx: i, rec: recs[i] });
+    if (toLookup.length < LOOKUP_FALLBACK_BUDGET) toLookup.push({ idx: i, rec: recs[i] });
     else skippedBudget++;
   }
 
-  // 3. Resolve the queued searches through mapLimit(SEARCH_CONCURRENCY) —
-  //    toSearch can now exceed 6 (SEARCH_FALLBACK_BUDGET > SEARCH_CONCURRENCY),
-  //    so this is what actually keeps simultaneous OPhim connections at the
+  // 3. Resolve the queued lookups through mapLimit(LOOKUP_CONCURRENCY) —
+  //    toLookup can now exceed 6 (LOOKUP_FALLBACK_BUDGET > LOOKUP_CONCURRENCY),
+  //    so this is what actually keeps simultaneous KKPhim connections at the
   //    platform's cap, not the budget size.
   let searchErrors = 0;
-  if (toSearch.length) {
-    await mapLimit(toSearch, SEARCH_CONCURRENCY, async ({ idx, rec }) => {
-      const result = await matchViaSearch(env, enrich, rec, type);
+  if (toLookup.length) {
+    await mapLimit(toLookup, LOOKUP_CONCURRENCY, async ({ idx, rec }) => {
+      const result = await matchViaTmdbLookup(env, enrich, rec, type);
       slots[idx] = result.item;
       if (result.error) searchErrors++;
     });
@@ -311,8 +329,8 @@ export async function buildRecommendation(env, type, tmdbId) {
 // --- Result quality + TTL tiers ---------------------------------------------
 // "Sufficient" means either the list is already full (RELATED_LIMIT reached
 // — nothing was left on the table) or every candidate was actually
-// considered (no budget cutoff, no OPhim call failures) so a short list is
-// short because OPhim genuinely doesn't have more, not because the Worker
+// considered (no budget cutoff, no KKPhim call failures) so a short list is
+// short because KKPhim genuinely doesn't have more, not because the Worker
 // gave up early. Anything short of that is "partial": real items, but the
 // list may be missing something and deserves a much shorter TTL so it
 // self-heals instead of being frozen for 30 days (state.md Phase 1 log has
