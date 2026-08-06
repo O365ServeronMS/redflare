@@ -102,12 +102,23 @@ phép" — chưa xác nhận budget thật còn dư bao nhiêu (con số `meta:*
 CLAUDE.md sai 17× so với thực tế đo được ở Phase 0, chưa sửa — xem Phase 8),
 nên không mở rộng cho tới khi có số đúng.
 
-**Trạng thái: migration đã apply, code đã deploy, `node --check` pass.**
-Chưa verify được `x-catalog-cache: warm` thật trên production hay ranking
-dịch chuyển theo traffic — bảng `popularity` vừa tạo, cần nhiều chu kỳ `*/30`
-để tích luỹ đủ mẫu có ý nghĩa. Ngay sau deploy, hành vi warm set **không đổi**
-so với trước (toàn bộ 12 slot vẫn là seed cũ, vì D1 chưa có dữ liệu) — đúng
-như thiết kế bootstrap, không phải bug.
+**Trạng thái: migration đã apply, code đã deploy (08:04:17 UTC), verify
+production OK.** Gửi 12 request `/api/genre?slug=tam-ly&page=1` song song rồi
+kiểm tra D1 — bảng `popularity` đã có dòng thật:
+```
+path: /api/list?type=phim-moi-cap-nhat&page=1   hits: 1
+path: /api/genre?slug=tam-ly&page=1             hits: 1
+```
+(chỉ 2 dòng dù gửi 12 request tới cùng 1 URL — đúng thiết kế lấy mẫu
+1-trong-10, và dòng thứ hai đến từ traffic thật khác trong lúc chờ deploy).
+Xác nhận `trackPopularity` chạy đúng end-to-end: canonical cache key đúng
+định dạng, `hits`/`last_seen` đúng shape.
+
+Ngay sau deploy, hành vi warm set **không đổi** so với trước (toàn bộ 12 slot
+vẫn là seed cũ, vì D1 chưa đủ N=12 dòng có ý nghĩa) — đúng như thiết kế
+bootstrap, không phải bug. Chưa verify được ranking thật sự dịch chuyển theo
+traffic hay `x-catalog-cache: warm` phản ánh đúng trang mới — cần nhiều chu
+kỳ `*/30` để tích luỹ đủ mẫu.
 
 ---
 
