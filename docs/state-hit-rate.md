@@ -18,7 +18,7 @@ xong chờ deploy — xem bảng phase bên dưới
 | **2** | Bật Tiered Cache (Smart Topology) | 🟢 **Xong** | 2026-08-06 | User đã bật trên dashboard |
 | **3** | Shard mirror drain + dọn ~1.200 ảnh tồn | 🟢 **Deploy xong** | 2026-08-06 | 5x throughput (100/tick thay vì 20/tick); backlog tự dọn dần |
 | **4** | Warm set theo popularity (LRU) | 🟢 **Deploy xong** | 2026-08-06 | Bootstrap qua seed list cũ, chưa có dữ liệu popularity thật |
-| **5** | Edge warming | 🟡 **Viết lại chạy 100% trên CF, chờ verify tick `:00`** | 2026-08-06 | Bỏ GitHub Actions + O5 nhờ `global_fetch_strictly_public` |
+| **5** | Edge warming | 🟢 **Xong, chạy 100% trên CF** (giá trị `/api/*` thấp hơn dự kiến — chỉ nóng 1 colo, xem §6.5.2) | 2026-08-06 | Đã bỏ GitHub Actions + secret + O5 nhờ `global_fetch_strictly_public` |
 | **6** | Đo lường tách theo class | ⚪ Chưa bắt đầu | — | Cần quyền Analytics |
 | **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚪ Chưa quyết | — | Quyết sau Phase 6 |
 | **8** | Dọn nợ khảo sát lộ ra | ⚪ Chưa bắt đầu | — | Làm lúc nào cũng được |
@@ -115,8 +115,45 @@ và **O5 (WAF Custom Rule) không còn cần** — không còn request nào từ
 GitHub để bị challenge. Ít bộ phận chuyển động hơn hẳn cả hai phương án
 trước.
 
-**Chưa gỡ `.github/workflows/edge-warm.yml` ngay** — giữ tới khi xác nhận
-đường CF chạy thật (đọc `edgeWarmed` trong `warm:last-run` sau tick `:00`).
+**Verify (tick 09:00 UTC, đã chạy thật):**
+```
+warm:last-run → edgeRequested: 13, edgeWarmed: 13
+```
+Cả 13 self-fetch trả 200. Nếu flag không hoạt động thì phải là 522 và
+`edgeWarmed: 0`. → **Flag hoạt động, xác nhận Worker tự fetch được hostname
+của chính nó.** Đã gỡ `.github/workflows/edge-warm.yml` và xoá GitHub secret
+`EDGE_WARM_KEY`.
+
+**Nhưng đo tiếp thì thấy điều ngược với giả định — ghi lại đầy đủ:**
+
+| URL (nằm trong 13 URL vừa warm lúc 09:01) | Đo từ SIN ngay sau đó |
+|---|---|
+| `/api/country?slug=trung-quoc&page=1` | **không có `cf-cache-status`**, `x-catalog-cache: warm` |
+| `/api/genre?slug=tam-ly&page=1` (lần 1) | **không có `cf-cache-status`**, `x-catalog-cache: warm` |
+| `/api/genre?slug=tam-ly&page=1` (lần 2) | `cf-cache-status: HIT`, age 24 |
+
+Edge cache ở SIN được nạp bởi **request của chính tôi**, không phải bởi
+edge-warm → **edge-warm chỉ nạp đúng colo nơi cron chạy**. Lý do Tiered Cache
+không cứu được: nó dựng tầng trên cho *origin fetch*, mà với Worker chạy trên
+route thì **Worker chính là origin**, thực thi ngay tại colo nhận request —
+không có origin fetch nào để tier. Tiered Cache vẫn giúp `img.bluesia.net`
+(R2 là origin thật), nhưng không giúp `/api/*`.
+
+**Không phải hồi quy do đổi sang CF:** phương án GitHub Actions cũ vướng đúng
+giới hạn này (runner ở vài region Mỹ → chỉ nạp colo Mỹ, không phải SIN nơi
+người dùng thật ở). Hai phương án giá trị ngang nhau ở khoản này; CF chỉ đơn
+giản hơn. Chi tiết ở [plan-hit-rate.md](plan-hit-rate.md) §6.5.2.
+
+**Điểm sáng thật sự trong cùng phép đo:** `x-catalog-cache: warm` nghĩa là
+tầng KV warm set (Phase 4) đang phục vụ toàn cầu **không cần build upstream**
+— đúng chỉ số B mà plan cam kết (origin-build rate ≤0,1%). Tầng KV mới là thứ
+làm việc chính; edge cache bên trên chỉ là phần thêm.
+
+**Kiểm tra thêm — ảnh hero:** 2 URL để dành (chưa từng tự request) trả HIT
+với `age: 5426` (~90 phút), tức nạp lúc ~07:31 — **trước** khi Phase 5 deploy
+(~08:1x). Nên đây là do traffic thật làm nóng, **chưa chứng minh được**
+`warmHeroImages` có tác dụng hay không. Cần một ảnh hero mới xuất hiện trong
+payload để đo sạch.
 
 ---
 

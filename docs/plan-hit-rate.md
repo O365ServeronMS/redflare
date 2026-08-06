@@ -489,13 +489,13 @@ Pre-build vào KV vẫn chưa làm nóng **edge**. Bước này làm nóng edge 
   — cố định TTL không giúp gì khi nguyên nhân là LRU evict, phải warm lặp
   lại. Cần **Phase 2 (Tiered Cache) đã bật** thì mới lan ra ngoài 1 colo,
   đúng như cảnh báo gốc.
-- ✅ **`/api/*`** ([worker/lib/warm.js](../worker/lib/warm.js) `runEdgeWarm`,
+- ⚠️ **`/api/*`** ([worker/lib/warm.js](../worker/lib/warm.js) `runEdgeWarm`,
   route `/__cron/edge-warm`): sau khi `runWarmRefresh` ghi xong KV, gọi thêm
   1 invocation riêng (qua `SELF`, đúng pattern shard sẵn có) fetch 13 URL
   công khai `https://phim.bluesia.net/api/...` qua **front door** của
-  Cloudflare → nạp vào zone edge cache + upper tier. **Thứ tự có chủ đích:**
-  warm edge *sau* khi KV mới, warm trước sẽ cache lại body của chu kỳ cũ
-  thêm nguyên một TTL.
+  Cloudflare. **Thứ tự có chủ đích:** warm edge *sau* khi KV mới, warm trước
+  sẽ cache lại body của chu kỳ cũ thêm nguyên một TTL. **Chạy đúng nhưng
+  giá trị thấp hơn dự kiến — xem §6.5.2.**
 
 #### §6.5.1 — `global_fetch_strictly_public`: vì sao không cần caller ngoài
 
@@ -522,10 +522,48 @@ cache** — chính xác thứ edge-warming cần.
 `EDGE_WARM_KEY`, và **O5 (WAF Custom Rule) không còn cần thiết** — không còn
 request nào từ IP GitHub để bị bot-challenge nữa.
 
-**Verify:** `node --check` pass; `wrangler.toml` parse đúng, không key
-top-level nào bị nuốt vào `[table]` (bẫy đã ghi trong CLAUDE.md);
-`/__cron/edge-warm` đã live trên production (404-gated đúng). Kết quả chạy
-thật ghi ở [state-hit-rate.md](state-hit-rate.md).
+**Verify (đã chạy thật, tick 09:00 UTC):** `warm:last-run` báo
+`edgeRequested: 13, edgeWarmed: 13` — **cả 13 self-fetch trả 200**. Nếu flag
+không hoạt động thì đây phải là 522 và `edgeWarmed: 0`. → Flag hoạt động,
+Worker tự fetch được hostname của chính nó.
+
+#### §6.5.2 — Đo xong mới thấy: edge-warm `/api/*` chỉ nóng ĐÚNG 1 colo
+
+Đây là phát hiện **ngược với giả định của plan**, ghi lại thay vì lờ đi.
+
+Sau khi edge-warm 09:01 báo 13/13 thành công, đo từ SIN:
+
+| URL (nằm trong 13 URL vừa warm) | Kết quả đo từ SIN |
+|---|---|
+| `/api/country?slug=trung-quoc&page=1` | **không có `cf-cache-status`**, `x-catalog-cache: warm` |
+| `/api/genre?slug=tam-ly&page=1` (lần 1) | **không có `cf-cache-status`**, `x-catalog-cache: warm` |
+| `/api/genre?slug=tam-ly&page=1` (lần 2) | `cf-cache-status: HIT`, age 24 |
+
+Tức là edge cache ở SIN được nạp bởi **request của chính tôi**, không phải bởi
+edge-warm. Edge-warm chỉ nạp colo nơi **cron chạy**.
+
+**Vì sao Tiered Cache không cứu được ở đây:** Tiered Cache dựng tầng trên cho
+các lần fetch về **origin**. Với một Worker chạy trên route, **Worker chính là
+origin** và nó thực thi ngay tại colo nhận request — không có "origin fetch"
+nào để mà tier. Nên Tiered Cache giúp được `img.bluesia.net` (R2 là origin
+thật) nhưng **không giúp `/api/*`**.
+
+**Quan trọng: đây KHÔNG phải hồi quy do đổi sang CF.** Phương án GitHub
+Actions cũ vướng đúng giới hạn này — runner GitHub nằm ở vài region Mỹ, nên
+nó cũng chỉ nạp được colo Mỹ, không phải SIN nơi người dùng thật ở. Hai
+phương án giá trị như nhau ở khoản này; phương án CF chỉ đơn giản hơn (không
+phụ thuộc ngoài, không secret, không WAF rule).
+
+**Điều đáng chú ý hơn:** `x-catalog-cache: warm` trong bảng trên nghĩa là
+tầng KV warm set (Phase 4) **đang phục vụ toàn cầu mà không cần build
+upstream** — đúng chỉ số B ("origin-build rate ≤0,1%") mà §4 cam kết. Tầng KV
+mới là thứ làm việc chính; edge cache bên trên chỉ là phần thêm.
+
+**Giữ hay bỏ `runEdgeWarm`?** Giữ — chi phí rất thấp (13 invocation/tick =
+~624/ngày trên hạn mức 100.000, cộng 13 subrequest trong một invocation
+riêng), vẫn có lợi thật cho colo cron chạy, và không có rủi ro. Nhưng
+**đừng kỳ vọng nó dịch chuyển zone-wide HIT%** — nó không làm được việc đó,
+và §4 nên đọc với hiểu biết này.
 
 **Rollback:** gỡ `global_fetch_strictly_public` khỏi `compatibility_flags`
 trong `wrangler.toml` + revert `worker/lib/warm.js`/`worker/index.js`.
