@@ -25,7 +25,16 @@ jobs:
       - name: Warm hot pages at the zone edge
         run: |
           set -uo pipefail
-          urls=$(curl -sS --max-time 20 "https://phim.bluesia.net/api/warm-targets" | jq -r '.urls[]')
+          resp=$(curl -sS --max-time 20 -w '\n%{http_code}' "https://phim.bluesia.net/api/warm-targets")
+          code=$(echo "$resp" | tail -1)
+          body=$(echo "$resp" | sed '$d')
+          echo "warm-targets responded $code:"
+          echo "$body"
+          if [ "$code" != "200" ]; then
+            echo "non-200 from /api/warm-targets, aborting" >&2
+            exit 1
+          fi
+          urls=$(echo "$body" | jq -r '.urls[]')
           if [ -z "$urls" ]; then
             echo "no URLs returned from /api/warm-targets" >&2
             exit 1
