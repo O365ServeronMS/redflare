@@ -4,8 +4,9 @@ File tracking cho [plan-hit-rate.md](plan-hit-rate.md). **Cập nhật file này
 khi một phase đổi trạng thái** — nó là nguồn sự thật về tiến độ, không phải git log.
 
 **Bắt đầu:** 2026-08-06
-**Trạng thái tổng:** 🟡 Phase 0 đóng, Phase 2 xong (dashboard), Phase 1 code
-xong chờ deploy — xem bảng phase bên dưới
+**Trạng thái tổng:** 🟢 Phase 0–5 xong và đã deploy. Còn lại: Phase 6 (đo
+lường, cần quyền Analytics), Phase 7 (Cache Reserve — quyết định thương mại),
+Phase 8 (dọn nợ).
 
 ---
 
@@ -37,9 +38,9 @@ khi đo lại.
 | Zone-wide HIT% | **35%** (người dùng báo) | ≥93% | — |
 | Ảnh `img.bluesia.net` HIT% | **~25%** (suy từ mô hình §2) | ≥90% | — |
 | `/api/*` origin-build rate | không đo được | ≤0,1% | — |
-| `mirror_queue` depth | **1.225** | ~0 | — |
+| `mirror_queue` depth | **1.225** | ~0 | **1.055** (11:54, đang giảm) |
 | `mirror` đầu queue kẹt | **497 phút** | <60 phút | — |
-| `mirrored` trong 1h | **0** | >0 | — |
+| `mirrored` trong 1h | **0** | >0 | **203** (11:54) |
 | `mirrored` tổng | **3.494** | tăng dần | — |
 | KV `page:v1:*` | **0 key** | 12–13 key | — |
 | KV `home:current` | **KHÔNG TỒN TẠI** | tồn tại, <60 phút tuổi | — |
