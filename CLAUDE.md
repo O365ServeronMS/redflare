@@ -491,9 +491,20 @@ match trending against, and shard 4's hero pool additionally filters out
 Trong Tuần" — `/danh-sach/hoat-hinh` itself is unaffected) — each its own
 Worker invocation with its own
 CPU/subrequest budget — via the `SELF` **service binding** (not a public
-`fetch()`; a Worker fetching its own Custom Domain always 522s, a documented
-Cloudflare behavior), concatenates the resulting JSON without reparsing, and
-writes one KV key. The request path only ever reads that key.
+`fetch()`; a Worker fetching its own Custom Domain 522s by default, a
+documented Cloudflare behavior), concatenates the resulting JSON without
+reparsing, and writes one KV key. The request path only ever reads that key.
+
+**Nuance added 2026-08-06:** that 522 is the *default*, not an absolute.
+`wrangler.toml` now sets the `global_fetch_strictly_public` compatibility
+flag, under which a global `fetch()` to this Worker's own zone loops back
+through Cloudflare's front door and succeeds. That is deliberately **not**
+how the shard fan-out works and must not be changed to it — service bindings
+skip the public network entirely and are unaffected by the flag, which is
+what keeps the fan-out cheap and loop-free. The flag exists for exactly one
+job: edge-warming (`worker/lib/warm.js` `runEdgeWarm`), where going through
+the front door is the whole point, because that is what populates the zone
+edge cache. See `docs/plan-hit-rate.md` §6.5.1.
 
 **Recommendation cache TTL (`worker/lib/recommendation.js` `classifyTier`/`ttlForTier`).**
 Not just "has results / empty" — a result is `full` (30 days) only if it

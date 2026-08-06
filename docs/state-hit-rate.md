@@ -18,7 +18,7 @@ xong chờ deploy — xem bảng phase bên dưới
 | **2** | Bật Tiered Cache (Smart Topology) | 🟢 **Xong** | 2026-08-06 | User đã bật trên dashboard |
 | **3** | Shard mirror drain + dọn ~1.200 ảnh tồn | 🟢 **Deploy xong** | 2026-08-06 | 5x throughput (100/tick thay vì 20/tick); backlog tự dọn dần |
 | **4** | Warm set theo popularity (LRU) | 🟢 **Deploy xong** | 2026-08-06 | Bootstrap qua seed list cũ, chưa có dữ liệu popularity thật |
-| **5** | Edge warming | 🟡 **Nửa ảnh xong (Worker); nửa `/api/*` chờ 1 WAF Custom Rule** | 2026-08-06 | Workflow đã lên, nhưng Cloudflare bot-challenge chặn IP của GitHub Actions — cần WAF Skip rule, xem nhật ký |
+| **5** | Edge warming | 🟡 **Viết lại chạy 100% trên CF, chờ verify tick `:00`** | 2026-08-06 | Bỏ GitHub Actions + O5 nhờ `global_fetch_strictly_public` |
 | **6** | Đo lường tách theo class | ⚪ Chưa bắt đầu | — | Cần quyền Analytics |
 | **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚪ Chưa quyết | — | Quyết sau Phase 6 |
 | **8** | Dọn nợ khảo sát lộ ra | ⚪ Chưa bắt đầu | — | Làm lúc nào cũng được |
@@ -61,6 +61,64 @@ npx wrangler d1 execute redflare-db --remote --command "SELECT (SELECT COUNT(*) 
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-06 — Phase 5 viết lại: bỏ GitHub Actions, chạy trên chính Cloudflare
+
+**Giả thuyết được nêu:** "CF cũng có tính năng Workflows riêng nên cấm từ
+GitHub qua." → **Không đúng**, và bằng chứng đã có sẵn trong chính log lỗi:
+
+- Trang 403 trả về là **managed challenge** của bot management
+  (`cType: 'managed'`, script từ `challenges.cloudflare.com`) — luồng chấm
+  điểm bot, không phải luật chặn theo sản phẩm/đối thủ.
+- Cùng một request y hệt, từ IP khác (môi trường của tôi) → `200`. Nếu là
+  chặn GitHub có chủ đích thì phải chặn theo dải IP bất kể nội dung.
+- Cloudflare Workflows là sản phẩm **bạn deploy lên**, không tham gia vào
+  việc lọc traffic **đi vào** zone. Hai thứ không liên quan nhau.
+- Nguyên nhân thật: dải IP GitHub Actions dùng chung cho hàng triệu job CI
+  (có cả scraper/abuse) → điểm uy tín bot thấp → bị challenge. Chuyện thường
+  gặp với mọi CI runner, không riêng Cloudflare.
+
+**Nhưng hướng đi thì đúng.** Ý "đưa việc này về chạy trên CF" là hướng tốt —
+chỉ là công cụ đề xuất (Workflows) không phải công cụ đúng:
+
+- **Cloudflare Workflows** là engine *durable multi-step execution* (retry,
+  giữ state qua nhiều bước, chạy dài). Việc cần làm là "bắn 13 GET mỗi 30
+  phút" — dùng Workflows là dao mổ trâu.
+- Quan trọng hơn: **Workflows cũng KHÔNG tự giải quyết vấn đề gốc.** Workflow
+  chạy trên Workers runtime nên fetch tới `phim.bluesia.net` vẫn vướng đúng
+  giới hạn same-zone. Nó cần đúng cái flag bên dưới — flag mới là thứ gỡ
+  khoá, không phải Workflows.
+
+**Giải pháp thật: compatibility flag `global_fetch_strictly_public`.**
+Tìm ra khi tra doc Error 522 — chính doc Cloudflare chỉ thẳng flag này là
+cách xử lý cho "fetch to its own hostname". Sau khi bật: *"requests to a
+Worker's own zone will loop back to the 'front door' of Cloudflare and will
+be treated like a request from the Internet"* → đi qua đúng đường CDN → **nạp
+được edge cache**, đúng thứ edge-warming cần.
+
+Soát bán kính ảnh hưởng trước khi bật (bảng đầy đủ ở
+[plan-hit-rate.md](plan-hit-rate.md) §6.5.1). Điểm an toàn then chốt:
+**`env.SELF` service binding KHÔNG bị ảnh hưởng** — doc nói rõ service
+binding *"without going through a publicly-accessible URL"*, còn flag chỉ chi
+phối **global** `fetch()`. Nhờ vậy toàn bộ fan-out shard home/warm/mirror
+(thứ mọi cron phụ thuộc) chạy y nguyên.
+
+**Thay đổi:** `wrangler.toml` thêm `compatibility_flags`;
+[worker/lib/warm.js](../worker/lib/warm.js) thêm `runEdgeWarm()` +
+`callEdgeWarm()`, gọi cuối `runWarmRefresh` **sau** khi KV đã mới (warm edge
+trước sẽ cache lại body cũ thêm nguyên TTL);
+[worker/index.js](../worker/index.js) thêm route `/__cron/edge-warm` (một
+invocation riêng, ngân sách subrequest riêng — đúng pattern shard sẵn có).
+
+**Thu được:** bỏ hẳn phụ thuộc GitHub Actions, bỏ secret `EDGE_WARM_KEY`,
+và **O5 (WAF Custom Rule) không còn cần** — không còn request nào từ IP
+GitHub để bị challenge. Ít bộ phận chuyển động hơn hẳn cả hai phương án
+trước.
+
+**Chưa gỡ `.github/workflows/edge-warm.yml` ngay** — giữ tới khi xác nhận
+đường CF chạy thật (đọc `edgeWarmed` trong `warm:last-run` sau tick `:00`).
+
+---
 
 ### 2026-08-06 — O1 phần Browser Cache TTL: user đã tự xử lý
 
@@ -472,7 +530,7 @@ mặt thiết kế nhưng biến traffic ảnh đang free thành Worker request 
 | # | Việc | Ai | Chặn |
 |---|---|---|---|
 | ~~O1~~ | ~~Tắt Browser Cache TTL override~~ | — | **User đã tự xử lý** (chuyển "respect existing headers") |
+| ~~O5~~ | ~~WAF Custom Rule cho IP GitHub Actions~~ | — | **Không còn cần** — đã bỏ caller ngoài bằng `global_fetch_strictly_public` |
 | ~~O2~~ | ~~Cron có fire không~~ | — | **Đã đóng** — cron chạy đúng |
 | ~~O3~~ | ~~Giữ tầng `caches.default` không~~ | — | **Đã trả lời** — giữ nguyên |
 | O4 | Quyết: có trả phí Cache Reserve không, nếu Phase 6 xác nhận trần Free ~95% | chủ repo | Phase 7 |
-| **O5** | Tạo WAF Custom Rule (Security → WAF → Custom rules) Skip bot-challenge cho request mang header `x-edge-warm-key: f38dd27b51a8fac9a5236ceb398dbe50fb1df11a86a70a0e` trên path `/api/*` — chi tiết đầy đủ ở nhật ký "Chặn mới phát hiện" phía trên | chủ repo | Phase 5 (nửa `/api/*`) |
