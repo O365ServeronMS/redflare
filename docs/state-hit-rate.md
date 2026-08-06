@@ -117,6 +117,17 @@ chỉ cần commit+push nó. Cho tới lúc đó, nửa ảnh của Phase 5 ho�
 thường; nửa `/api/*` (warm edge cho JSON) chưa có gì gọi
 `/api/warm-targets` — endpoint đã sẵn sàng, chỉ thiếu người gọi định kỳ.
 
+**Verify production (sau deploy 08:1x UTC):** `/api/warm-targets` trả `200`
+ổn định qua nhiều lần gọi, đúng shape — và danh sách trả về đã trộn đúng
+seed + dữ liệu popularity thật (`/api/genre?slug=tam-ly&page=1` xuất hiện —
+chính là URL tôi test ở Phase 4, xác nhận `getTopWarmTargets` hoạt động
+đúng end-to-end). Có một khoảng ngắn ngay sau deploy trả `404 {"error":"Not
+found"}` — deploy propagation lag giữa các colo, tự hết sau vài giây, không
+phải lỗi.
+
+Chưa verify được: ảnh hero trả HIT ngay từ colo lạ (cần đợi tick
+`runHomeRefresh` kế tiếp, tối đa 1 giờ vì cron này chạy hourly).
+
 ---
 
 ### 2026-08-06 — Phase 4: warm set theo popularity
