@@ -1,0 +1,40 @@
+name: Edge warm
+
+# plan-hit-rate.md Phase 5. Re-requests the current warm-set /api/* URLs from
+# GitHub's runners a few minutes after each */30 warm cron tick, so those
+# pages land in the zone CDN's edge cache instead of only in KV. A Worker
+# cannot do this to its OWN custom domain (a self-fetch 522s — see
+# wrangler.toml's [[services]] comment) and the SELF service binding used for
+# the sharded cron routes bypasses the zone CDN entirely, so this has to run
+# from outside Cloudflare. GET /api/warm-targets (worker/index.js,
+# deliberately ungated — no secrets, just which pages are currently warm)
+# supplies the URL list, so this workflow never needs to be updated when the
+# popularity-ranked warm set (Phase 4) changes which 12 pages it names.
+
+on:
+  schedule:
+    # 5 min after the Worker's own */30 warm cron ticks (:00, :30), so the
+    # KV copies this is re-requesting are already fresh.
+    - cron: '5,35 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warm hot pages at the zone edge
+        run: |
+          set -uo pipefail
+          urls=$(curl -sS --max-time 20 "https://phim.bluesia.net/api/warm-targets" | jq -r '.urls[]')
+          if [ -z "$urls" ]; then
+            echo "no URLs returned from /api/warm-targets" >&2
+            exit 1
+          fi
+          fail=0
+          while IFS= read -r u; do
+            [ -z "$u" ] && continue
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$u") || code="curl-error"
+            echo "$code  $u"
+            [ "$code" = "200" ] || fail=1
+          done <<< "$urls"
+          exit "$fail"
