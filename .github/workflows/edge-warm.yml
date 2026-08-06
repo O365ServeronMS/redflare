@@ -7,9 +7,19 @@ name: Edge warm
 # wrangler.toml's [[services]] comment) and the SELF service binding used for
 # the sharded cron routes bypasses the zone CDN entirely, so this has to run
 # from outside Cloudflare. GET /api/warm-targets (worker/index.js,
-# deliberately ungated — no secrets, just which pages are currently warm)
-# supplies the URL list, so this workflow never needs to be updated when the
-# popularity-ranked warm set (Phase 4) changes which 12 pages it names.
+# deliberately ungated — the response has no secrets, just which pages are
+# currently warm) supplies the URL list, so this workflow never needs to be
+# updated when the popularity-ranked warm set (Phase 4) changes which 12
+# pages it names.
+#
+# X-Edge-Warm-Key: measured 2026-08-06 — Cloudflare's bot management serves a
+# "Just a moment..." managed-challenge page to GitHub Actions runner IPs
+# specifically (the same requests succeed from other source IPs), so a plain
+# curl here 403s without this. EDGE_WARM_KEY (repo secret) is a Cloudflare
+# WAF Custom Rule condition, NOT read or checked by the Worker itself — the
+# rule must "Skip" bot management for requests carrying this exact header,
+# scoped to /api/* only. See docs/state-hit-rate.md Phase 5 for the exact
+# rule to create; this workflow can't do anything useful until it exists.
 
 on:
   schedule:
@@ -23,9 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Warm hot pages at the zone edge
+        env:
+          EDGE_WARM_KEY: ${{ secrets.EDGE_WARM_KEY }}
         run: |
           set -uo pipefail
-          resp=$(curl -sS --max-time 20 -w '\n%{http_code}' "https://phim.bluesia.net/api/warm-targets")
+          resp=$(curl -sS --max-time 20 -H "x-edge-warm-key: $EDGE_WARM_KEY" \
+            -w '\n%{http_code}' "https://phim.bluesia.net/api/warm-targets")
           code=$(echo "$resp" | tail -1)
           body=$(echo "$resp" | sed '$d')
           echo "warm-targets responded $code:"
@@ -42,7 +55,8 @@ jobs:
           fail=0
           while IFS= read -r u; do
             [ -z "$u" ] && continue
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$u") || code="curl-error"
+            code=$(curl -sS -o /dev/null -H "x-edge-warm-key: $EDGE_WARM_KEY" \
+              -w '%{http_code}' --max-time 20 "$u") || code="curl-error"
             echo "$code  $u"
             [ "$code" = "200" ] || fail=1
           done <<< "$urls"

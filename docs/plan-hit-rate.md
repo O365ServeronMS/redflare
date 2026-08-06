@@ -499,12 +499,21 @@ Pre-build vào KV vẫn chưa làm nóng **edge**. Bước này làm nóng edge 
   từ runner GitHub — request thật từ bên ngoài Cloudflare, nạp vào CDN edge
   đúng nghĩa "Cache Everywhere".
 
-**Verify:** `node --check` 3 file pass. Chưa verify được ảnh hero trả HIT
-ngay từ request đầu (cần đợi tick `runHomeRefresh` kế tiếp — hourly, tối đa
-1 giờ); chưa verify được workflow GitHub Actions chạy thành công (phụ thuộc
-token có scope `workflow` hay không — xem state-hit-rate.md).
+**Verify:** `node --check` 3 file pass; `/api/warm-targets` trả `200` ổn định
+trên production, danh sách đúng. Chưa verify được ảnh hero trả HIT ngay từ
+request đầu (cần đợi tick `runHomeRefresh` kế tiếp — hourly, tối đa 1 giờ).
+
+**Chặn phát sinh khi chạy thử workflow thật (O5):** Cloudflare bot-management
+trả 403 "Just a moment..." cho IP của GitHub Actions runner cụ thể (cùng
+request từ IP khác vẫn 200) — chặn ở edge, trước khi chạm Worker, không sửa
+được bằng code. Đã chuẩn bị sẵn phần code (`EDGE_WARM_KEY` GitHub secret +
+header `x-edge-warm-key` trên mọi request của workflow); còn thiếu đúng 1
+WAF Custom Rule trên dashboard — chi tiết đầy đủ ở
+[state-hit-rate.md](state-hit-rate.md).
+
 **Rollback:** revert `worker/lib/home.js`/`worker/index.js`; xoá
-`.github/workflows/edge-warm.yml` hoặc tắt trong tab Actions.
+`.github/workflows/edge-warm.yml` hoặc tắt trong tab Actions; xoá GitHub
+secret `EDGE_WARM_KEY` nếu không dùng nữa.
 
 ### Phase 6 — Đo lường tách theo class
 
@@ -566,15 +575,17 @@ là ảo tưởng. Nên chốt mục tiêu Free ở 93–95% và đưa 99% vào 
 
 | # | Câu hỏi | Chặn phase |
 |---|---|---|
-| **O1** | Cấu hình Browser Cache TTL override hiện tại của zone `bluesia.net` là gì, và tắt nó (chuyển "respect origin") được không? **Tôi không đọc/sửa được** — token wrangler chỉ có scope Workers/KV, các MCP Cloudflare khác chưa xác thực. Phạm vi đã thu hẹp: **không còn cần Cache Rules cho Edge TTL** (xem lời giải O3), chỉ còn đúng việc tắt override 1800s. | 1 (một phần) |
+| ~~O1~~ | ~~Browser Cache TTL override~~ | — | **User đã tự xử lý** trên dashboard (chuyển "respect existing headers") |
 | ~~O2~~ | ~~Cron có thật sự fire không?~~ **Đã đóng ở Phase 0** — cron chạy đúng, xem [state-hit-rate.md](state-hit-rate.md). | — |
 | ~~O3~~ | ~~Tầng `caches.default` có còn đáng giữ không?~~ **Đã trả lời** — giữ nguyên, không đổi gì; chỉ đổi header trả về client. Xem §6 Phase 1. | — |
 | **O4** | Có sẵn sàng trả phí cho Cache Reserve nếu Phase 6 chứng minh trần Free là ~95%? | 7 |
+| **O5** | Cloudflare bot-management challenge IP của GitHub Actions runner (đo trực tiếp: 403 "Just a moment...", cùng request từ IP khác thì 200 bình thường). Cần một WAF Custom Rule Skip cho traffic mang header bí mật — chi tiết đầy đủ + giá trị secret ở [state-hit-rate.md](state-hit-rate.md) mục "Chặn mới phát hiện". | 5 (nửa `/api/*`) |
 
-> Về O1/O2: cần cấp thêm token Cloudflare (scope Zone: Cache Purge + Zone
-> Settings + Analytics), hoặc xác thực MCP `cloudflare-api`/`cloudflare-observability`
-> trong một phiên interactive (`claude mcp` / `/mcp`). Phiên hiện tại không chạy
-> được OAuth flow.
+> Về O4/O5: cần quyền Zone dashboard (Security → WAF cho O5, quyết định
+> thương mại cho O4) — cần cấp thêm token Cloudflare scope Zone, hoặc xác
+> thực MCP `cloudflare-api`/`cloudflare-observability` trong một phiên
+> interactive (`claude mcp` / `/mcp`). Phiên hiện tại không chạy được OAuth
+> flow.
 
 ---
 

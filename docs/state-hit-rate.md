@@ -18,7 +18,7 @@ xong chờ deploy — xem bảng phase bên dưới
 | **2** | Bật Tiered Cache (Smart Topology) | 🟢 **Xong** | 2026-08-06 | User đã bật trên dashboard |
 | **3** | Shard mirror drain + dọn ~1.200 ảnh tồn | 🟢 **Deploy xong** | 2026-08-06 | 5x throughput (100/tick thay vì 20/tick); backlog tự dọn dần |
 | **4** | Warm set theo popularity (LRU) | 🟢 **Deploy xong** | 2026-08-06 | Bootstrap qua seed list cũ, chưa có dữ liệu popularity thật |
-| **5** | Edge warming | 🟡 **Nửa ảnh xong (Worker); nửa `/api/*` chờ user thêm GitHub Actions workflow** | 2026-08-06 | File đã sẵn `.github/workflows/edge-warm.yml`, token thiếu scope `workflow` để tôi tự push |
+| **5** | Edge warming | 🟡 **Nửa ảnh xong (Worker); nửa `/api/*` chờ 1 WAF Custom Rule** | 2026-08-06 | Workflow đã lên, nhưng Cloudflare bot-challenge chặn IP của GitHub Actions — cần WAF Skip rule, xem nhật ký |
 | **6** | Đo lường tách theo class | ⚪ Chưa bắt đầu | — | Cần quyền Analytics |
 | **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚪ Chưa quyết | — | Quyết sau Phase 6 |
 | **8** | Dọn nợ khảo sát lộ ra | ⚪ Chưa bắt đầu | — | Làm lúc nào cũng được |
@@ -127,6 +127,45 @@ phải lỗi.
 
 Chưa verify được: ảnh hero trả HIT ngay từ colo lạ (cần đợi tick
 `runHomeRefresh` kế tiếp, tối đa 1 giờ vì cron này chạy hourly).
+
+### 2026-08-06 — Chặn mới phát hiện: Cloudflare bot challenge chặn GitHub Actions
+
+**User đã cấp `workflow` scope, đã add + push `.github/workflows/edge-warm.yml`
+thành công.** Chạy thử bằng `gh workflow run` → **fail**:
+```
+jq: parse error: Invalid numeric literal at line 1, column 10
+```
+Thêm log debug rồi chạy lại → lộ nguyên nhân thật: `/api/warm-targets` trả
+**403 "Just a moment..."** — trang managed challenge (bot protection) của
+Cloudflare, dành riêng cho IP của GitHub Actions runner. Cùng lúc, curl từ
+môi trường của tôi (IP khác) vẫn trả `200` bình thường — xác nhận đây là
+**chấm điểm bot theo uy tín IP** (IP dùng chung của GitHub Actions bị nhiều
+bot/scraper khác lạm dụng nên điểm thấp), không phải chặn toàn bộ `curl`.
+
+**Không tự sửa được** — đây là cấu hình WAF/Bot Management ở cấp **Zone**,
+xảy ra ở edge **trước khi** request chạm tới Worker, nên không có cách nào
+sửa bằng code. Cùng nhóm với O1 (cần quyền Zone dashboard).
+
+**Đã chuẩn bị sẵn phần tôi làm được:**
+1. Tạo secret ngẫu nhiên, lưu vào GitHub Actions secret `EDGE_WARM_KEY`
+   (`gh secret set`, đã xác nhận tồn tại qua `gh secret list`).
+2. Sửa `.github/workflows/edge-warm.yml`: mọi request giờ gửi kèm header
+   `x-edge-warm-key: <secret>`.
+3. Worker **không** đọc/kiểm tra header này — nó chỉ để **WAF Custom Rule**
+   nhận diện và bỏ qua bot-challenge cho đúng traffic của workflow này.
+
+**Việc còn lại — cần user tạo 1 WAF Custom Rule trên dashboard** (Security →
+WAF → Custom rules → Create rule), trên zone `bluesia.net`:
+- **When incoming requests match:**
+  `(http.request.uri.path contains "/api/" and http.request.headers["x-edge-warm-key"][0] eq "f38dd27b51a8fac9a5236ceb398dbe50fb1df11a86a70a0e")`
+- **Then:** action **Skip** → tick tất cả các mục sẵn có (Bot Fight Mode /
+  Super Bot Fight Mode / Managed Rules / Rate limiting — tuỳ mục nào đang
+  bật trên zone, không chắc mục nào đang gây challenge cụ thể nên tick hết
+  cho chắc, an toàn vì chỉ áp dụng cho request có đúng secret header này).
+- Giá trị secret giống hệt giá trị đã lưu trong GitHub Actions secret
+  `EDGE_WARM_KEY` — không cần đổi gì thêm ở phía code/CI sau khi tạo rule.
+
+Sau khi tạo rule, chạy `gh workflow run "Edge warm"` để verify lại.
 
 ---
 
@@ -432,7 +471,8 @@ mặt thiết kế nhưng biến traffic ảnh đang free thành Worker request 
 
 | # | Việc | Ai | Chặn |
 |---|---|---|---|
-| O1 | Tắt Browser Cache TTL override (1800s) trên dashboard, chuyển "respect origin" — phạm vi đã thu hẹp, không còn cần Cache Rules cho Edge TTL (xem O3) | chủ repo | Phase 1 (một phần), 6 |
+| ~~O1~~ | ~~Tắt Browser Cache TTL override~~ | — | **User đã tự xử lý** (chuyển "respect existing headers") |
 | ~~O2~~ | ~~Cron có fire không~~ | — | **Đã đóng** — cron chạy đúng |
 | ~~O3~~ | ~~Giữ tầng `caches.default` không~~ | — | **Đã trả lời** — giữ nguyên |
 | O4 | Quyết: có trả phí Cache Reserve không, nếu Phase 6 xác nhận trần Free ~95% | chủ repo | Phase 7 |
+| **O5** | Tạo WAF Custom Rule (Security → WAF → Custom rules) Skip bot-challenge cho request mang header `x-edge-warm-key: f38dd27b51a8fac9a5236ceb398dbe50fb1df11a86a70a0e` trên path `/api/*` — chi tiết đầy đủ ở nhật ký "Chặn mới phát hiện" phía trên | chủ repo | Phase 5 (nửa `/api/*`) |
