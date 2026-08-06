@@ -421,23 +421,51 @@ KKPhim hôm nay.
 trong home payload → 0 cái trả 404.
 **Rollback:** xoá route shard, quay lại drain đơn.
 
-### Phase 4 — Warm set theo popularity (Cleanup with LRU)
+### Phase 4 — Warm set theo popularity (Cleanup with LRU) *(đã triển khai)*
 
 Đóng ADR-0001 Action Item 5 + 6 ("12 key chọn bằng trực giác" → chọn bằng số
 liệu thật).
 
-- Bảng D1 `popularity(path, hits, last_seen)`, tăng **có lấy mẫu** (1/N request)
-  để giữ ghi D1 trong tầm.
-- Warm set = top-N theo `hits`, N chặn bởi budget 1.000 KV write/ngày
-  (ADR-0001 đã có sẵn số học: 13 slot @ */30 ≈ 76% quota).
-- **LRU eviction:** key rớt khỏi top-N thì xoá khỏi KV — trả lại cả dung lượng
-  lẫn budget ghi.
-- Mở rộng warm set sang `/api/movie/:slug` cho top phim (hiện đang bị loại khỏi
-  `KV_WARM_PATHS`) nếu budget cho phép.
+- ✅ Bảng D1 `popularity(path, hits, last_seen)`
+  ([migrations/0003_popularity.sql](../migrations/0003_popularity.sql)), tăng
+  **có lấy mẫu** (1-trong-10, `trackPopularity` trong
+  [worker/index.js](../worker/index.js)) để giữ ghi D1 trong tầm — dù D1 free
+  tier cho phép 100k rows/ngày (không phải nút thắt thật), lấy mẫu vẫn giữ
+  khối lượng ghi tỉ lệ với mức độ quan tâm thật thay vì raw request count.
+  Chặn thêm ở `page ≤ 10` để số dòng distinct không phình vô hạn theo phân
+  trang sâu/crawler — cùng lo ngại ADR-0001 Action Item 8 đã nêu cho bảng
+  `stale`, áp dụng phòng ngừa ngay từ đầu cho bảng mới này.
+- ✅ Warm set = top-N theo `hits DESC, last_seen DESC`
+  ([worker/lib/warm.js](../worker/lib/warm.js) `getTopWarmTargets`). **N giữ
+  nguyên 12** — Phase này đổi WHICH 12 trang được warm, không đổi BAO NHIÊU
+  (số học ngân sách 1.000 KV write/ngày của ADR-0001 không đổi).
+- **Bootstrap an toàn:** danh sách tĩnh 12 trang cũ (`SEED_TARGETS`) không bị
+  xoá — nó trở thành **hàng dự phòng lấp chỗ trống** khi dữ liệu popularity
+  thật chưa đủ N dòng (chắc chắn đúng ngay sau deploy, khi bảng D1 còn rỗng).
+  Không có bước này, deploy đầu tiên sẽ khiến LRU-eviction xoá sạch 12 trang
+  đang warm ngay lập tức trong lúc dữ liệu thật còn đang tích luỹ — một hồi
+  quy còn tệ hơn chính vấn đề "chọn bằng trực giác" mà phase này sửa. Một
+  entry seed tự động bị dữ liệu thật thay thế khi nó đủ hạng, không cần thao
+  tác gì thêm.
+- ✅ **LRU eviction** (`evictStaleWarmKeys`): key rớt khỏi top-N thì xoá khỏi
+  KV bằng `CATALOG_KV.list({prefix})` + `delete()` — đây là **read** op
+  (ngân sách 100k/ngày), không tính vào ngân sách **write** 1.000/ngày vốn là
+  thứ chặn N, nên xoá không tốn gì thêm.
+- **Chưa làm:** mở rộng warm set sang `/api/movie/:slug`. Không cấp thiết
+  ngay — ngân sách write hiện đã dùng gần hết bởi 12 trang + 1 key meta +
+  phần `meta:*`/`home:current`/`trending:*` khác; mở rộng cần tính lại số
+  học trước (đặc biệt sau khi Phase 8 sửa con số `meta:*` sai trong CLAUDE.md
+  từ ~111 thành 1.886 thật).
 
-**Verify:** `x-catalog-cache: warm` trên các page trong warm set; `/api/health`
-báo `written/skipped/failed`; KV write/ngày khớp số học.
-**Rollback:** quay lại danh sách tĩnh trong `warm.js`.
+**Verify:** `node --check` cả hai file pass; migration `0003_popularity.sql`
+đã apply lên D1 production (`wrangler d1 migrations apply --remote`, xác nhận
+bảng tồn tại qua `sqlite_master`). Chưa verify được `x-catalog-cache: warm`
+thật hay ranking dịch chuyển theo traffic — cần đợi traffic thật tích luỹ đủ
+mẫu qua nhiều chu kỳ `*/30`.
+**Rollback:** revert `worker/lib/warm.js` + `worker/index.js` về commit
+trước — `SEED_TARGETS` (danh sách tĩnh cũ) vẫn còn nguyên trong code nên
+không mất thông tin gì khi rollback. Bảng `popularity` có thể để nguyên
+không dùng, không cần xoá (không ảnh hưởng đường code cũ).
 
 ### Phase 5 — Edge warming (Render Once → Cache **Everywhere**)
 

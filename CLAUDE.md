@@ -177,8 +177,10 @@ if the Git integration is disconnected/reconnected. Don't remove it.
   <tập>"`, `artist` = `Film Bluesia`, `artwork` = the w500 poster. Without
   it iOS falls back to `document.title` + favicon. Keep the title short —
   it's the only line iOS reliably shows).
-- **`migrations/`** — the D1 schema: `0001_stale.sql`, `0002_recs_idx_mirror.sql`.
-  Source of truth for the 5 tables described under "Caching layers" #4.
+- **`migrations/`** — the D1 schema: `0001_stale.sql`, `0002_recs_idx_mirror.sql`,
+  `0003_popularity.sql`. Source of truth for the 6 tables described under
+  "Caching layers" #4. Not applied automatically by any build step —
+  `wrangler d1 migrations apply redflare-db --remote` by hand.
 - **`src/styles/`** — `variables.css` (CSS custom props), `global.css`,
   `components.css` (the bulk, still monolithic). Class naming is BEM-ish:
   `block__element--modifier`.
@@ -458,7 +460,7 @@ name. Expect the two to disagree occasionally.
    entries (14-day TTL) written by `worker/lib/enrich.js`. `/api/home-data`
    reads `home:current` directly — no build happens on that request path at
    all, see below.
-4. **D1** (`redflare-db`) — 5 tables, all live: `stale` (last-known-good copy
+4. **D1** (`redflare-db`) — 6 tables, all live: `stale` (last-known-good copy
    per path for list/genre/country/movie/recommendation, upserted on every
    successful build — this is what would get served if OPhim/TMDB itself were
    ever unreachable, `x-catalog-cache: stale-vps-down` despite the header name
@@ -468,7 +470,10 @@ name. Expect the two to disagree occasionally.
    possible without a full OPhim search); `recs` (TMDB recommendation
    results, TTL by **result completeness**, not just presence — see
    "Recommendation cache TTL" below); `mirrored` + `mirror_queue` (R2
-   image-mirror bookkeeping, see "Images" above).
+   image-mirror bookkeeping, see "Images" above); `popularity` (sampled
+   request counts per canonical `/api/list|genre|country` cache key —
+   `worker/index.js` `trackPopularity`, drives which pages `worker/lib/warm.js`
+   keeps warm, see `docs/plan-hit-rate.md` Phase 4).
 5. **Cloudflare edge** — assets only (`dist/`), plus whatever CDN caching R2
    applies to images. `/api/*` JSON never reaches this layer as a distinct
    cache — that's the Cache API above (also edge-backed, but addressed

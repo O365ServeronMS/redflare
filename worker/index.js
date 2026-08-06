@@ -96,7 +96,7 @@ import {
   ttlForTier,
 } from './lib/recommendation.js';
 import { enqueueMirror, drainMirrorQueueShard, runMirrorRefresh } from './lib/mirror.js';
-import { WARM_TARGETS, WARM_META_KEY, runWarmShard, runWarmRefresh } from './lib/warm.js';
+import { WARM_SET_SIZE, WARM_META_KEY, runWarmShard, runWarmRefresh } from './lib/warm.js';
 
 const KKPHIM_BASE = 'https://phimapi.com';
 
@@ -583,7 +583,7 @@ async function handleHealth(env) {
         failed: meta.failed,
       };
       if (ageMs > WARM_MAX_AGE_MS) problems.push(`warm:last-run is ${Math.round(ageMs / 60000)}min old`);
-      if (meta.failed >= WARM_TARGETS.length) {
+      if (meta.failed >= WARM_SET_SIZE) {
         problems.push(`warm cron failed all ${meta.failed} targets on its last run`);
       }
     }
@@ -708,6 +708,38 @@ function canonicalCacheKey(url) {
 const KV_WARM_PATHS = new Set(['/api/list', '/api/genre', '/api/country']);
 const KV_WARM_PREFIX = 'page:v1:';
 
+// --- Popularity tracking (plan-hit-rate.md Phase 4) --------------------------
+// D1 `popularity` (migrations/0003_popularity.sql) — feeds warm.js's
+// getTopWarmTargets, which ranks the warm set by real traffic instead of the
+// static guess ADR-0001 Action Item 5 flagged as a placeholder. Sampled at
+// 1-in-POPULARITY_SAMPLE_RATE (D1's free-plan write budget is 100k rows/day,
+// far above what's needed here, but sampling keeps write VOLUME proportional
+// to real interest rather than raw request count, and costs nothing to do).
+// Capped at POPULARITY_MAX_PAGE to keep the table's distinct-row count
+// bounded — deep pagination pages are never worth warming, and an unbounded
+// table here would repeat the exact unbounded-D1-growth problem flagged for
+// `stale` in ADR-0001 Action Item 8.
+const POPULARITY_SAMPLE_RATE = 10;
+const POPULARITY_MAX_PAGE = 10;
+
+async function trackPopularity(env, pathname, cacheKey) {
+  if (!KV_WARM_PATHS.has(pathname)) return;
+  if (Math.floor(Math.random() * POPULARITY_SAMPLE_RATE) !== 0) return;
+  const pageMatch = cacheKey.match(/[?&]page=(\d+)/);
+  const page = pageMatch ? Number(pageMatch[1]) : 1;
+  if (page > POPULARITY_MAX_PAGE) return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO popularity (path, hits, last_seen) VALUES (?1, 1, ?2)
+       ON CONFLICT(path) DO UPDATE SET hits = hits + 1, last_seen = excluded.last_seen`
+    )
+      .bind(cacheKey, Date.now())
+      .run();
+  } catch (err) {
+    console.error('[popularity]', cacheKey, err.message);
+  }
+}
+
 async function warmKvLookup(env, ctx, cache, cacheReq, cacheKey, pathname, ttl, method) {
   if (!KV_WARM_PATHS.has(pathname)) return null;
   let body;
@@ -755,6 +787,9 @@ async function handleApi(request, env, ctx, url) {
   const cache = caches.default;
   const cacheKey = canonicalCacheKey(url);
   const cacheReq = new Request(url.origin + cacheKey, { method: 'GET' });
+  // Counts every request (hit and miss alike) — popularity ranks real
+  // traffic volume, not rebuild frequency. Fire-and-forget, sampled.
+  ctx.waitUntil(trackPopularity(env, url.pathname, cacheKey));
 
   const hit = await cache.match(cacheReq);
   if (hit) {

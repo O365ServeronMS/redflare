@@ -17,7 +17,7 @@ xong chờ deploy — xem bảng phase bên dưới
 | **1** | Bỏ `s-maxage`, bật `stale-while-revalidate` | 🟢 **Deploy xong, verify production OK** | 2026-08-06 | Còn 1 phần chặn O1 (Browser TTL override) |
 | **2** | Bật Tiered Cache (Smart Topology) | 🟢 **Xong** | 2026-08-06 | User đã bật trên dashboard |
 | **3** | Shard mirror drain + dọn ~1.200 ảnh tồn | 🟢 **Deploy xong** | 2026-08-06 | 5x throughput (100/tick thay vì 20/tick); backlog tự dọn dần |
-| **4** | Warm set theo popularity (LRU) | ⚪ Chưa bắt đầu | — | Cần Phase 0 xong trước |
+| **4** | Warm set theo popularity (LRU) | 🟢 **Deploy xong** | 2026-08-06 | Bootstrap qua seed list cũ, chưa có dữ liệu popularity thật |
 | **5** | Edge warming | ⚪ Chưa bắt đầu | — | **Bắt buộc sau Phase 2** |
 | **6** | Đo lường tách theo class | ⚪ Chưa bắt đầu | — | Cần quyền Analytics |
 | **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚪ Chưa quyết | — | Quyết sau Phase 6 |
@@ -61,6 +61,55 @@ npx wrangler d1 execute redflare-db --remote --command "SELECT (SELECT COUNT(*) 
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-06 — Phase 4: warm set theo popularity
+
+**Thay đổi:** migration mới
+[migrations/0003_popularity.sql](../migrations/0003_popularity.sql) (bảng
+`popularity(path, hits, last_seen)`), đã `apply --remote` lên D1 production.
+[worker/index.js](../worker/index.js) — thêm `trackPopularity()`, gọi ở đầu
+`handleApi` (đếm mọi request list/genre/country, cả hit lẫn miss, lấy mẫu
+1-trong-10, chặn ở `page ≤ 10`). [worker/lib/warm.js](../worker/lib/warm.js)
+— viết lại: `WARM_TARGETS` (mảng tĩnh) → `getTopWarmTargets()` (truy vấn D1
+DESC theo `hits`, lấp chỗ trống bằng `SEED_TARGETS` — chính là danh sách tĩnh
+12 trang cũ, giữ lại làm hàng dự phòng); thêm `evictStaleWarmKeys()` (LRU).
+
+**Quyết định thiết kế quan trọng nhất: không xoá danh sách tĩnh cũ, biến nó
+thành seed/fallback.** Nếu chuyển thẳng sang 100% dữ liệu D1 mà không có
+fallback, deploy đầu tiên (bảng `popularity` rỗng) sẽ khiến
+`getTopWarmTargets` trả về mảng rỗng → LRU eviction xoá sạch 12 `page:v1:*`
+key đang warm ngay lập tức, trong khi dữ liệu thật cần nhiều chu kỳ để tích
+luỹ đủ N=12 dòng có ý nghĩa. Giải pháp: D1 top-N được ưu tiên trước
+(`ORDER BY hits DESC`), phần còn thiếu mới lấp bằng seed — seed không tham
+gia sắp hạng theo `hits` nên tự động bị dữ liệu thật đẩy ra khi đủ điều
+kiện, không cần thao tác thủ công nào.
+
+**Quyết định: partition SELECT lại theo mỗi shard, không truyền qua HTTP
+body.** Giống pattern `home.js`/`warm.js` sẵn có — mỗi lần gọi
+`/__cron/warm-shard/:n` là một invocation độc lập, tự truy vấn D1 top-N rồi
+lấy phần tử thứ `n`. Có rủi ro nhỏ: nếu ranking đổi giữa lúc shard 0 và shard
+11 gọi (vài giây), có thể lệch — chấp nhận được vì chu kỳ 30 phút tự làm lại
+từ đầu mỗi lần, không cộng dồn sai số.
+
+**Quyết định: LRU eviction dùng `KV.list()` (read), không dùng bookkeeping
+key riêng.** Đơn giản hơn (không cần lưu trạng thái "danh sách cũ" giữa các
+chu kỳ) và tự lành nếu một chu kỳ trước ghi bookkeeping thất bại.
+`KV.list()` tính vào ngân sách đọc 100k/ngày, tách biệt hoàn toàn với ngân
+sách ghi 1.000/ngày vốn là thứ chặn N=12 — xoá không tốn gì thêm.
+
+**Chưa mở rộng sang `/api/movie/:slug`** như plan gốc gợi ý "nếu budget cho
+phép" — chưa xác nhận budget thật còn dư bao nhiêu (con số `meta:*` trong
+CLAUDE.md sai 17× so với thực tế đo được ở Phase 0, chưa sửa — xem Phase 8),
+nên không mở rộng cho tới khi có số đúng.
+
+**Trạng thái: migration đã apply, code đã deploy, `node --check` pass.**
+Chưa verify được `x-catalog-cache: warm` thật trên production hay ranking
+dịch chuyển theo traffic — bảng `popularity` vừa tạo, cần nhiều chu kỳ `*/30`
+để tích luỹ đủ mẫu có ý nghĩa. Ngay sau deploy, hành vi warm set **không đổi**
+so với trước (toàn bộ 12 slot vẫn là seed cũ, vì D1 chưa có dữ liệu) — đúng
+như thiết kế bootstrap, không phải bug.
+
+---
 
 ### 2026-08-06 — Phase 3: shard mirror drain
 

@@ -43,17 +43,13 @@ import { mapItemsImages } from './images.js';
 const KKPHIM_BASE = 'https://phimapi.com';
 export const KV_WARM_PREFIX = 'page:v1:';
 
-// Placeholder warm set (ADR-0001 Action Item 5): the 5 list types are fixed
-// (they're literally all of them), but the 4 genre + 3 country slugs were
-// picked from slug frequency across the last known-good home payload
-// (2026-08-06) as a stand-in for real traffic data, which doesn't exist yet
-// — there is no analytics pipeline in this project. Swap these for
-// traffic-ranked slugs once real numbers exist; nothing else about this
-// file needs to change to do that, just this list. 5 + 4 + 3 = 12 keys,
-// matching ADR-0001's chosen warm-set size.
-const WARM_LIST_TYPES = ['phim-moi-cap-nhat', 'phim-le', 'phim-bo', 'hoat-hinh', 'tv-shows'];
-const WARM_GENRE_SLUGS = ['chinh-kich', 'phieu-luu', 'hanh-dong', 'vien-tuong'];
-const WARM_COUNTRY_SLUGS = ['au-my', 'trung-quoc', 'han-quoc'];
+// Warm-set SIZE stays fixed at 12 (ADR-0001's KV-write-budget arithmetic —
+// 12 pages + 1 meta key = 13 slots at */30 cadence, ~76% of the 1,000
+// writes/day free-plan cap; see that ADR's "Trade-off analysis" for the
+// numbers). What changed in plan-hit-rate.md Phase 4 is WHICH 12 —
+// previously a static guess (ADR-0001 Action Item 5), now ranked by real
+// sampled traffic (worker/index.js `popularity` table / trackPopularity).
+export const WARM_SET_SIZE = 12;
 
 // Builds the page:v1:* key the SAME way worker/index.js's canonicalCacheKey
 // builds it for a real request with these params — MUST stay in lockstep
@@ -66,23 +62,86 @@ function pageKey(pathname, params) {
   return `${pathname}?${sp.toString()}`;
 }
 
-export const WARM_TARGETS = [
-  ...WARM_LIST_TYPES.map((type) => ({
-    key: pageKey('/api/list', [['type', type], ['page', '1']]),
-    upstream:
-      type === 'phim-moi-cap-nhat'
-        ? `${KKPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=1`
-        : `${KKPHIM_BASE}/v1/api/danh-sach/${type}?page=1`,
-  })),
-  ...WARM_GENRE_SLUGS.map((slug) => ({
-    key: pageKey('/api/genre', [['slug', slug], ['page', '1']]),
-    upstream: `${KKPHIM_BASE}/v1/api/the-loai/${slug}?page=1`,
-  })),
-  ...WARM_COUNTRY_SLUGS.map((slug) => ({
-    key: pageKey('/api/country', [['slug', slug], ['page', '1']]),
-    upstream: `${KKPHIM_BASE}/v1/api/quoc-gia/${slug}?page=1`,
-  })),
+// Original placeholder set (ADR-0001 Action Item 5, before real traffic data
+// existed) — kept as a SEED/fallback, not the primary source anymore. Used
+// by getTopWarmTargets to fill slots real popularity data hasn't reached
+// yet. Without this fallback, a fresh deploy (empty `popularity` table)
+// would instantly evict every currently-warm page via the Phase 4 LRU
+// cleanup below while sampled data accumulates — a regression far worse
+// than the stale-intuition problem this phase exists to fix. A seed entry
+// is displaced automatically once real popularity data outranks it (see
+// getTopWarmTargets — real rows always sort ahead of seed filler).
+const SEED_LIST_TYPES = ['phim-moi-cap-nhat', 'phim-le', 'phim-bo', 'hoat-hinh', 'tv-shows'];
+const SEED_GENRE_SLUGS = ['chinh-kich', 'phieu-luu', 'hanh-dong', 'vien-tuong'];
+const SEED_COUNTRY_SLUGS = ['au-my', 'trung-quoc', 'han-quoc'];
+
+const SEED_TARGETS = [
+  ...SEED_LIST_TYPES.map((type) => pageKey('/api/list', [['type', type], ['page', '1']])),
+  ...SEED_GENRE_SLUGS.map((slug) => pageKey('/api/genre', [['slug', slug], ['page', '1']])),
+  ...SEED_COUNTRY_SLUGS.map((slug) => pageKey('/api/country', [['slug', slug], ['page', '1']])),
 ];
+
+// Reconstructs a KKPhim upstream URL from a canonical cache key (the same
+// string worker/index.js's canonicalCacheKey() produces) — the general
+// counterpart to worker/index.js's localBuilder, needed now that warm
+// targets come from real traffic (any page number, any slug) instead of a
+// fixed list. Self-contained on purpose, same as the rest of this file (see
+// module comment) — mirrors localBuilder's list/genre/country branches only
+// (movie/search are never warmable, see worker/index.js KV_WARM_PATHS).
+function upstreamForCacheKey(cacheKey) {
+  const qIdx = cacheKey.indexOf('?');
+  const pathname = qIdx === -1 ? cacheKey : cacheKey.slice(0, qIdx);
+  const params = new URLSearchParams(qIdx === -1 ? '' : cacheKey.slice(qIdx + 1));
+  const page = params.get('page') || '1';
+
+  if (pathname === '/api/list') {
+    const type = params.get('type') || '';
+    if (!type) return null;
+    return type === 'phim-moi-cap-nhat'
+      ? `${KKPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=${page}`
+      : `${KKPHIM_BASE}/v1/api/danh-sach/${type}?page=${page}`;
+  }
+  if (pathname === '/api/genre') {
+    const slug = params.get('slug') || '';
+    return slug ? `${KKPHIM_BASE}/v1/api/the-loai/${slug}?page=${page}` : null;
+  }
+  if (pathname === '/api/country') {
+    const slug = params.get('slug') || '';
+    return slug ? `${KKPHIM_BASE}/v1/api/quoc-gia/${slug}?page=${page}` : null;
+  }
+  return null;
+}
+
+// Ranks D1 `popularity` DESC by (sampled) hit count, then fills any
+// remaining slots from SEED_TARGETS (skipping duplicates) — see the module
+// comment on SEED_TARGETS for why the fallback exists. Called independently
+// by each shard invocation (to pick its own index `n`) AND once by the
+// orchestrator (for LRU eviction) — no state threading between them, same
+// "each invocation is self-sufficient" shape as the rest of this pattern.
+// A popularity row that changes rank between two calls a few seconds apart
+// is a non-issue: the next 30-minute cycle re-ranks from scratch regardless.
+async function getTopWarmTargets(env, limit) {
+  let ranked = [];
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT path FROM popularity ORDER BY hits DESC, last_seen DESC LIMIT ?1'
+    )
+      .bind(limit)
+      .all();
+    ranked = (results || []).map((r) => r.path);
+  } catch (e) {
+    console.error('[warm popularity]', e.message);
+  }
+  const seen = new Set(ranked);
+  for (const seed of SEED_TARGETS) {
+    if (ranked.length >= limit) break;
+    if (!seen.has(seed)) {
+      ranked.push(seed);
+      seen.add(seed);
+    }
+  }
+  return ranked.slice(0, limit);
+}
 
 function httpError(message, status) {
   return Object.assign(new Error(message), { status });
@@ -122,11 +181,17 @@ async function buildListPayload(env, upstreamUrl) {
 // — same side effect every other build path already has, just orchestrated
 // one layer up here since this file has no ExecutionContext of its own.
 export async function runWarmShard(env, n) {
-  const target = WARM_TARGETS[n];
+  const targets = await getTopWarmTargets(env, WARM_SET_SIZE);
+  const target = targets[n];
   if (!target) return { status: 'not-found' };
-  const kvKey = KV_WARM_PREFIX + target.key;
+  const upstream = upstreamForCacheKey(target);
+  if (!upstream) {
+    console.error('[warm shard]', n, target, 'unrecognized cache key');
+    return { key: target, status: 'failed', error: 'unrecognized cache key' };
+  }
+  const kvKey = KV_WARM_PREFIX + target;
   try {
-    const payload = await buildListPayload(env, target.upstream);
+    const payload = await buildListPayload(env, upstream);
     const body = JSON.stringify(payload);
     const d = payload?.data || payload;
     const items = d?.items || [];
@@ -135,15 +200,15 @@ export async function runWarmShard(env, n) {
     // the 12-key warm set well under its worst-case 576 writes/day (see
     // ADR-0001's arithmetic).
     const existing = await env.CATALOG_KV.get(kvKey);
-    if (existing === body) return { key: target.key, status: 'skipped', bytes: body.length, items };
+    if (existing === body) return { key: target, status: 'skipped', bytes: body.length, items };
     await env.CATALOG_KV.put(kvKey, body);
-    return { key: target.key, status: 'written', bytes: body.length, items };
+    return { key: target, status: 'written', bytes: body.length, items };
   } catch (err) {
     // Deliberately don't touch kvKey — a stale-but-real warm copy beats no
     // warm copy at all. warmKvLookup() keeps serving whatever's already
     // there until a later cycle succeeds.
-    console.error('[warm shard]', n, target.key, err.message);
-    return { key: target.key, status: 'failed', error: err.message };
+    console.error('[warm shard]', n, target, err.message);
+    return { key: target, status: 'failed', error: err.message };
   }
 }
 
@@ -172,11 +237,39 @@ async function callWarmShard(env, n) {
 // alongside the 12 page targets.
 export const WARM_META_KEY = 'warm:last-run';
 
+// Cleanup with LRU (plan-hit-rate.md Phase 4): delete any page:v1:* KV key
+// that has fallen out of the current top-WARM_SET_SIZE ranking. Without
+// this, a page that stops being popular keeps serving an ever-staler warm
+// copy forever — warmKvLookup has no TTL of its own on that key, it just
+// sits in KV until something overwrites it, and nothing else ever will once
+// it's no longer a warm target. `list()` is a READ op (100k/day budget,
+// distinct from the 1,000/day WRITE budget that caps WARM_SET_SIZE itself),
+// so eviction is free against the constraint that actually matters here.
+async function evictStaleWarmKeys(env, keepTargets) {
+  const keep = new Set(keepTargets.map((t) => KV_WARM_PREFIX + t));
+  let evicted = 0;
+  try {
+    const list = await env.CATALOG_KV.list({ prefix: KV_WARM_PREFIX });
+    for (const k of list.keys) {
+      if (!keep.has(k.name)) {
+        await env.CATALOG_KV.delete(k.name);
+        evicted++;
+      }
+    }
+  } catch (e) {
+    console.error('[warm lru]', e.message);
+  }
+  return evicted;
+}
+
 export async function runWarmRefresh(env) {
   const results = [];
-  for (let n = 0; n < WARM_TARGETS.length; n++) {
+  for (let n = 0; n < WARM_SET_SIZE; n++) {
     results.push(await callWarmShard(env, n));
   }
+  const currentTargets = await getTopWarmTargets(env, WARM_SET_SIZE);
+  const evicted = await evictStaleWarmKeys(env, currentTargets);
+
   const summary = { written: 0, skipped: 0, failed: 0 };
   for (const r of results) {
     if (r.status === 'written') summary.written++;
@@ -186,6 +279,7 @@ export async function runWarmRefresh(env) {
   const meta = {
     ranAt: Date.now(),
     ...summary,
+    evicted,
     targets: results.map(({ items, ...rest }) => rest),
   };
   // Best-effort: if THIS write is what's failing (e.g. the 1,000/day KV
@@ -197,6 +291,6 @@ export async function runWarmRefresh(env) {
   } catch (e) {
     console.error('[warm meta put]', e.message);
   }
-  console.log('[warm refresh]', summary);
+  console.log('[warm refresh]', { ...summary, evicted });
   return meta;
 }
