@@ -467,23 +467,44 @@ trước — `SEED_TARGETS` (danh sách tĩnh cũ) vẫn còn nguyên trong code
 không mất thông tin gì khi rollback. Bảng `popularity` có thể để nguyên
 không dùng, không cần xoá (không ảnh hưởng đường code cũ).
 
-### Phase 5 — Edge warming (Render Once → Cache **Everywhere**)
+### Phase 5 — Edge warming (Render Once → Cache **Everywhere**) *(đã triển khai)*
 
 Pre-build vào KV vẫn chưa làm nóng **edge**. Bước này làm nóng edge thật.
 
 > **Ràng buộc quan trọng:** Worker **không thể** tự fetch hostname của chính nó
 > (`phim.bluesia.net` → 522, đã ghi trong CLAUDE.md), và `SELF` service binding
 > **đi vòng qua CDN** nên không làm nóng edge được. → **Warm `/api/*` bắt buộc
-> phải gọi từ bên ngoài** (GitHub Actions, hoặc `monitor.bluesia.net` đã có sẵn).
-> Warm **ảnh** thì Worker tự làm được, vì `img.bluesia.net` là hostname khác.
+> phải gọi từ bên ngoài** (GitHub Actions). Warm **ảnh** thì Worker tự làm
+> được, vì `img.bluesia.net` là hostname khác.
 
-- Ảnh: cron fetch top-N ảnh nóng qua `https://img.bluesia.net/...` → nạp vào
-  upper tier. **Chỉ có ý nghĩa sau Phase 2** (không Tiered Cache thì chỉ nóng
-  đúng colo chạy cron).
-- `/api/*`: workflow ngoài, gọi tập page nóng sau mỗi lần cron rebuild.
+- ✅ **Ảnh** ([worker/lib/home.js](../worker/lib/home.js) `warmHeroImages`):
+  sau mỗi lần `runHomeRefresh` thành công, fetch trực tiếp
+  `https://img.bluesia.net/...` cho ~22 URL — 20 rail-thumb (`w154`, **mọi**
+  lượt xem trang chủ đều load, không qua lazy-gate) + 2 backdrop đầu tiên
+  (`w1280`, đúng số lượng `ensureBackdrop()` load ngay). Đây **chính là** tập
+  ảnh bị đo là MISS ở baseline ban đầu (§1.2) dù có header `immutable` 1 năm
+  — cố định TTL không giúp gì khi nguyên nhân là LRU evict, phải warm lặp
+  lại. Cần **Phase 2 (Tiered Cache) đã bật** thì mới lan ra ngoài 1 colo,
+  đúng như cảnh báo gốc.
+- ✅ **`/api/*`**: thêm route công khai (không gate CRON_KEY, giống
+  `/api/health` — chỉ lộ "đang warm trang nào", không có gì nhạy cảm)
+  `GET /api/warm-targets` ([worker/index.js](../worker/index.js)
+  `handleWarmTargets`) trả về URL đầy đủ của home-data + toàn bộ warm set
+  hiện tại (đọc trực tiếp từ `getTopWarmTargets`, tự động theo kịp khi Phase
+  4 đổi ranking — workflow không cần sửa khi warm set đổi). GitHub Actions
+  workflow mới
+  ([.github/workflows/edge-warm.yml](../.github/workflows/edge-warm.yml)),
+  chạy phút `:05`/`:35` (5 phút sau tick `*/30` của Worker, đủ để KV có dữ
+  liệu mới), gọi `/api/warm-targets` lấy danh sách rồi `curl` từng URL thật
+  từ runner GitHub — request thật từ bên ngoài Cloudflare, nạp vào CDN edge
+  đúng nghĩa "Cache Everywhere".
 
-**Verify:** ảnh hero trang chủ trả HIT ngay từ request đầu tiên ở colo lạ.
-**Rollback:** xoá cron/workflow.
+**Verify:** `node --check` 3 file pass. Chưa verify được ảnh hero trả HIT
+ngay từ request đầu (cần đợi tick `runHomeRefresh` kế tiếp — hourly, tối đa
+1 giờ); chưa verify được workflow GitHub Actions chạy thành công (phụ thuộc
+token có scope `workflow` hay không — xem state-hit-rate.md).
+**Rollback:** revert `worker/lib/home.js`/`worker/index.js`; xoá
+`.github/workflows/edge-warm.yml` hoặc tắt trong tab Actions.
 
 ### Phase 6 — Đo lường tách theo class
 

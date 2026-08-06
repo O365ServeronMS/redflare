@@ -18,7 +18,7 @@ xong chờ deploy — xem bảng phase bên dưới
 | **2** | Bật Tiered Cache (Smart Topology) | 🟢 **Xong** | 2026-08-06 | User đã bật trên dashboard |
 | **3** | Shard mirror drain + dọn ~1.200 ảnh tồn | 🟢 **Deploy xong** | 2026-08-06 | 5x throughput (100/tick thay vì 20/tick); backlog tự dọn dần |
 | **4** | Warm set theo popularity (LRU) | 🟢 **Deploy xong** | 2026-08-06 | Bootstrap qua seed list cũ, chưa có dữ liệu popularity thật |
-| **5** | Edge warming | ⚪ Chưa bắt đầu | — | **Bắt buộc sau Phase 2** |
+| **5** | Edge warming | 🟡 **Nửa ảnh xong (Worker); nửa `/api/*` chờ user thêm GitHub Actions workflow** | 2026-08-06 | File đã sẵn `.github/workflows/edge-warm.yml`, token thiếu scope `workflow` để tôi tự push |
 | **6** | Đo lường tách theo class | ⚪ Chưa bắt đầu | — | Cần quyền Analytics |
 | **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚪ Chưa quyết | — | Quyết sau Phase 6 |
 | **8** | Dọn nợ khảo sát lộ ra | ⚪ Chưa bắt đầu | — | Làm lúc nào cũng được |
@@ -61,6 +61,63 @@ npx wrangler d1 execute redflare-db --remote --command "SELECT (SELECT COUNT(*) 
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-06 — O1 phần Browser Cache TTL: user đã tự xử lý
+
+User xác nhận đã chuyển Browser Cache TTL trên dashboard sang "respect
+existing headers" (tương đương "respect origin" trong ADR-0001/plan). Phần
+còn lại của O1 (Cache Rules cho Edge TTL) đã không còn cần thiết từ quyết
+định O3 ở Phase 1 — nghĩa là **O1 coi như đóng** cho mục đích của plan này.
+Chưa tự verify lại bằng curl (không có gì mới để đo — thay đổi này ảnh hưởng
+browser cache, không đổi response header quan sát được qua curl).
+
+### 2026-08-06 — Phase 5: edge warming
+
+**Thay đổi:**
+- [worker/lib/home.js](../worker/lib/home.js) — thêm `heroImageWarmUrls()` +
+  `warmHeroImages()`, gọi cuối `runHomeRefresh()` sau khi ghi KV thành công.
+  Warm ~22 URL: 2 backdrop `w1280` đầu (khớp `ensureBackdrop()`) + 20 rail
+  thumb `w154` (khớp `HeroSlider.js` `toRailSize()`, mọi lượt xem đều load).
+- [worker/lib/warm.js](../worker/lib/warm.js) — export `getTopWarmTargets`
+  (trước là hàm nội bộ).
+- [worker/index.js](../worker/index.js) — thêm route công khai (không gate
+  CRON_KEY) `GET /api/warm-targets`, trả URL đầy đủ của home-data + warm set
+  hiện tại.
+- [.github/workflows/edge-warm.yml](../.github/workflows/edge-warm.yml) —
+  workflow mới, chạy `:05`/`:35` mỗi giờ, gọi `/api/warm-targets` rồi curl
+  từng URL thật.
+
+**Quyết định thiết kế: `/api/warm-targets` không gate CRON_KEY.** Giống tiền
+lệ `/api/health` (comment gốc: "exposes counts only") — endpoint này chỉ lộ
+"đang warm trang nào", không có gì nhạy cảm, và để ungate thì GitHub Actions
+workflow không cần biết `CRON_KEY` (không cần thêm GitHub Secret nào).
+
+**Quyết định: warm ảnh nằm trong Worker, warm `/api/*` nằm ngoài (GitHub
+Actions).** Bắt buộc bởi giới hạn nền tảng: Worker fetch chính hostname của
+nó (`phim.bluesia.net`) luôn trả 522 (đã ghi trong `wrangler.toml`), và
+`SELF` service binding đi thẳng vào handler, bỏ qua CDN — cả hai cách nội bộ
+đều không thể nạp vào edge cache thật. `img.bluesia.net` là hostname khác
+nên Worker fetch nó bình thường, không bị 522.
+
+**Xảy ra đúng như lo ngại:** push bị GitHub từ chối —
+`refusing to allow an OAuth App to create or update workflow
+.github/workflows/edge-warm.yml without workflow scope`. Token hiện tại
+(`gh auth status`) chỉ có `gist, read:org, repo`, thiếu `workflow`.
+
+**Xử lý:** tách commit — phần Worker (warm ảnh trong `home.js`, endpoint
+`/api/warm-targets`) **không phụ thuộc** GitHub Actions nên push/deploy bình
+thường. File `.github/workflows/edge-warm.yml` giữ nguyên trên đĩa
+(untracked, chưa commit) — cần **user tự thêm** bằng một trong hai cách:
+1. `gh auth refresh -s workflow` rồi để tôi push lại, hoặc
+2. Tự `git add .github/workflows/edge-warm.yml && git commit && git push` từ
+   máy user (token cá nhân thường có sẵn scope `workflow`).
+
+File đã sẵn sàng tại `.github/workflows/edge-warm.yml`, không cần viết lại —
+chỉ cần commit+push nó. Cho tới lúc đó, nửa ảnh của Phase 5 hoạt động bình
+thường; nửa `/api/*` (warm edge cho JSON) chưa có gì gọi
+`/api/warm-targets` — endpoint đã sẵn sàng, chỉ thiếu người gọi định kỳ.
+
+---
 
 ### 2026-08-06 — Phase 4: warm set theo popularity
 

@@ -120,7 +120,12 @@ function upstreamForCacheKey(cacheKey) {
 // "each invocation is self-sufficient" shape as the rest of this pattern.
 // A popularity row that changes rank between two calls a few seconds apart
 // is a non-issue: the next 30-minute cycle re-ranks from scratch regardless.
-async function getTopWarmTargets(env, limit) {
+// Exported for /api/warm-targets (worker/index.js, plan-hit-rate.md Phase 5)
+// — the read side an external caller (GitHub Actions, since a Worker can't
+// warm its OWN edge cache the way it can warm img.bluesia.net's, see
+// home.js's module comment on why) polls to know which /api/* URLs to
+// re-request into the zone edge after each warm cycle.
+export async function getTopWarmTargets(env, limit) {
   let ranked = [];
   try {
     const { results } = await env.DB.prepare(

@@ -237,6 +237,62 @@ async function callShard(env, n) {
   return res.text();
 }
 
+// --- Hero image edge-warming (plan-hit-rate.md Phase 5) ---------------------
+// Render Once already covers the JSON (home:current above); this covers the
+// IMAGES that JSON points at. Scoped deliberately narrow: the 20 hero-rail
+// thumbnails (HeroSlider.js's toRailSize, w154) are requested by EVERY home
+// page view with no lazy-load gate, and the first 2 backdrops (w1280) are
+// what ensureBackdrop() loads immediately (active slide + one idle-prefetched
+// neighbor) — see CLAUDE.md "Lazy loading" for why the other ~18 backdrops
+// stay unloaded until the user navigates, and therefore aren't worth warming
+// here. These ~22 URLs were exactly what the original investigation measured
+// as MISS on `img.bluesia.net` despite `immutable, max-age=31536000` headers
+// (plan-hit-rate.md §1.2) — Cloudflare's edge LRU evicts cold objects
+// regardless of the TTL declared, so the fix is repeated warming, not a
+// longer header.
+//
+// Fetches go to img.bluesia.net, a DIFFERENT hostname than this Worker's own
+// custom domain — safe from the self-fetch 522 that rules out warming
+// phim.bluesia.net/api/* this same way (see wrangler.toml's [[services]]
+// comment and the module comment on why /api/* warming needs an external
+// caller instead, plan-hit-rate.md Phase 5). A plain GET through the real
+// CDN populates Tiered Cache's upper tier (plan-hit-rate.md Phase 2), so a
+// cold colo's first real visitor becomes a HIT instead of a MISS.
+const HERO_RAIL_THUMB_COUNT = 20; // every hero-rail item, matches HERO_COUNT
+const HERO_BACKDROP_PREFETCH_COUNT = 2; // matches ensureBackdrop's active+1
+
+function heroImageWarmUrls(heroJson) {
+  let items;
+  try {
+    items = JSON.parse(heroJson);
+  } catch {
+    return [];
+  }
+  const urls = [];
+  items.slice(0, HERO_BACKDROP_PREFETCH_COUNT).forEach((m) => {
+    if (m.poster_url) urls.push(m.poster_url);
+  });
+  items.slice(0, HERO_RAIL_THUMB_COUNT).forEach((m) => {
+    const thumb = m.thumb_url || m.poster_url;
+    // Same derivation as HeroSlider.js's toRailSize() — must stay in
+    // lockstep, or this warms a URL the rail never actually requests.
+    if (thumb && thumb.includes('/t/p/w500/')) {
+      urls.push(thumb.replace('/t/p/w500/', '/t/p/w154/'));
+    }
+  });
+  return urls;
+}
+
+async function warmHeroImages(urls) {
+  await Promise.all(
+    urls.map((u) =>
+      fetch(u, { headers: { 'user-agent': 'redflare-worker/1.0 (+phim.bluesia.net edge-warm)' } }).catch(
+        () => {} // best-effort — a failed warm just leaves that object cold, no different from before this existed
+      )
+    )
+  );
+}
+
 export async function runHomeRefresh(env) {
   try {
     const s0 = await callShard(env, 0);
@@ -258,7 +314,20 @@ export async function runHomeRefresh(env) {
     // catch below.
     await env.CATALOG_KV.put(HOME_KV_KEY, body);
     console.log('[home refresh] ok, bytes=', body.length);
-    return { ok: true, bytes: body.length };
+
+    // Best-effort, deliberately not fatal to the refresh itself — s4 is
+    // already fetched above, so this is ~22 extra subrequests against an
+    // orchestrator budget that otherwise only spends 5 (one per shard call).
+    let warmed = 0;
+    try {
+      const urls = heroImageWarmUrls(s4);
+      await warmHeroImages(urls);
+      warmed = urls.length;
+    } catch (e) {
+      console.error('[home refresh] hero image warm failed:', e.message);
+    }
+
+    return { ok: true, bytes: body.length, warmed };
   } catch (err) {
     // Deliberately don't touch HOME_KV_KEY on failure — a stale-but-complete
     // home page beats a fresh-but-broken one. Next cron tick (or a manual

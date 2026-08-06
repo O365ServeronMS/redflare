@@ -96,7 +96,7 @@ import {
   ttlForTier,
 } from './lib/recommendation.js';
 import { enqueueMirror, drainMirrorQueueShard, runMirrorRefresh } from './lib/mirror.js';
-import { WARM_SET_SIZE, WARM_META_KEY, runWarmShard, runWarmRefresh } from './lib/warm.js';
+import { WARM_SET_SIZE, WARM_META_KEY, runWarmShard, runWarmRefresh, getTopWarmTargets } from './lib/warm.js';
 
 const KKPHIM_BASE = 'https://phimapi.com';
 
@@ -599,6 +599,31 @@ async function handleHealth(env) {
   });
 }
 
+// Read side of Phase 5 edge-warming (plan-hit-rate.md). A Worker can warm
+// img.bluesia.net's edge cache itself (home.js's runHomeRefresh does — see
+// its module comment), but NOT this Worker's own /api/* edge cache: a
+// fetch() to phim.bluesia.net from inside this Worker 522s (documented
+// Cloudflare behavior, see wrangler.toml's [[services]] comment), and the
+// SELF service binding routes directly to the Worker's own handler,
+// bypassing the zone CDN entirely — neither can populate the CDN's edge
+// cache. So an EXTERNAL caller (.github/workflows/edge-warm.yml) has to make
+// the real HTTP requests instead; this endpoint tells it what to request.
+// Deliberately ungated (like /api/health) — it exposes only which pages are
+// currently warm, no secrets, and ungating means the GitHub Actions workflow
+// doesn't need a CRON_KEY secret at all.
+async function handleWarmTargets(env, url) {
+  let targets = [];
+  try {
+    targets = await getTopWarmTargets(env, WARM_SET_SIZE);
+  } catch (err) {
+    console.error('[warm targets]', err.message);
+  }
+  const urls = [`${url.origin}${HOME_PATH}`, ...targets.map((t) => `${url.origin}${t}`)];
+  return new Response(JSON.stringify({ urls }), {
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+  });
+}
+
 // Manual trigger for the R2 mirror drain — same call the */10 cron makes
 // (plan-hit-rate.md Phase 3: now the SHARDED refresh, not the single-shot
 // drain). Exposed so a drain can be forced on demand (verifying Phase 3/6
@@ -964,6 +989,10 @@ export default {
     // Cache API, and a cached health check reports the past, not the present.
     if (url.pathname === '/api/health') {
       return handleHealth(env);
+    }
+    // Same reason — must reflect the CURRENT warm set, not a cached one.
+    if (url.pathname === '/api/warm-targets') {
+      return handleWarmTargets(env, url);
     }
     if (url.pathname.startsWith('/api/')) {
       return handleApi(request, env, ctx, url);
