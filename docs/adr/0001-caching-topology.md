@@ -1,6 +1,6 @@
 # ADR-0001: Caching topology for /api/* on the Workers free plan
 
-**Status:** Proposed
+**Status:** Accepted — Action Items 1–6 and 8 implemented 2026-08-06 (see inline notes below and `docs/plan-hit-rate.md`, which continues this ADR's numbering as its own Phase 1–5/8); Item 7 (Option E / Workers Caching) remains open.
 **Date:** 2026-08-06
 **Deciders:** repo owner (sole maintainer)
 **Supersedes:** the ad-hoc layering described in `CLAUDE.md` § "Caching layers"
@@ -249,6 +249,28 @@ value and skips the write when identical. Genre and country page 1 change slowly
 steady-state writes land well under the worst case above. The comparison costs one KV read per
 key per cycle — 12 × 48 = 576 reads/day against a 100,000/day budget, i.e. free.
 
+**Correction, 2026-08-06 (plan-hit-rate.md Phase 8):** the `~111 keys steady` figure above was
+never re-measured after the catalog grew and is wrong — actual count that date was **2,262**,
+confirmed via `wrangler kv key list --prefix meta:`. Measuring the real *write rate* (not just
+key count) by back-computing creation time from each key's `expiration` (TTL is a fixed 14
+days, so `created_at = expiration - 14d`) found something more concerning than the stale count
+alone: **749 meta:\* writes in the preceding 24h**, peaking at an extrapolated **~1,480/day** in
+the 6–12h window, all tracking the 2026-08-06 OPhim→KKPhim catalog-source swap (every card
+needed re-enrichment against KKPhim's TMDB ids). The rate had returned to ~0/hour by the time of
+measurement (last write ~3.7h prior) — so steady-state *between* migrations is close to the
+original assumption, but the **burst ceiling this ADR reserved (100/day) is roughly 15x too
+small** for what an actual catalog-source change produces.
+
+This matters because of what it stacks against: committed subtotal (~32/day) + the warm set's
+own writes (up to 624/day at N=13) = **~656/day already reserved** before any `meta:*` burst.
+A repeat of the measured 2026-08-06 burst (750–1,480/day) on top of that would exceed the
+1,000/day cap and trigger the "Overflow behavior" below **for real** — not hypothetically. The
+warm set was sized against a burst assumption that a real migration already disproved.
+**Revisit before enabling anything that adds more scheduled KV writes** (e.g. extending the
+warm set to `/api/movie/:slug`, flagged as a stretch goal in `docs/plan-hit-rate.md` Phase 4 and
+deliberately not done for this reason) — the 76%-of-quota headroom this ADR claims does not
+survive a second migration-scale burst landing in the same UTC day as a warm cycle.
+
 **Overflow behavior, stated explicitly because it is nasty.** Past 1,000 writes, KV writes
 *fail* until 00:00 UTC. `home:current` stops updating and the homepage freezes at whatever it
 last held. `/api/health` already reports home age and would flag it, but only as "home is
@@ -332,11 +354,11 @@ pure improvements.
 
 ## Action items
 
-1. [ ] **Phase 0 now, independent of everything else** — add `/assets/*` → `public, max-age=31536000, immutable` to `public/_headers`.
-2. [ ] Audit the zone's Browser Cache TTL setting and add a Cache Rule for `/api/*` set to "respect origin".
-3. [ ] Design the full `Cache-Control` policy table (per route, `s-maxage` / browser `max-age` / `stale-while-revalidate`, incl. negative caching for `stale-vps-down` and 5xx) — this is `/system-design` P2/P3.
-4. [ ] Confirm Tiered Cache availability on this zone's plan; without it, Axis 2 coverage is per-colo-on-first-request rather than tiered.
-5. [ ] Pick the 12 warm-set keys from real traffic rather than intuition.
-6. [ ] Add attempted/skipped/failed KV write counts to the warm cron's response and assert on them in `/api/health`.
-7. [ ] Measure Option E's free-plan request accounting on a throwaway Worker before it is ever considered for this one.
-8. [ ] Add `stale` table eviction — it is unbounded today and `cleanupRecTables` does not touch it. Not caused by this ADR, but this ADR increases what is written to D1.
+1. [x] **Phase 0 now, independent of everything else** — add `/assets/*` → `public, max-age=31536000, immutable` to `public/_headers`. Done — present in `public/_headers`.
+2. [x] Audit the zone's Browser Cache TTL setting and add a Cache Rule for `/api/*` set to "respect origin". Done 2026-08-06 — repo owner switched the dashboard setting to "respect existing headers"; superseded the originally-planned Cache Rule approach once `docs/plan-hit-rate.md` §6.5 (Phase 1) found that response-level `stale-while-revalidate` didn't need one.
+3. [x] Design the full `Cache-Control` policy table (per route, `s-maxage` / browser `max-age` / `stale-while-revalidate`, incl. negative caching for `stale-vps-down` and 5xx). Done — `docs/plan-hit-rate.md` §5/§6 Phase 1, implemented in `worker/index.js` `clientCacheControlFor`.
+4. [x] Confirm Tiered Cache availability on this zone's plan; without it, Axis 2 coverage is per-colo-on-first-request rather than tiered. Confirmed free on Free/Pro/Business via Cloudflare docs and enabled on the zone 2026-08-06 (`docs/plan-hit-rate.md` Phase 2).
+5. [x] Pick the 12 warm-set keys from real traffic rather than intuition. Done 2026-08-06 — `docs/plan-hit-rate.md` Phase 4, `worker/lib/warm.js` `getTopWarmTargets` ranks D1 `popularity` by sampled hits, falling back to this ADR's original static list only to fill slots real data hasn't reached yet.
+6. [x] Add attempted/skipped/failed KV write counts to the warm cron's response and assert on them in `/api/health`. Already implemented pre-dating this correction pass — `runWarmRefresh`'s `{written, skipped, failed}` and `handleHealth`'s assertion on it.
+7. [ ] Measure Option E's free-plan request accounting on a throwaway Worker before it is ever considered for this one. Still open — Option E (Workers Caching) was not pursued; `docs/plan-hit-rate.md` treats it as a separate, not-yet-triggered revisit (its own "Phase 7"-adjacent territory, gated on a Cache Reserve/paid-plan decision instead).
+8. [x] Add `stale` table eviction — it is unbounded today and `cleanupRecTables` does not touch it. Done 2026-08-06 — `docs/plan-hit-rate.md` Phase 8, `worker/index.js` `cleanupStaleTable` (90-day cutoff on `updated_at`), run from the same hourly cron as `cleanupRecTables`.

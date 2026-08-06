@@ -454,10 +454,17 @@ name. Expect the two to disagree occasionally.
    for a fleet-wide URL change. A `CACHE_VERSION` key-versioning scheme
    (`<url>?__v=N`) was tried for this and reverted (`a4826f7`) as redundant
    with the dashboard purge.
-3. **KV** (`CATALOG_KV`) — deliberately minimal: one key
-   (`home:current`, plus TTL'd `trending:week`/`trending:day`) written only by
-   the hourly cron, never per-request, and ~111 `meta:*` TMDB-enrichment
-   entries (14-day TTL) written by `worker/lib/enrich.js`. `/api/home-data`
+3. **KV** (`CATALOG_KV`) — one key (`home:current`, plus TTL'd
+   `trending:week`/`trending:day`) written only by the hourly cron, never
+   per-request; `page:v1:*` (12 keys, popularity-ranked warm set,
+   `worker/lib/warm.js`) + `warm:last-run` metadata written every `*/30`;
+   and **several thousand** `meta:*` TMDB-enrichment entries (14-day TTL,
+   `worker/lib/enrich.js`) — measured 2026-08-06: **2,262 and still growing**,
+   not the ~111 an earlier version of this doc assumed (that number was never
+   re-measured after the catalog grew; corrected here since it fed
+   `docs/adr/0001-caching-topology.md`'s KV-write-budget arithmetic, which
+   should be re-derived from the real count before adding anything else to
+   the warm set — see `docs/plan-hit-rate.md` Phase 4/8). `/api/home-data`
    reads `home:current` directly — no build happens on that request path at
    all, see below.
 4. **D1** (`redflare-db`) — 6 tables, all live: `stale` (last-known-good copy

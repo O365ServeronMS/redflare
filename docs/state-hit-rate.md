@@ -4,9 +4,9 @@ File tracking cho [plan-hit-rate.md](plan-hit-rate.md). **Cập nhật file này
 khi một phase đổi trạng thái** — nó là nguồn sự thật về tiến độ, không phải git log.
 
 **Bắt đầu:** 2026-08-06
-**Trạng thái tổng:** 🟢 Phase 0–5 xong và đã deploy. Còn lại: Phase 6 (đo
-lường, cần quyền Analytics), Phase 7 (Cache Reserve — quyết định thương mại),
-Phase 8 (dọn nợ).
+**Trạng thái tổng:** 🟢 Phase 0–5 và Phase 8 xong, đã deploy. Còn lại: Phase 6
+(đo lường, cần quyền Analytics), Phase 7 (Cache Reserve — quyết định thương
+mại).
 
 ---
 
@@ -22,7 +22,7 @@ Phase 8 (dọn nợ).
 | **5** | Edge warming | 🟢 **Xong, chạy 100% trên CF** (giá trị `/api/*` thấp hơn dự kiến — chỉ nóng 1 colo, xem §6.5.2) | 2026-08-06 | Đã bỏ GitHub Actions + secret + O5 nhờ `global_fetch_strictly_public` |
 | **6** | Đo lường tách theo class | ⚪ Chưa bắt đầu | — | Cần quyền Analytics |
 | **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚪ Chưa quyết | — | Quyết sau Phase 6 |
-| **8** | Dọn nợ khảo sát lộ ra | ⚪ Chưa bắt đầu | — | Làm lúc nào cũng được |
+| **8** | Dọn nợ khảo sát lộ ra | 🟢 **Xong** | 2026-08-06 | 90 KV key rác đã xoá, `stale` D1 có eviction, ADR-0001 đã đính chính |
 
 Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặn/sự cố · ⚫ bỏ
 
@@ -45,7 +45,7 @@ khi đo lại.
 | KV `page:v1:*` | **0 key** | 12–13 key | — |
 | KV `home:current` | **KHÔNG TỒN TẠI** | tồn tại, <60 phút tuổi | — |
 | KV `warm:last-run` | **KHÔNG TỒN TẠI** | tồn tại, <90 phút tuổi | — |
-| KV `meta:*` | **1.886 key** | — (CLAUDE.md ghi sai là ~111) | — |
+| KV `meta:*` | **1.886 key** | — (CLAUDE.md ghi sai là ~111) | **2.262 key** (Phase 8, đã sửa CLAUDE.md + ADR-0001) |
 | D1 `stale` / `idx` / `recs` | 110 / 447 / 50 | — | — |
 | `/api/health` | `ok: false`, 3 problems | `ok: true` | — |
 
@@ -62,6 +62,52 @@ npx wrangler d1 execute redflare-db --remote --command "SELECT (SELECT COUNT(*) 
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-06 — Phase 8: dọn nợ
+
+**Xoá 90 KV key rác** (không phải ~20 như plan ước tính ban đầu). Ba loại,
+xác nhận `grep` toàn repo không code nào tham chiếu trước khi xoá:
+- `stale:*` — 61 key. Dùng `wrangler kv bulk delete`.
+- `live:*` — **28 key, chưa từng được nhắc tới trong khảo sát trước.** Cùng
+  thế hệ thiết kế với `stale:*`/`home:last-known-good` (namespace
+  `/api/recommendation/*`, hẳn là bản trước khi D1 `recs` table thay thế).
+- `home:last-known-good` — 1 key.
+
+**Thêm eviction cho `stale` (D1)**, đóng ADR-0001 Action Item 8:
+`worker/index.js` `cleanupStaleTable` — xoá row `updated_at` cũ hơn 90 ngày,
+chạy cùng cron hourly với `cleanupRecTables` (`idx`/`recs`). 90 ngày = 2×
+ngưỡng 45 ngày của `idx`, vì `stale` là tầng disaster-fallback hiếm dùng
+hơn. Bảng hiện chỉ có 52 row, tất cả mới — cơ chế chưa có gì để chứng minh
+ngay, sẽ tự thấy tác dụng khi bảng già đi.
+
+**Sửa số `meta:*` sai — và đo sâu hơn yêu cầu ban đầu.** Không chỉ đếm lại
+(1.886 ở Phase 0 → **2.262** giờ, tiếp tục tăng), mà dùng trường
+`expiration` của mỗi key (TTL cố định 14 ngày → `created_at = expiration -
+14d`) để tính **write RATE thật**, không chỉ key count:
+
+```
+749 write trong 24h qua
+đỉnh ~1.480/ngày (ước tính) trong khung 6-12h
+write mới nhất: 3,7 giờ trước lúc đo (rate đã về ~0/giờ)
+```
+
+Toàn bộ burst trùng khớp thời điểm đổi nguồn KKPhim hôm nay (mọi thẻ phim
+cần enrich lại theo TMDB id mới). **Phát hiện quan trọng:** ngân sách burst
+gốc ADR-0001 dành cho `meta:*` (100/ngày) **thấp hơn thực tế đo được tới
+~15 lần**. Cộng với ngân sách đã cam kết cho warm set (tới 624/ngày ở N=13)
++ subtotal khác (~32/ngày) = ~656/ngày đã đặt trước — một lần đổi nguồn
+catalog khác trùng ngày với chu kỳ warm có thể **thật sự vượt trần
+1.000/ngày**, không còn là giả thuyết. Đã ghi chi tiết đầy đủ (số liệu +
+phép tính) như một addendum có ngày trong
+[ADR-0001](adr/0001-caching-topology.md) — không sửa đè số cũ, giữ nguyên
+lịch sử quyết định ban đầu.
+
+**Cập nhật checklist Action Items của ADR-0001 theo trạng thái thật:** 6/8
+mục đã xong (1,2,3,4,5,6,8 — một số vốn đã xong từ trước mà chưa tick, như
+mục 6 warm cron reporting). Chỉ còn Item 7 (đo ngân sách request của Option
+E / Workers Caching) vẫn mở, không thuộc phạm vi plan này.
+
+---
 
 ### 2026-08-06 — Phase 5 viết lại: bỏ GitHub Actions, chạy trên chính Cloudflare
 

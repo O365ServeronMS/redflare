@@ -451,11 +451,11 @@ liệu thật).
   KV bằng `CATALOG_KV.list({prefix})` + `delete()` — đây là **read** op
   (ngân sách 100k/ngày), không tính vào ngân sách **write** 1.000/ngày vốn là
   thứ chặn N, nên xoá không tốn gì thêm.
-- **Chưa làm:** mở rộng warm set sang `/api/movie/:slug`. Không cấp thiết
-  ngay — ngân sách write hiện đã dùng gần hết bởi 12 trang + 1 key meta +
-  phần `meta:*`/`home:current`/`trending:*` khác; mở rộng cần tính lại số
-  học trước (đặc biệt sau khi Phase 8 sửa con số `meta:*` sai trong CLAUDE.md
-  từ ~111 thành 1.886 thật).
+- **Chưa làm:** mở rộng warm set sang `/api/movie/:slug`. **Càng không nên
+  làm sau số liệu Phase 8** — con số `meta:*` thật (2.262 key, burst đo được
+  tới ~1.480 write/ngày trong lúc đổi nguồn KKPhim) cho thấy ngân sách
+  1.000/ngày còn ít headroom hơn tưởng, không phải nhiều hơn. Xem addendum
+  trong [ADR-0001](adr/0001-caching-topology.md) trước khi cân nhắc mở rộng.
 
 **Verify:** `node --check` cả hai file pass; migration `0003_popularity.sql`
 đã apply lên D1 production (`wrangler d1 migrations apply --remote`, xác nhận
@@ -585,12 +585,39 @@ Không thể lái một con số gộp. Cần tách A/B/C của §0.
 Chỉ mở ra khi Phase 0–6 xong và đã có số đo thật. Đây là **cách duy nhất** vượt
 ~95% zone-wide. Quyết định bằng số liệu Phase 6, không quyết trước.
 
-### Phase 8 — Dọn nợ đã lộ ra khi khảo sát
+### Phase 8 — Dọn nợ đã lộ ra khi khảo sát *(đã triển khai)*
 
-- `stale` (D1) chưa có eviction — ADR-0001 Action Item 8, vẫn mở.
-- KV còn rác: `home:last-known-good`, ~20 key `stale:*` từ thiết kế cũ.
-- CLAUDE.md ghi "~111 `meta:*`" — thực tế **1.886**. Sửa lại, và tính lại budget
-  KV write theo con số thật.
+- ✅ **`stale` (D1) eviction** ([worker/index.js](../worker/index.js)
+  `cleanupStaleTable`, đóng ADR-0001 Action Item 8): xoá row `updated_at`
+  cũ hơn 90 ngày, chạy cùng cron hourly với `cleanupRecTables`. 90 ngày =
+  2× ngưỡng 45 ngày của `idx`, vì `stale` là tầng disaster-fallback hiếm
+  dùng hơn, không cần dọn gắt bằng reverse index.
+- ✅ **Dọn KV rác** — phát hiện rác **nhiều hơn ước tính ban đầu**: không chỉ
+  `home:last-known-good` + ~20 `stale:*`, mà còn nguyên một prefix `live:*`
+  chưa từng nhắc tới (28 key). Tổng cộng xác nhận-rồi-xoá: **90 key** (61
+  `stale:*` + 28 `live:*` + 1 `home:last-known-good`) — xác nhận không code
+  nào tham chiếu tới 3 loại key này trước khi xoá (`grep` toàn repo).
+- ✅ **Sửa số `meta:*` sai trong CLAUDE.md** — không chỉ sai giá trị (~111 →
+  thực tế đo lần đầu 1.886, đo lại lần này **2.262**), mà đo sâu hơn (dùng
+  trường `expiration` của mỗi key để suy ngược thời điểm tạo, vì TTL cố định
+  14 ngày) phát hiện một rủi ro thật: **749 write trong 24h qua**, đỉnh
+  điểm ước tính **~1.480/ngày**, toàn bộ trùng khớp thời điểm đổi nguồn
+  KKPhim hôm nay. Ngân sách burst gốc của ADR-0001 (100/ngày) **thấp hơn
+  thực tế đo được tới ~15 lần**. Đã ghi chi tiết + tính lại rủi ro overflow
+  ngân sách 1.000/ngày như một addendum có ngày trong
+  [ADR-0001](adr/0001-caching-topology.md), không sửa đè số cũ (giữ lại lịch
+  sử quyết định).
+- ✅ Đánh dấu lại checklist Action Items của ADR-0001 theo trạng thái thật —
+  6/8 mục đã xong, chỉ còn Item 7 (đo ngân sách request của Option E) vẫn mở.
+
+**Verify:** `node --check` pass. KV: đếm lại `stale:*`/`live:*`/
+`home:last-known-good` sau xoá → 0. `stale` D1: chưa quan sát được hiệu quả
+thật (bảng mới có 52 row, tất cả dưới 90 ngày — chưa có gì để xoá; cơ chế
+sẽ tự chứng minh khi bảng già đi).
+**Rollback:** revert `worker/index.js` (bỏ `cleanupStaleTable`); KV/D1 đã
+xoá thì không phục hồi được từ phía Worker — không phải rủi ro vì cả 3 loại
+key/row đó đều tự tái tạo được từ build sống nếu cần (không phải nguồn dữ
+liệu duy nhất).
 
 ---
 

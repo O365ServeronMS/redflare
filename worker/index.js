@@ -285,6 +285,24 @@ async function readStale(env, pathname, cacheKey) {
   return row ? row.body : null;
 }
 
+// plan-hit-rate.md Phase 8 / ADR-0001 Action Item 8: `stale` had no eviction
+// at all — every distinct list/genre/country page number, movie slug, and
+// recommendation id ever built left a row behind forever, unlike `idx`/`recs`
+// (cleanupRecTables, 45-day/expires_at) or `mirror_queue`/`mirrored` (bounded
+// by what's actually in the catalog). `updated_at` only advances when a path
+// is actually rebuilt live, so a row that stops updating means nobody has
+// hit that exact page in the cutoff window — safe to drop; a future request
+// for it just rebuilds from KKPhim/TMDB and re-inserts. 90 days (2x idx's 45)
+// since `stale` is the rarer disaster-fallback layer, not the primary cache
+// — less urgent to prune aggressively than the reverse index.
+const STALE_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+async function cleanupStaleTable(env) {
+  await env.DB.prepare('DELETE FROM stale WHERE updated_at < ?1')
+    .bind(Date.now() - STALE_MAX_AGE_MS)
+    .run();
+}
+
 function writeStale(env, pathname, cacheKey, body) {
   if (isSearch(pathname)) return Promise.resolve();
   return env.DB.prepare(
@@ -1031,6 +1049,8 @@ export default {
       ctx.waitUntil(runHomeRefresh(env));
       // Sweep expired idx (>45d) / recs rows in the same hourly cron (Phase 5).
       ctx.waitUntil(cleanupRecTables(env).catch((e) => console.error('[rec cleanup]', e.message)));
+      // Sweep stale rows (>90d) — plan-hit-rate.md Phase 8 / ADR-0001 Action Item 8.
+      ctx.waitUntil(cleanupStaleTable(env).catch((e) => console.error('[stale cleanup]', e.message)));
     }
     if (event.cron === '*/10 * * * *') {
       // Drain the R2 image-mirror queue, sharded (Phase 6, sharded further in
