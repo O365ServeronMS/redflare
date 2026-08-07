@@ -3,7 +3,7 @@
 // Unicode codepoint, not a base letter plus a combining stroke, so it
 // survives untouched. Left alone, "dien vien" would never match "diễn
 // viên" even with remove_diacritics on. Both index-time writes
-// (services/sync/syncMovie.ts) and query-time parsing (routes/search.ts)
+// (services/sync/syncMovie.ts) and query-time parsing (repositories/searchRepository.ts)
 // must go through this so they land in the same normalized space.
 const COMBINING_MARKS = /[̀-ͯ]/g;
 

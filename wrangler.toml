@@ -3,12 +3,9 @@ compatibility_date = "2026-08-01"
 workers_dev = false
 preview_urls = false
 
-# nodejs_compat: the SSR rearchitecture (docs/plan-ssr-rearchitecture.md,
-# docs/adr/0002-no-vps-ssr-architecture.md) replaces the SPA + JSON-API
-# worker (worker/index.js, removed) with a server-rendering Hono app
-# (src-ssr/index.ts). global_fetch_strictly_public is gone with it -- that
-# flag only existed for the old edge-warming cron (worker/lib/warm.js
-# runEdgeWarm), which has no equivalent here.
+# nodejs_compat supports the Hono/TypeScript Worker runtime. The old
+# global_fetch_strictly_public flag belonged to the retired edge-warming
+# architecture and has no equivalent in the current D1-backed Worker.
 compatibility_flags = ["nodejs_compat"]
 
 # Pin the custom domain in config so each deploy re-attaches it — avoids the site
@@ -17,12 +14,10 @@ routes = [
   { pattern = "phim.bluesia.net", custom_domain = true },
 ]
 
-# src-ssr/index.ts: reads D1 directly and renders HTML server-side, no
-# runtime calls to KKPhim/TMDB (ADR-0002 Principle 3). Cutover landed
-# 2026-08-07 before Phase 3-6 of the plan were built -- see
-# docs/state-ssr-rearchitecture.md for what that means is NOT yet served
-# (list/genre/country/search pages, recommendations, sitemap, cache/security
-# headers, static assets). Only /phim/:slug and /__sync/* are live.
+# src-ssr/index.ts now owns only JSON APIs, sitemap/robots, sync routes and
+# the scheduled handler. The premium Vite SPA in dist/ owns every browser
+# page; selective assets.run_worker_first below keeps dynamic routes out of
+# the SPA fallback.
 main = "src-ssr/index.ts"
 
 # Workers Caching (Phase 5, closes ADR-0001 Action Item 7 / ADR-0002 Finding
@@ -37,21 +32,30 @@ main = "src-ssr/index.ts"
 [cache]
 enabled = true
 
-# Static assets: public-ssr/ holds exactly one thing, styles.css (plus a
-# _headers rule for its browser cache lifetime). Deliberately NOT the old
-# dist/ (retired Vite SPA build), and deliberately NO not_found_handling --
-# that is why this block was removed at cutover: with
-# not_found_handling = "single-page-application", the asset layer would
-# answer every unmatched route with the OLD dist/index.html before this
-# Worker ever ran, resurrecting the dead SPA instead of serving SSR pages.
-# With it unset (default "none"), a request that matches no file falls
-# through to the Worker, which is exactly what the SSR routes need.
-#
-# Restored 2026-08-07 after the site shipped with no stylesheet at all --
-# every route returned correct, fully-SEO'd, completely unstyled HTML.
+# Static Assets serves the Vite build and rewrites clean browser routes to
+# index.html. The explicit Worker-first list is mandatory: dynamic routes
+# must not be swallowed by the SPA fallback. Browser document routes also
+# pass through the Worker so it can return no-transform and prevent
+# Cloudflare-injected scripts from violating the strict CSP; fingerprinted
+# files are not listed and still bypass the Worker.
 [assets]
-directory = "public-ssr"
+directory = "dist"
 binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = [
+  "/api/*",
+  "/__sync/*",
+  "/sitemap.xml",
+  "/sitemap-*",
+  "/robots.txt",
+  "/",
+  "/phim/*",
+  "/danh-sach/*",
+  "/the-loai/*",
+  "/quoc-gia/*",
+  "/tim-kiem",
+  "/tim-kiem/",
+]
 
 # DB: recreated 2026-08-07 -- the original redflare-db (and the R2 bucket
 # below) were deleted directly by the account owner as part of the same
@@ -105,8 +109,7 @@ crons = ["*/30 * * * *"]
 # SELF: service binding used by services/sync/orchestrator.ts to fan out
 # /__sync/batch/:n shards without a same-zone fetch() 522ing (same reasoning
 # as the retired worker/lib/home.js SELF usage). Points at this same worker
-# ("redflare") since the SSR code now runs directly on this Worker script,
-# not a separate one.
+# ("redflare") because the backend runs directly on this Worker script.
 [[services]]
 binding = "SELF"
 service = "redflare"

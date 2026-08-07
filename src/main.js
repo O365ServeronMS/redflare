@@ -3,6 +3,15 @@
  * Orchestrates routing, page rendering, and global event handling.
  */
 
+import '@fontsource/inter/latin-400.css';
+import '@fontsource/inter/vietnamese-400.css';
+import '@fontsource/inter/latin-500.css';
+import '@fontsource/inter/vietnamese-500.css';
+import '@fontsource/inter/latin-700.css';
+import '@fontsource/inter/vietnamese-700.css';
+import '@fontsource/inter/latin-900.css';
+import '@fontsource/inter/vietnamese-900.css';
+
 import './styles/global.css';
 import './styles/components.css';
 
@@ -213,8 +222,9 @@ async function renderHomePage() {
     errEl.innerHTML = `
       <h2 style="margin-bottom:16px">Không thể tải dữ liệu</h2>
       <p style="color:#888;margin-bottom:24px">${err.message}</p>
-      <button class="hero__btn hero__btn--primary" onclick="location.reload()">Thử lại</button>
+      <button class="hero__btn hero__btn--primary">Thử lại</button>
     `;
+    errEl.querySelector('button').addEventListener('click', () => location.reload());
     page.appendChild(errEl);
   }
 }

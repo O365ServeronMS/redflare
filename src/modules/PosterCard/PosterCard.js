@@ -3,7 +3,7 @@
  */
 import { thumbUrl, posterUrl, upstreamFallback } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
-import { applyImagePolicy } from '../../lib/image.js';
+import { applyImagePolicy, toTmdbW185 } from '../../lib/image.js';
 
 function getImdbScore(movie) {
   const rawScore =
@@ -47,7 +47,8 @@ export function renderPosterCard(container, movie, rank = null, priority = false
   // ── Poster image ──
   const img = document.createElement('img');
   img.className = 'movie-card__poster';
-  img.src = thumbUrl(movie.thumb_url);
+  const thumb = thumbUrl(movie.thumb_url);
+  img.src = toTmdbW185(thumb);
   img.alt = movie.name;
   applyImagePolicy(img, { priority });
 

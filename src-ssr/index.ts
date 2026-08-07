@@ -1,47 +1,48 @@
 import { Hono } from 'hono';
 import type { Env } from './types/env';
 import { apiRoute } from './api/routes';
-import { homeRoute } from './routes/home';
-import { detailRoute } from './routes/detail';
-import { listRoute } from './routes/list';
-import { genreRoute } from './routes/genre';
-import { countryRoute } from './routes/country';
-import { playerRoute } from './routes/player';
-import { searchRoute } from './routes/search';
 import { sitemapRoute } from './routes/sitemap';
 import { syncRoute } from './routes/sync';
 import { securityHeaders } from './middleware/securityHeaders';
 import { requestSampler } from './middleware/requestSampler';
-import { apply404Cache } from './cache/control';
 import { runIncrementalSync, runBackfillTick, runRecommendationResolveTick } from './services/sync/orchestrator';
 
-const app = new Hono<{ Bindings: Env; Variables: { nonce: string } }>();
+const app = new Hono<{ Bindings: Env }>();
+
+const SPA_DOCUMENT_PATHS = [
+  /^\/$/,
+  /^\/phim\/[^/]+\/?$/,
+  /^\/danh-sach\/[^/]+\/?$/,
+  /^\/the-loai\/[^/]+\/?$/,
+  /^\/quoc-gia\/[^/]+\/?$/,
+  /^\/tim-kiem\/?$/,
+];
 
 app.use('*', securityHeaders);
 app.use('*', requestSampler);
 
-// /api/* mounted first -- docs/plan-restore-spa-frontend.md Phase F2. Not a
-// routing-precedence necessity in Hono (paths don't overlap with the SSR
-// routes below), just keeps the "this is the layer that matters for F5's
-// cutover" grouping visible in one place.
+// Only routes listed in wrangler.toml assets.run_worker_first reach this
+// Worker. Static files still bypass it; browser document requests pass
+// through only so the response can opt out of Cloudflare HTML injection.
 app.route('/', apiRoute);
-
-app.route('/', homeRoute);
-app.route('/', detailRoute);
-app.route('/', listRoute);
-app.route('/', genreRoute);
-app.route('/', countryRoute);
-app.route('/', playerRoute);
-app.route('/', searchRoute);
 app.route('/', sitemapRoute);
 app.route('/', syncRoute);
 
-// Every route-level 404 already sets its own short cache (cache/control.ts
-// apply404Cache); this is the catch-all for paths no route even attempted
-// to match.
-app.notFound((c) => {
-  apply404Cache(c);
-  return c.text('Not found', 404);
+app.notFound(async (c) => {
+  const isSpaDocument = (c.req.method === 'GET' || c.req.method === 'HEAD')
+    && SPA_DOCUMENT_PATHS.some((pattern) => pattern.test(c.req.path));
+
+  if (!isSpaDocument) return c.text('Not found', 404);
+
+  const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
+  const headers = new Headers(assetResponse.headers);
+  headers.set('Cache-Control', 'public, max-age=0, must-revalidate, no-transform');
+
+  return new Response(assetResponse.body, {
+    status: assetResponse.status,
+    statusText: assetResponse.statusText,
+    headers,
+  });
 });
 
 export default {

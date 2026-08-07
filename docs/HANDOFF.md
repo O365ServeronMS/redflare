@@ -9,11 +9,11 @@ Bàn giao cho session mới. Session cũ hết ngân sách context giữa chừn
 
 Đang khôi phục **giao diện SPA cũ** của redflare (đã bị một cuộc tái kiến trúc SSR làm hỏng
 nặng) đặt lên trên **backend D1 mới** (thành quả tốt của cuộc tái kiến trúc đó, giữ nguyên).
-Backend đã xong (F1–F4). Còn lại: nạp font, **cutover**, verify bằng mắt, dọn tài liệu.
+Backend, self-host font, cutover và visual QA đã xong (F1–F7). Chỉ còn dọn tài liệu F8.
 
-**Trạng thái production ngay lúc này:** `phim.bluesia.net` vẫn đang phục vụ **giao diện SSR
-hỏng** (HTML trần, không phải SPA cũ). `/api/*` mới đã sống song song và đúng contract. Chưa
-có gì của giao diện bị đụng tới.
+**Trạng thái production ngay lúc này:** `phim.bluesia.net` đang phục vụ **SPA cũ đã khôi phục**
+trên backend D1. `/api/*`, sitemap và sync route vẫn đi qua Worker đúng contract. F7 đang chạy ở
+version `80ef8e71-f3c1-446e-9a2b-01001a624fad`; không sửa bất kỳ file CSS design nào.
 
 ---
 
@@ -22,7 +22,7 @@ có gì của giao diện bị đụng tới.
 | # | File | Vì sao |
 |---|---|---|
 | 1 | `docs/plan-restore-spa-frontend.md` | **Kế hoạch đang thi hành.** §0.4 = 4 quyết định user đã chốt; §2 = 7 chỗ CSP sẽ phá giao diện; §3 = bẫy `run_worker_first`; §5 = chi tiết từng phase |
-| 2 | `docs/state-restore-spa-frontend.md` | Tiến độ + nhật ký quyết định từng phase (F1→F4). **Cập nhật file này mỗi khi phase đổi trạng thái** |
+| 2 | `docs/state-restore-spa-frontend.md` | Tiến độ + nhật ký quyết định từng phase (F1→F7). **Cập nhật file này mỗi khi phase đổi trạng thái** |
 | 3 | `docs/contract-legacy-api.md` | Hợp đồng `/api/*` trích `file:line` từ `src/` thật. Mâu thuẫn với bất kỳ tài liệu nào khác → **file này thắng** |
 | 4 | `docs/adr/0002-no-vps-ssr-architecture.md` | Vì sao có D1-only runtime, vì sao không KV/R2. Vẫn hiệu lực trừ nguyên tắc "No SPA" (sẽ đảo ở F8) |
 | 5 | `docs/state-ssr-rearchitecture.md` | Lịch sử cuộc tái kiến trúc SSR (đã ⏸️ dừng). Đọc khi cần hiểu vì sao code hiện tại như vậy |
@@ -37,12 +37,12 @@ có gì của giao diện bị đụng tới.
 
 ```
 phim.bluesia.net  (Cloudflare Worker "redflare", 1 binding duy nhất: D1)
-├── src-ssr/api/*        ✅ /api/* JSON đúng shape SPA cũ cần  (F2+F4, XONG)
-├── src-ssr/render/*     ❌ SSR HTML tự chế — CHÍNH LÀ THỨ LÀM HỎNG GIAO DIỆN, xoá ở F6
-├── src-ssr/routes/*     ❌ route SSR page — xoá ở F6 (trừ sitemap.ts, sync.ts)
-├── src-ssr/services/sync/*  ✅ cron sync/backfill/resolve — giữ nguyên, đang chạy tốt
-├── src-ssr/repositories/*   ✅ giữ
-└── src/ + public/       🎯 SPA cũ — ĐÍCH ĐẾN, chưa được phục vụ (F6 mới bật lên)
+├── dist/ Static Assets  ✅ SPA cũ + History API fallback (F6, XONG)
+├── src-ssr/api/*        ✅ /api/* JSON đúng shape SPA cần (F2+F4, XONG)
+├── src-ssr/routes/      ✅ chỉ còn sitemap.ts + sync.ts
+├── src-ssr/render/      ✅ chỉ còn escape.ts + sitemap.ts; SSR page renderer đã xoá
+├── src-ssr/services/sync/*  ✅ cron sync/backfill/resolve — giữ nguyên
+└── src-ssr/repositories/*   ✅ D1-only runtime
 ```
 
 **Không còn:** KV, R2, worker cũ (`worker/`), VPS. Chỉ còn **D1**.
@@ -69,31 +69,34 @@ rows written today: 2741 / 85000 (governor)
 
 ---
 
-## 5. Còn lại: F5 → F8
+## 5. Còn lại: F8
 
-### F5 — Self-host Inter (nhỏ, không rủi ro)
-`npm i @fontsource/inter` → import 4 weight (latin + vietnamese) trong `src/main.js` → xoá 3 thẻ
-Google Fonts khỏi `index.html`.
+### F5 — Self-host Inter ✅ xong
+Đã cài `@fontsource/inter`, import 4 weight (Latin + Vietnamese) trong `src/main.js`, xoá 3 thẻ
+Google Fonts khỏi `index.html`. Build tạo đủ 8 `.woff2`; typecheck pass; không sửa CSS.
 
 **✅ Rủi ro đã được loại bỏ trong session này:** lo ngại "Inter không có trong font stack" là
 **sai** — `global.css:53` và `components.css:1387,1812` đã khai báo `font-family: 'Inter'` trực
 tiếp. `--font-netflix-sans` (`variables.css:15`) là **dead token, không dùng ở đâu**. Nên
 self-host chạy ngay, **không cần sửa CSS, không cần hỏi user**.
 
-### F6 — CUTOVER (điểm không quay lại)
-Chi tiết đầy đủ ở plan §5. Ba thứ dễ chết nhất:
+### F6 — CUTOVER ✅ xong production
+Static Assets phục vụ `dist/` với SPA fallback; `run_worker_first` bảo vệ `/api/*`, sitemap và
+`/__sync/*`. SSR page routes/renderers đã xoá, `SITE_ORIGIN` đã tách sang `lib/site.ts`, CSP đã đồng
+bộ cho cả Static Assets và Worker response. Build, typecheck, dry-run, local route test và production
+smoke test đều pass. Lần request đầu từng gặp HTML SSR cũ trong cache; cache đã revalidate và URL
+chính hiện trả SPA mới.
 
-1. **`run_worker_first` bắt buộc** — thiếu là SPA fallback nuốt sạch `/api/*`, sitemap,
-   `/__sync/*`. Xem plan §3.
-2. **CSP phải nới đúng 5 chỗ** (`style-src 'unsafe-inline'` cho ArtPlayer + khối FOUC,
-   `worker-src blob:`, `connect-src https:`, `media-src blob:`, `frame-src player.phimapi.com`).
-   Thiếu 1 chỗ = player chết hoặc chớp trắng.
-3. **Xoá `render/seo.ts` làm gãy `routes/sitemap.ts`** — trích `SITE_ORIGIN` ra `lib/` trước.
+### F7 — Verify bằng mắt ✅ xong
+Đã chụp production đủ 5 màn (trang chủ, detail, player đang phát, search overlay, grid phân trang)
+× desktop + mobile và đã chạy checklist tương tác. Chức năng chính pass: hero/carousel/card,
+ArtPlayer m3u8, search có dấu/không dấu + history, recommendation, `?page=2`, deep-link reload.
 
-### F7 — Verify bằng mắt (**ràng buộc cứng của user**)
-Build local → chụp 5 màn (trang chủ, detail, player đang phát, search overlay, grid phân trang)
-× desktop + mobile → **gửi user duyệt**. Chưa được user gật thì **chưa xong**.
-DevTools Console phải **0 lỗi CSP**.
+User đã xác nhận đúng frontend Netflix premium. Hai CSP error do Cloudflare inject đã được xử lý
+không cần `unsafe-inline`: browser document routes đi qua Worker, fetch SPA shell từ `ASSETS` và trả
+`Cache-Control: ... no-transform`; static JS/CSS/font/ảnh vẫn bypass Worker. Production version
+`80ef8e71-f3c1-446e-9a2b-01001a624fad`; Playwright home + deep-link đều `0 errors, 0 warnings`.
+API 200/404 contract và immutable hashed assets vẫn pass smoke test.
 
 Site cũ không còn chạy ở đâu để so sánh trực tiếp — ảnh chụp là bằng chứng duy nhất.
 
@@ -178,5 +181,5 @@ Không có `--remote`, `wrangler d1/kv/r2` đọc bản mô phỏng local **rỗ
 
 ## 9. Câu đầu tiên nên nói với user
 
-> "Đã đọc handoff. Đang ở F5/8 (self-host font), backend đã xong, production vẫn đang hiển thị
-> giao diện SSR hỏng cho tới khi cutover ở F6. Tiếp tục F5 chứ?"
+> "Đã đọc handoff. F1–F7 đã xong; user đã duyệt frontend và Console CSP sạch trên production.
+> Tiếp tục F8 để đồng bộ ADR/README/CLAUDE.md/MODULES.md chứ?"

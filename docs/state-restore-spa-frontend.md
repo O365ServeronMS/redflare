@@ -8,11 +8,10 @@ không phải git log.
 > các bẫy vận hành (deploy tay, CRON_KEY, `wrangler dev` hot-reload) không nằm trong plan.
 
 **Bắt đầu:** 2026-08-07
-**Trạng thái tổng:** 🟡 **F1–F4 xong.** Toàn bộ `/api/*` mà SPA cũ cần (7 endpoint kể cả
-home-data + alias) đã sống trên production, đọc D1 thật. **Vẫn chưa đụng một dòng giao diện
-nào** — SSR page cũ (giao diện hỏng) còn phục vụ song song. Còn lại: F5 (self-host font),
-**F6 (cutover — điểm không quay lại)**, F7 (verify bằng mắt — lúc trả lời được câu "đã giống
-giao diện cũ chưa"), F8 (docs).
+**Trạng thái tổng:** 🟡 **F1–F7 xong; chỉ còn F8.** SPA cũ đã được user xác nhận đúng frontend
+Netflix premium trên production; toàn bộ checklist chức năng và Console CSP đều pass. `/api/*`,
+sitemap và sync route vẫn đi qua Worker đúng contract. Inter đã self-host mà **không sửa CSS
+design**. Còn lại F8 (đồng bộ tài liệu kiến trúc).
 
 ---
 
@@ -24,9 +23,9 @@ giao diện cũ chưa"), F8 (docs).
 | **F2** | `/api/*` JSON trên D1 (6 endpoint + alias) | 🟢 **Xong, verify thật trên production** | 2026-08-07 | Deploy qua `wrangler deploy` tay (Git integration vẫn đứt) |
 | **F3** | Migration 0009: `actor_json` + `popularity` + sync capture | 🟢 **Xong, verify thật trên D1 production** | 2026-08-07 | Bắt được + sửa 1 bug thật có sẵn từ Phase 5 (`cache.purge()` ném lỗi đồng bộ) — xem log |
 | **F4** | `/api/home-data` (dùng `popularity`) | 🟢 **Xong, verify thật trên D1 production** | 2026-08-07 | Shape bất đối xứng đúng (hero mảng trần, 4 rail `{items}`); hero/trending còn thưa vì popularity đang backfill dần |
-| **F5** | Self-host Inter, bỏ Google Fonts | ⚪ Chưa bắt đầu | — | Quyết định #2 của user. Không đụng dòng CSS design nào |
-| **F6** | **Cutover**: `[assets]`→`dist` + `run_worker_first`, CSP mới, xoá SSR render | ⚪ Chưa bắt đầu | — | **Điểm không quay lại.** Bẫy lớn nhất: thiếu `run_worker_first` → SPA fallback **nuốt sạch `/api/*`** |
-| **F7** | **Verify bằng mắt** — ảnh chụp thật, user duyệt | ⚪ Chưa bắt đầu | — | Ràng buộc cứng của user: chưa đảm bảo giống giao diện cũ thì chưa coi là xong |
+| **F5** | Self-host Inter, bỏ Google Fonts | 🟢 **Xong, build verify local** | 2026-08-07 | 8 subset/weight được bundle thành 8 `.woff2`; không đụng dòng CSS design nào. CSP SPA chuyển đúng sang `public/_headers` |
+| **F6** | **Cutover**: `[assets]`→`dist` + `run_worker_first`, CSP mới, xoá SSR render | 🟢 **Xong, verify local + production** | 2026-08-07 | Deploy version `2979e564-970f-4c56-bccd-60b6bc021565`; SPA fallback và mọi Worker route đều pass smoke test |
+| **F7** | **Verify bằng mắt** — ảnh chụp thật, user duyệt | 🟢 **Xong, user duyệt + Console sạch** | 2026-08-07 | Desktop + mobile đủ 5 luồng; user xác nhận đúng frontend; CSP `0 errors, 0 warnings` |
 | **F8** | Đồng bộ tài liệu (ADR-0002 amendment, README, CLAUDE.md, MODULES.md) | ⚪ Chưa bắt đầu | — | |
 
 Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặn/sự cố · ⚫ bỏ
@@ -46,6 +45,72 @@ Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặ
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase F7: visual QA production, user duyệt, Console CSP sạch
+
+Đã kiểm production bằng browser thật ở desktop `1440×900` và mobile `390×844`, chụp đủ: home
+(hero + carousel), detail, ArtPlayer đang phát, search overlay, grid + phân trang. Không sửa
+`src/styles/*.css`, không chỉnh frontend trong phase kiểm thử này.
+
+**Checklist chức năng đã pass:** hero đổi slide và toàn bộ 20 slug hero hiện trả detail API 200;
+nút cuộn carousel hoạt động; click card mở detail; ArtPlayer phát m3u8 thật; search có dấu/không
+dấu cùng trả “Bạch Hồ Điệp” và lưu lịch sử; recommendation có dữ liệu hiển thị (“Thị Trưởng
+Kingstown” → “Ông Trùm Giang Hồ”); `?page=2` đổi dữ liệu + active page; deep-link reload không
+trắng trang.
+
+User đã xác nhận bộ ảnh đúng frontend yêu cầu. Hai CSP error ban đầu đến từ HTML do Cloudflare chèn
+sau deploy: inline `/cdn-cgi/challenge-platform/scripts/jsd/main.js` bootstrap và Web Analytics
+beacon `static.cloudflareinsights.com`. Không nới `script-src` sang `unsafe-inline`. Vì Workers
+Static Assets loại bỏ `no-transform` khi khai báo trực tiếp trong `_headers`, các route tài liệu SPA
+(`/`, `/phim/*`, `/danh-sach/*`, `/the-loai/*`, `/quoc-gia/*`, `/tim-kiem`) nay đi qua Worker,
+fetch SPA shell từ binding `ASSETS` rồi trả `Cache-Control: public, max-age=0, must-revalidate,
+no-transform`. Asset fingerprinted vẫn bypass Worker và giữ immutable cache.
+
+**Verify sau fix:** production version `80ef8e71-f3c1-446e-9a2b-01001a624fad`; home, detail và
+grid deep-link đều 200 + SPA shell + CSP + `no-transform`, không còn challenge/beacon trong HTML.
+Playwright trên home và deep-link detail: `0 errors, 0 warnings`; điều hướng SPA sang “Phim Bộ”
+render đúng. `/api/home-data` vẫn JSON 200, `/api/not-exist` vẫn text 404, hashed asset vẫn
+`max-age=31536000, immutable`. Client-side Web Analytics/JavaScript Detection không chạy trên HTML;
+Cloudflare edge analytics vẫn còn. Không sửa `src/styles/*.css`.
+
+### 2026-08-07 — Phase F6: cutover SPA lên production
+
+`wrangler.toml` nay phục vụ `dist/` bằng Static Assets với SPA fallback; `run_worker_first` chỉ giữ
+`/api/*`, `/__sync/*`, sitemap và robots đi qua Worker. Đã bỏ toàn bộ SSR page renderer/route cũ,
+giữ sitemap renderer và tách `SITE_ORIGIN` sang `src-ssr/lib/site.ts`. CSP của Static Assets và
+response động đã đồng bộ; nonce SSR không còn tồn tại. `index.html` preconnect đúng hai host ảnh thật,
+và error reload trong `src/main.js` không còn inline handler.
+
+Trước khi chốt CSP hẹp, đã kiểm dữ liệu D1 production và toàn bộ trang API: ảnh chỉ dùng
+`image.tmdb.org` và `phimimg.com`. Không sửa file nào trong `src/styles/`.
+
+**Verify:** `npm run build`, `npm run ssr:typecheck`, `wrangler deploy --dry-run`, local Wrangler
+route smoke test và `git diff --check` đều pass. Deploy production thành công với version
+`2979e564-970f-4c56-bccd-60b6bc021565`. Production smoke test pass: `/` và deep-link đều nhận cùng
+SPA bundle; asset có immutable cache; `/api/home-data` là JSON; API không tồn tại là 404 thay vì SPA;
+sitemap/robots đúng; `/__sync/status` không key là 404 `no-store`; CSP có trên cả Static Assets và
+Worker response. Cache HTML SSR cũ xuất hiện trong lần request đầu, sau đó revalidate và URL chính
+trả SPA mới với `CF-Cache-Status: MISS`.
+
+---
+
+### 2026-08-07 — Phase F5: self-host Inter + sửa vị trí CSP cho Static Assets
+
+Chạy `npm ci` để đồng bộ dependency sau pull, sau đó cài `@fontsource/inter`. `src/main.js` chỉ thêm
+8 import (Latin + Vietnamese × weight 400/500/700/900); `index.html` bỏ 3 thẻ Google Fonts. Không
+sửa bất kỳ file nào trong `src/styles/`.
+
+**Sửa một giả định kiến trúc trong plan F6:** với `run_worker_first` dạng danh sách chọn lọc, SPA được
+Static Assets phục vụ trực tiếp nên CSP/security headers của SPA phải nằm trong `public/_headers`.
+`securityHeaders.ts` chỉ bao phủ các response thực sự do Worker tạo. Đã thêm CSP tương thích
+ArtPlayer/hls.js cùng HSTS, `nosniff`, Referrer Policy và Permissions Policy vào `_headers`; F6 vẫn
+phải giữ middleware tương ứng cho `/api/*`, sitemap và `/__sync/*`.
+
+**Verify local:** `npm run build` pass; `npm run ssr:typecheck` pass; `dist/assets/` có 8 file
+`.woff2`; `dist/index.html` không còn `fonts.googleapis`/`fonts.gstatic`; `dist/_headers` chứa CSP;
+`git diff -- src/styles` rỗng. Chưa deploy và chưa cutover production.
+
+---
 
 ### 2026-08-07 — Phase F4: `/api/home-data` từ D1, verify shape bất đối xứng
 
@@ -224,9 +289,9 @@ với URL TMDB trực tiếp, không cần sửa), `upstreamFallback` (chỉ kí
 
 **Quyết định giữ/bỏ:** giữ toàn bộ data-layer D1 + sync/backfill/resolve + FTS5 +
 sitemap + Workers Caching; bỏ toàn bộ SSR page render. Nguyên tắc "No SPA" của handoff
-v1.0 chính thức đảo ngược (amendment ADR-0002 ở F7); nguyên tắc "runtime không gọi
+v1.0 chính thức đảo ngược (amendment ADR-0002 ở F8); nguyên tắc "runtime không gọi
 API ngoài" **giữ nguyên** — `/api/*` mới đọc D1, không đọc KKPhim/TMDB.
 
 **Rủi ro lớn nhất đã nhận diện:** CSP hiện tại sẽ giết ArtPlayer (inject `<style>`) và
 hls.js (blob worker + fetch m3u8 từ domain động `*.kkphimplayer*`) — F5.4 có spec CSP
-riêng; tiêu chí F6 là console 0 lỗi CSP trên browser thật.
+riêng; tiêu chí F7 là console 0 lỗi CSP trên browser thật.

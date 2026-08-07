@@ -8,9 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "wrangler dev --remote",
-    "ssr:dev": "wrangler dev --config wrangler.ssr.toml --remote",
-    "ssr:typecheck": "tsc --project tsconfig.ssr.json --noEmit",
-    "ssr:migrate": "wrangler d1 migrations apply redflare-db --remote"
+    "worker:typecheck": "tsc --project tsconfig.worker.json --noEmit",
+    "db:migrate": "wrangler d1 migrations apply redflare-db --remote"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260804.1",
@@ -19,6 +18,7 @@
     "wrangler": "^4.116.0"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.3.0",
     "artplayer": "^5.4.0",
     "hls.js": "^1.6.16",
     "hono": "^4.13.0"

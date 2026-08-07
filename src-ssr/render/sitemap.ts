@@ -1,5 +1,5 @@
 import { escapeHtml } from './escape'; // same escaping rules cover XML's reserved chars too
-import { SITE_ORIGIN } from './seo';
+import { SITE_ORIGIN } from '../lib/site';
 
 function isoDate(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toISOString().slice(0, 10);

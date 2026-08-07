@@ -9,3 +9,10 @@ export function applyImagePolicy(img, { priority = false } = {}) {
   img.loading = priority ? 'eager' : 'lazy';
   img.fetchPriority = priority ? 'high' : 'auto';
 }
+
+const TMDB_W500_URL_RE = /^(https:\/\/image\.tmdb\.org\/t\/p\/)w500\//;
+
+/** Use TMDB's smaller poster variant for movie cards. */
+export function toTmdbW185(url) {
+  return (url || '').replace(TMDB_W500_URL_RE, '$1w185/');
+}

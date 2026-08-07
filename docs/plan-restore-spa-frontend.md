@@ -106,15 +106,15 @@ trong `run_worker_first` không bao giờ tới worker. Bỏ được `apply404C
 |---|---|---|---|
 | **F1** | Chốt contract legacy API | `contract-legacy-api.md` có `file:line` cho mọi shape | 🟢 Xong |
 | **F2** | `/api/*` JSON trên D1 (6 endpoint + alias) | curl production từng route khớp contract | 🟢 Xong |
-| **F3** | Migration 0009: `actor_json` + `popularity` + sync capture | Resync 1 phim → cả 2 cột có dữ liệu thật | ⚪ |
-| **F4** | `/api/home-data` (dùng `popularity`) | curl đủ 5 key; `heroMovies` là **mảng trần**; hero có backdrop TMDB, không `hoathinh` | ⚪ |
-| **F5** | Self-host Inter, bỏ Google Fonts | `dist/assets/*.woff2` tồn tại; `index.html` không còn link tới Google | ⚪ |
-| **F6** | **Cutover**: `[assets]`→`dist` + `run_worker_first`, CSP mới, xoá SSR render | Production: `/` = SPA shell; `/api/*` + sitemap + `/__sync/*` KHÔNG bị nuốt | ⚪ |
-| **F7** | **Verify bằng mắt** — ảnh chụp thật, user duyệt | User xác nhận giống giao diện cũ; DevTools **0 lỗi CSP** | ⚪ |
+| **F3** | Migration 0009: `actor_json` + `popularity` + sync capture | Resync 1 phim → cả 2 cột có dữ liệu thật | 🟢 Xong |
+| **F4** | `/api/home-data` (dùng `popularity`) | curl đủ 5 key; `heroMovies` là **mảng trần**; hero có backdrop TMDB, không `hoathinh` | 🟢 Xong |
+| **F5** | Self-host Inter, bỏ Google Fonts | `dist/assets/*.woff2` tồn tại; `index.html` không còn link tới Google | 🟢 Xong |
+| **F6** | **Cutover**: `[assets]`→`dist` + `run_worker_first`, CSP mới, xoá SSR render | Production: `/` = SPA shell; `/api/*` + sitemap + `/__sync/*` KHÔNG bị nuốt | 🟢 Xong |
+| **F7** | **Verify bằng mắt** — ảnh chụp thật, user duyệt | User xác nhận giống giao diện cũ; DevTools **0 lỗi CSP** | 🟢 Xong — user duyệt, Console `0 errors, 0 warnings` |
 | **F8** | Đồng bộ tài liệu (ADR amendment, README, CLAUDE.md, MODULES.md) | Không doc nào còn mô tả kiến trúc không tồn tại | ⚪ |
 
 F3–F5 deploy được mà **không đụng giao diện** (SSR cũ vẫn phục vụ song song). **F6 là điểm không
-quay lại.**
+quay lại và đã hoàn tất ngày 2026-08-07.**
 
 ---
 
@@ -202,7 +202,11 @@ Nghĩa là self-host Inter **hoạt động ngay, không cần sửa một dòng
    (CSP không có `'unsafe-inline'` cho **script**; inline handler sẽ chết im lặng).
    *(Ngoại lệ #3/#4 nằm trong 2 ngoại lệ plan gốc đã cho phép — không phát sinh mới.)*
 4. `wrangler.toml`: `[assets]` như §3, **có `run_worker_first`**.
-5. **CSP viết lại** (`securityHeaders.ts`) — xử 5 chỗ còn lại của §2:
+5. **CSP/security headers cho SPA viết trong `public/_headers`** — không chỉ trong
+   `securityHeaders.ts`. Với `run_worker_first` dạng danh sách chọn lọc ở §3, navigation và file SPA
+   được Static Assets phục vụ trực tiếp nên không chạy middleware của Worker. `_headers` chỉ áp dụng
+   cho phản hồi Static Assets; các route động đi qua Worker vẫn phải gắn security headers trong
+   `securityHeaders.ts`. CSP của SPA xử 5 chỗ còn lại của §2:
    ```
    default-src 'self';
    script-src 'self';
@@ -219,7 +223,9 @@ Nghĩa là self-host Inter **hoạt động ngay, không cần sửa một dòng
    (`SELECT DISTINCT substr(poster_path,1,30) FROM movie`). Sai chỗ này = **ảnh vỡ = giao diện
    hỏng lần nữa** — đúng thứ ta đang đi sửa. Nếu có host lạ → nới thành `img-src 'self' https: data:`.
 6. Bỏ `nonce` khỏi `securityHeaders.ts` (chỉ tồn tại cho trang player SSR sắp xoá) và
-   `Variables: { nonce: string }` khỏi type của app.
+   `Variables: { nonce: string }` khỏi type của app. Giữ middleware này cho các phản hồi động của
+   Worker (HSTS, `nosniff`, Referrer Policy, Permissions Policy); không dựa vào `public/_headers` cho
+   `/api/*`, sitemap hay `/__sync/*` vì `_headers` không áp dụng cho response do Worker tạo.
 7. **Xoá:** `src-ssr/render/{layout,seo,card,homePage,listPage,detailPage,playerPage,searchPage}.ts`,
    `src-ssr/routes/{home,detail,list,genre,country,player,search}.ts`, `public-ssr/`.
    **Kiểm phụ thuộc trước khi xoá:** `routes/sitemap.ts` đang import `render/sitemap.ts` và
@@ -242,10 +248,9 @@ curl -H "x-cron-key: sai" /__sync/status → 404 (không phải index.html)
 
 ### F7 — Verify bằng mắt (ràng buộc cứng của user)
 
-Site cũ **không còn chạy ở đâu** để so sánh — production hiện là bản SSR hỏng. Nên:
+Site tham chiếu cũ **không còn chạy ở nơi khác** để so sánh; production hiện đã là SPA vừa khôi phục. Nên:
 
-1. Chạy `npm run dev` (Vite proxy `/api/*` → production, tức backend D1 thật) hoặc
-   `wrangler dev --remote` với dist đã build.
+1. Kiểm trực tiếp production (hoặc chạy `wrangler dev` với dist đã build nếu cần cô lập lỗi).
 2. **Chụp màn hình thật** 5 màn: trang chủ (hero + carousel), detail, player đang phát, search
    overlay, grid có phân trang. Cả desktop + mobile viewport.
 3. **Gửi user duyệt trước khi coi là xong.** Đây là bài học đắt nhất của cả dự án: mọi phase SSR

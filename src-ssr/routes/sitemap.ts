@@ -3,7 +3,7 @@ import type { Env } from '../types/env';
 import { MovieRepository } from '../repositories/movieRepository';
 import { TaxonomyRepository } from '../repositories/taxonomyRepository';
 import { renderSitemapIndex, renderUrlset, renderRobotsTxt } from '../render/sitemap';
-import { SITE_ORIGIN } from '../render/seo';
+import { SITE_ORIGIN } from '../lib/site';
 import { LIST_TYPE_LABELS } from '../lib/listTypes';
 import { applyPageCache } from '../cache/control';
 
