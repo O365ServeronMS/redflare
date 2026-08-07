@@ -40,15 +40,23 @@ syncRoute.get('/__sync/backfill-page', async (c) => {
 
 syncRoute.get('/__sync/status', async (c) => {
   const syncState = new SyncStateRepository(c.env.DB);
-  const [cursor, rowsToday, catalogCount] = await Promise.all([
+  const [cursor, rowsToday, catalogCount, backfillDone, backfillTypeIndex, backfillPage] = await Promise.all([
     syncState.get('cursor:recent'),
     syncState.getRowsWrittenToday(),
     new MovieRepository(c.env.DB).countByTier('catalog'),
+    syncState.get('backfill:done'),
+    syncState.get('backfill:type_index'),
+    syncState.get('backfill:page'),
   ]);
   return c.json({
     cursorRecent: cursor,
     rowsWrittenToday: rowsToday,
     backfillMode: c.env.BACKFILL_MODE ?? 'free',
     catalogMovieCount: catalogCount,
+    backfill: {
+      done: backfillDone === '1',
+      typeIndex: backfillTypeIndex ? Number(backfillTypeIndex) : 0,
+      page: backfillPage ? Number(backfillPage) : 1,
+    },
   });
 });

@@ -45,10 +45,10 @@ function buildRepos(env: Env) {
   };
 }
 
-function buildClients(env: Env) {
+function buildClients(env: Env, shardDivisor = SHARD_COUNT) {
   return {
-    kkphim: new KkphimClient(new RateLimiter(PHIMAPI_AGGREGATE_RPS / SHARD_COUNT)),
-    tmdb: new TmdbClient(env.TMDB_API_TOKEN ?? '', new RateLimiter(TMDB_AGGREGATE_RPS / SHARD_COUNT)),
+    kkphim: new KkphimClient(new RateLimiter(PHIMAPI_AGGREGATE_RPS / shardDivisor)),
+    tmdb: new TmdbClient(env.TMDB_API_TOKEN ?? '', new RateLimiter(TMDB_AGGREGATE_RPS / shardDivisor)),
   };
 }
 
@@ -161,19 +161,90 @@ export async function runIncrementalSync(env: Env): Promise<{ slugsFound: number
   return { slugsFound: slugs.length, shards: shardResults };
 }
 
-/** Backfill (Phase 7): walks every taxonomy listing page by page, feeding
- * the same syncSlugBatch path incremental sync uses. `mode` selects the
- * governor behavior (plan §7 table) -- same code either way, only the
- * throttle/governor posture differs. */
+/** One page of one taxonomy listing (plan §7). Not sharded -- called either
+ * standalone (the /__sync/backfill-page route) or in a loop by
+ * runBackfillTick below, so the KKPhim/TMDB rate limiters use the full
+ * aggregate budget (PHIMAPI_AGGREGATE_RPS), not a shard fraction of it. */
 export async function runBackfillPage(
   env: Env,
   type: string,
   page: number
 ): Promise<{ slugsFound: number; result: ShardResult }> {
-  const clients = buildClients(env);
+  const clients = buildClients(env, 1);
   const items = await clients.kkphim.getListingPage(type, page);
   const slugs = items.map((i) => i.slug);
   if (slugs.length === 0) return { slugsFound: 0, result: { processed: 0, written: 0, unchanged: 0, errors: 0, rowsWritten: 0, governed: false } };
   const result = await syncSlugBatch(env, slugs);
   return { slugsFound: slugs.length, result };
+}
+
+// Crawl order for the backfill walk -- every /danh-sach/:type the site
+// exposes (src-ssr/lib/listTypes.ts), same set the old SPA's Footer.js
+// linked. Not hoat-hinh-first or any particular priority; plan §7 doesn't
+// call for ranking, just full coverage.
+const BACKFILL_TYPES = ['phim-le', 'phim-bo', 'hoat-hinh', 'tv-shows'];
+// Leaves ~2 min of the Cron Trigger's 15-min wall-time ceiling
+// (developers.cloudflare.com/workers/platform/limits, verified 2026-08-07)
+// as margin -- a tick that ran right up to the limit would get killed
+// mid-write instead of persisting its cursor cleanly.
+const BACKFILL_TICK_BUDGET_MS = 13 * 60 * 1000;
+// Guards against an unbounded loop if a taxonomy listing somehow never
+// returns an empty page (shouldn't happen, but the cost of being wrong here
+// is a stuck cron forever, not a slow one).
+const BACKFILL_MAX_PAGES_PER_TYPE = 5000;
+
+/** Cron-driven backfill (Phase 7) -- deliberately NOT invoked over HTTP.
+ * ADR-0002's own principle ("Cron is the ONLY component allowed to call
+ * TMDB/phimimg") argues against a design that needs a human to keep curling
+ * a CRON_KEY-gated route by hand; this instead resumes from a D1 cursor
+ * every scheduled() tick until the whole catalog is walked, then no-ops
+ * forever. `env.BACKFILL_MODE === 'burst'` only changes what syncSlugBatch
+ * does inside this loop (governor on/off, plan §7 table) -- the walking
+ * logic itself is identical either way, just faster or slower to finish. */
+export async function runBackfillTick(env: Env): Promise<{ ticked: boolean; pagesProcessed: number; done: boolean }> {
+  const repos = buildRepos(env);
+  if ((await repos.syncState.get('backfill:done')) === '1') {
+    return { ticked: false, pagesProcessed: 0, done: true };
+  }
+
+  let typeIndex = Number((await repos.syncState.get('backfill:type_index')) ?? '0');
+  let page = Number((await repos.syncState.get('backfill:page')) ?? '1');
+  const deadline = Date.now() + BACKFILL_TICK_BUDGET_MS;
+  let pagesProcessed = 0;
+
+  while (Date.now() < deadline && typeIndex < BACKFILL_TYPES.length) {
+    const type = BACKFILL_TYPES[typeIndex] as string;
+    if (page > BACKFILL_MAX_PAGES_PER_TYPE) {
+      typeIndex++;
+      page = 1;
+      continue;
+    }
+
+    const { slugsFound, result } = await runBackfillPage(env, type, page);
+    pagesProcessed++;
+
+    if (slugsFound === 0) {
+      // This type's listing is exhausted -- move to the next one.
+      typeIndex++;
+      page = 1;
+      continue;
+    }
+
+    if (result.governed) {
+      // Daily D1 write quota hit (free mode only, plan §2.2) -- stop for
+      // this tick without advancing `page`, so the same page is retried
+      // once tomorrow's quota resets.
+      break;
+    }
+
+    page++;
+  }
+
+  await repos.syncState.set('backfill:type_index', String(typeIndex));
+  await repos.syncState.set('backfill:page', String(page));
+
+  const done = typeIndex >= BACKFILL_TYPES.length;
+  if (done) await repos.syncState.set('backfill:done', '1');
+
+  return { ticked: true, pagesProcessed, done };
 }

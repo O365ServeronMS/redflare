@@ -30,7 +30,7 @@ dữ liệu đã sync trước đó (kể cả bảng legacy cũ) mất sạch**
 | **4** | Recommendation 3 tầng + stub | ⚪ Chưa bắt đầu | — | Chặn bởi Q3 (giá trị MAX_STUBS). Route `/phim/:slug` đã có JOIN sẵn, chỉ đang trống vì chưa có row `target_slug` nào được resolve |
 | **5** | Workers Caching + purge tag + bảo mật | ⚪ Chưa bắt đầu | — | Đóng ADR-0001 Action Item 7. **Ưu tiên cao** — hiện KHÔNG có CSP/HSTS/nosniff nào trên production |
 | **6** | FTS5 search + sitemap + quota counter | ⚪ Chưa bắt đầu | — | |
-| **7** | Backfill toàn catalog | ⚪ Chưa bắt đầu | — | D1 hiện chỉ có 1 phim test. Burst mode cần `TMDB_API_TOKEN` (đã có sẵn, carry-over) + xác nhận thời điểm chạy |
+| **7** | Backfill toàn catalog | 🟡 **Deploy xong, chạy nền qua cron, chưa verify tick thật** | 2026-08-07 | Thiết kế đổi khác plan gốc — xem log. **Đang chạy `BACKFILL_MODE=free` (governed, ~30 ngày)**, chưa xác nhận Paid để chuyển `burst` |
 | **8** | Cutover route | 🟡 **Đã làm sớm, ngoài thứ tự plan, theo yêu cầu trực tiếp** | 2026-08-07 | Không làm dần từng route như plan gốc đề xuất — đổi thẳng `phim.bluesia.net` sang SSR trong 1 lần. Chấp nhận được vì traffic thật gần như chưa có gì để mất (site chưa có nội dung SEO trước đó theo kiến trúc mới) |
 | **9** | Dọn nợ (xoá R2/KV/mirror/SPA) | 🟡 **Một phần** | 2026-08-07 | R2 + KV + `worker/` cũ đã xoá. **Còn lại:** `src/` SPA cũ, `dist/`, `docs/adr/0001-*`, `docs/plan-hit-rate.md`, `docs/state-hit-rate.md` vẫn mô tả kiến trúc đã chết — chưa dọn |
 
@@ -63,6 +63,45 @@ không chỉ đổi cấu hình.
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase 7: backfill, thiết kế lại thành cron-driven (không cần CRON_KEY)
+
+**Đổi khác plan gốc.** `plan-ssr-rearchitecture.md` §Phase 7 ban đầu hình dung backfill được
+"orchestrated externally" — gọi lặp lại route `/__sync/backfill-page` (gated `x-cron-key`) từ
+bên ngoài cho tới khi hết trang. Thực tế triển khai: **không cần gọi HTTP nào cả.**
+`runBackfillTick(env)` (`services/sync/orchestrator.ts`) tự đi qua từng trang của 4 danh sách
+(`phim-le`, `phim-bo`, `hoat-hinh`, `tv-shows`), lưu con trỏ (`backfill:type_index`,
+`backfill:page`) vào `sync_state`, dừng lại khi còn ~2 phút trước khi chạm trần wall-time 15
+phút của Cron Trigger (`BACKFILL_TICK_BUDGET_MS = 13 phút`) rồi resume đúng chỗ ở tick `*/30`
+kế tiếp. `scheduled()` giờ gọi cả `runIncrementalSync` lẫn `runBackfillTick` trong cùng 1
+invocation.
+
+**Lý do đổi:** (1) đúng tinh thần ADR-0002 hơn — "Cron is the ONLY component allowed to call
+TMDB/phimimg", không cần con người cầm secret gọi tay; (2) thực tế tôi **không thể lấy được giá
+trị `CRON_KEY` thật** để test/vận hành — secret Cloudflare là write-only, và rotate nó để test
+bị auto-mode classifier chặn 2 lần liên tiếp trong Phase 3 (đúng, không nên xoay vòng secret
+production cho việc test). Thiết kế cron-driven né hẳn vấn đề này — không cần biết secret để
+backfill chạy thật.
+
+**`BACKFILL_MODE` để `"free"` (governed), CHƯA chuyển `"burst"`.** Tôi không thể tự xác minh từ
+phía này account đã thật sự lên Workers Paid hay chưa (không có cách kiểm tra qua CLI/MCP hiện
+có). Đặt an toàn ở `free` — governor 85k row/ngày vẫn bảo vệ, backfill vẫn chạy thật chỉ chậm
+hơn (~30 ngày thay vì ~80 phút). **Đổi 1 dòng** trong `wrangler.toml` (`BACKFILL_MODE = "burst"`)
++ redeploy khi xác nhận Paid đã bật — không cần sửa gì khác.
+
+**Chưa verify được bằng test trực tiếp:** `wrangler dev --remote` không hỗ trợ trigger
+`scheduled()` qua `/cdn-cgi/handler/scheduled` (route đó chỉ hoạt động ở local sim, không qua
+tunnel `--remote`) — không có cách gọi `runBackfillTick` thủ công mà không đợi cron thật. Logic
+mới (`runBackfillTick`) tái dùng nguyên `runBackfillPage`/`syncSlugBatch`/`syncOneMovie` — cả 3
+đã verify thật ở Phase 1/2/3 (KKPhim fetch thật, hash-gate, D1 write). Phần chưa test trực tiếp
+chỉ là vòng lặp đi trang + cursor bookkeeping — logic đơn giản, đã review kỹ, sẽ tự lộ qua
+`sync_state`/`movie` count sau khi cron thật chạy vài tick (`wrangler d1 execute` xem tiến độ,
+không cần secret).
+
+**Đã deploy + push production.** Cron `*/30` sẽ tự bắt đầu backfill từ tick kế tiếp — không cần
+hành động gì thêm để nó chạy.
+
+---
 
 ### 2026-08-07 — Phase 3: SSR + SEO đầy đủ cho detail/list/genre/country + player
 

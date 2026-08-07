@@ -6,7 +6,7 @@ import { genreRoute } from './routes/genre';
 import { countryRoute } from './routes/country';
 import { playerRoute } from './routes/player';
 import { syncRoute } from './routes/sync';
-import { runIncrementalSync } from './services/sync/orchestrator';
+import { runIncrementalSync, runBackfillTick } from './services/sync/orchestrator';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -25,11 +25,18 @@ app.get('/', (c) => c.text('redflare-ssr: Phase 3 -- see /phim/:slug, /danh-sach
 export default {
   fetch: app.fetch,
 
-  // */30, same cadence as production's warm refresh (wrangler.ssr.toml).
-  // Only handles incremental sync -- backfill (Phase 7) is triggered on
-  // demand via /__sync/backfill-page, deliberately never on a schedule, so
-  // burst mode can't accidentally overlap a governed tick.
+  // */30, same cadence for both jobs. Incremental sync runs first (small,
+  // bounded, keeps recent titles fresh); backfill (Phase 7) gets the rest
+  // of this invocation's 15-min wall-time budget and resumes from its own
+  // D1 cursor next tick -- see services/sync/orchestrator.ts
+  // runBackfillTick for why this replaced the "curl a CRON_KEY route
+  // repeatedly" design the plan originally sketched.
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runIncrementalSync(env));
+    ctx.waitUntil(
+      (async () => {
+        await runIncrementalSync(env);
+        await runBackfillTick(env);
+      })()
+    );
   },
 };
