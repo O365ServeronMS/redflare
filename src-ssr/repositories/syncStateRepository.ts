@@ -36,4 +36,24 @@ export class SyncStateRepository {
     const current = await this.getRowsWrittenToday();
     await this.set(this.rowsKey(), String(current + n));
   }
+
+  private sampleKey(date = new Date()): string {
+    return `req_sample:${date.toISOString().slice(0, 10)}`;
+  }
+
+  /** Plan §6 / ADR-0002 Finding 7: a visible daily-request estimate so
+   * hitting the Free plan's 100,000 req/day ceiling (Error 1027) is
+   * something seen coming, not discovered from a support ticket. Sampled
+   * at a fixed rate (middleware/requestSampler.ts) rather than counted on
+   * every request -- an exact per-request D1 write would itself become
+   * the thing that blows the write quota under real traffic. */
+  async getSampledRequestsToday(): Promise<number> {
+    const v = await this.get(this.sampleKey());
+    return v ? Number(v) : 0;
+  }
+
+  async incrementSampledRequestsToday(): Promise<void> {
+    const current = await this.getSampledRequestsToday();
+    await this.set(this.sampleKey(), String(current + 1));
+  }
 }

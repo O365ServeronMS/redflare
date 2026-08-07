@@ -4,6 +4,7 @@ import { MovieRepository } from '../../repositories/movieRepository';
 import { EpisodeRepository } from '../../repositories/episodeRepository';
 import { RecommendationRepository } from '../../repositories/recommendationRepository';
 import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
+import { SearchRepository } from '../../repositories/searchRepository';
 import { KkphimClient } from './kkphimClient';
 import { TmdbClient } from './tmdbClient';
 import { normalizeMovie } from './normalize';
@@ -34,6 +35,7 @@ export async function syncOneMovie(
     episode: EpisodeRepository;
     recommendation: RecommendationRepository;
     taxonomy: TaxonomyRepository;
+    search: SearchRepository;
   }
 ): Promise<SyncOneResult> {
   try {
@@ -64,6 +66,7 @@ export async function syncOneMovie(
       movie.recommendationTargets.map((t, i) => ({ targetTmdbId: t.tmdbId, targetType: t.tmdbType, sortOrder: i }))
     );
     await repos.taxonomy.syncMovieTaxonomy(slug, movie.genres, movie.countries);
+    await repos.search.indexMovie(slug, movie.title, movie.originalTitle);
 
     const rowsWritten =
       written + movie.episodes.length + movie.recommendationTargets.length + movie.genres.length * 2 + movie.countries.length * 2;

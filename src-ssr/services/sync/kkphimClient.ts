@@ -93,12 +93,29 @@ export class KkphimClient {
     return data?.items ?? [];
   }
 
-  /** One page of a taxonomy listing, used by backfill (plan Phase 7). */
-  async getListingPage(type: string, page: number): Promise<KkphimListItem[]> {
+  /** One page of a taxonomy listing, used by backfill (plan Phase 7).
+   * Returns `totalPages` from the API's own pagination metadata --
+   * deliberately NOT inferred from "did this page come back empty", which
+   * conflates two different things: genuinely reaching the last page vs. a
+   * transient fetch failure/timeout on some page in the middle. The first
+   * production run of the backfill (2026-08-07) got this wrong the other
+   * way and silently marked the whole catalog "done" after ~1 page/type
+   * (91 movies synced against a real catalog phimapi.com reports as
+   * 16,920 items for phim-le ALONE) -- see docs/state-ssr-rearchitecture.md
+   * for the full account. `totalPages: null` means the response didn't
+   * parse at all (network/shape failure), which the caller must treat as
+   * "retry this same page later", never as "this type is exhausted". */
+  async getListingPage(type: string, page: number): Promise<{ items: KkphimListItem[]; totalPages: number | null }> {
     await this.limiter.wait();
     const res = await fetchWithTimeout(`${KKPHIM_BASE}/v1/api/danh-sach/${type}?page=${page}`);
-    if (!res) return [];
-    const data = await res.json<{ data?: { items?: KkphimListItem[] } }>().catch(() => null);
-    return data?.data?.items ?? [];
+    if (!res) return { items: [], totalPages: null };
+    const data = await res
+      .json<{ data?: { items?: KkphimListItem[]; params?: { pagination?: { totalPages?: number } } } }>()
+      .catch(() => null);
+    if (!data) return { items: [], totalPages: null };
+    return {
+      items: data.data?.items ?? [],
+      totalPages: data.data?.params?.pagination?.totalPages ?? null,
+    };
   }
 }

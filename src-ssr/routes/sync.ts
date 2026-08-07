@@ -5,6 +5,9 @@ import { syncSlugBatch, runIncrementalSync, runBackfillPage } from '../services/
 import { SyncStateRepository } from '../repositories/syncStateRepository';
 import { MovieRepository } from '../repositories/movieRepository';
 import { applyNoStore } from '../cache/control';
+import { SAMPLE_RATE } from '../middleware/requestSampler';
+
+const FREE_PLAN_DAILY_REQUEST_LIMIT = 100_000;
 
 export const syncRoute = new Hono<{ Bindings: Env }>();
 // Ops routes reflect live/mutating state -- never cache-eligible, including
@@ -50,14 +53,22 @@ syncRoute.get('/__sync/backfill-page', async (c) => {
 
 syncRoute.get('/__sync/status', async (c) => {
   const syncState = new SyncStateRepository(c.env.DB);
-  const [cursor, rowsToday, catalogCount, backfillDone, backfillTypeIndex, backfillPage] = await Promise.all([
-    syncState.get('cursor:recent'),
-    syncState.getRowsWrittenToday(),
-    new MovieRepository(c.env.DB).countByTier('catalog'),
-    syncState.get('backfill:done'),
-    syncState.get('backfill:type_index'),
-    syncState.get('backfill:page'),
-  ]);
+  const [cursor, rowsToday, catalogCount, backfillDone, backfillTypeIndex, backfillPage, sampledRequests] =
+    await Promise.all([
+      syncState.get('cursor:recent'),
+      syncState.getRowsWrittenToday(),
+      new MovieRepository(c.env.DB).countByTier('catalog'),
+      syncState.get('backfill:done'),
+      syncState.get('backfill:type_index'),
+      syncState.get('backfill:page'),
+      syncState.getSampledRequestsToday(),
+    ]);
+
+  // ADR-0002 Finding 7: an estimate, not an exact count -- see
+  // middleware/requestSampler.ts for why it's sampled instead of counted
+  // per-request.
+  const estimatedRequestsToday = sampledRequests * SAMPLE_RATE;
+
   return c.json({
     cursorRecent: cursor,
     rowsWrittenToday: rowsToday,
@@ -67,6 +78,11 @@ syncRoute.get('/__sync/status', async (c) => {
       done: backfillDone === '1',
       typeIndex: backfillTypeIndex ? Number(backfillTypeIndex) : 0,
       page: backfillPage ? Number(backfillPage) : 1,
+    },
+    quota: {
+      estimatedRequestsToday,
+      freeplanDailyLimit: FREE_PLAN_DAILY_REQUEST_LIMIT,
+      estimatedPercentUsed: Math.round((estimatedRequestsToday / FREE_PLAN_DAILY_REQUEST_LIMIT) * 1000) / 10,
     },
   });
 });

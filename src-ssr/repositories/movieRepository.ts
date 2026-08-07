@@ -158,6 +158,20 @@ export class MovieRepository {
     return { items, nextCursor };
   }
 
+  /** Sitemap generation only (routes/sitemap.ts) -- the one legitimate use
+   * of OFFSET in this codebase. Every other listing route uses keyset
+   * pagination to protect the D1 rows-read quota from real user traffic
+   * (see getPageByType above); sitemaps are fetched by crawlers on a slow,
+   * infrequent cadence, not on every page view, so the OFFSET cost here is
+   * bounded and rare rather than proportional to site traffic. */
+  async getSitemapPage(offset: number, limit: number): Promise<{ slug: string; last_synced: number }[]> {
+    const res = await this.db
+      .prepare('SELECT slug, last_synced FROM movie WHERE tier = ? ORDER BY slug LIMIT ? OFFSET ?')
+      .bind('catalog', limit, offset)
+      .all<{ slug: string; last_synced: number }>();
+    return res.results ?? [];
+  }
+
   async countByTier(tier: 'catalog' | 'stub'): Promise<number> {
     const row = await this.db
       .prepare('SELECT COUNT(*) as n FROM movie WHERE tier = ?')

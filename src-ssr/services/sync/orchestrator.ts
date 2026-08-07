@@ -3,6 +3,7 @@ import { MovieRepository } from '../../repositories/movieRepository';
 import { EpisodeRepository } from '../../repositories/episodeRepository';
 import { RecommendationRepository } from '../../repositories/recommendationRepository';
 import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
+import { SearchRepository } from '../../repositories/searchRepository';
 import { SyncStateRepository } from '../../repositories/syncStateRepository';
 import { KkphimClient } from './kkphimClient';
 import { TmdbClient } from './tmdbClient';
@@ -41,6 +42,7 @@ function buildRepos(env: Env) {
     episode: new EpisodeRepository(env.DB),
     recommendation: new RecommendationRepository(env.DB),
     taxonomy: new TaxonomyRepository(env.DB),
+    search: new SearchRepository(env.DB),
     syncState: new SyncStateRepository(env.DB),
   };
 }
@@ -169,13 +171,19 @@ export async function runBackfillPage(
   env: Env,
   type: string,
   page: number
-): Promise<{ slugsFound: number; result: ShardResult }> {
+): Promise<{ slugsFound: number; totalPages: number | null; result: ShardResult }> {
   const clients = buildClients(env, 1);
-  const items = await clients.kkphim.getListingPage(type, page);
+  const { items, totalPages } = await clients.kkphim.getListingPage(type, page);
   const slugs = items.map((i) => i.slug);
-  if (slugs.length === 0) return { slugsFound: 0, result: { processed: 0, written: 0, unchanged: 0, errors: 0, rowsWritten: 0, governed: false } };
+  if (slugs.length === 0) {
+    return {
+      slugsFound: 0,
+      totalPages,
+      result: { processed: 0, written: 0, unchanged: 0, errors: 0, rowsWritten: 0, governed: false },
+    };
+  }
   const result = await syncSlugBatch(env, slugs);
-  return { slugsFound: slugs.length, result };
+  return { slugsFound: slugs.length, totalPages, result };
 }
 
 // Crawl order for the backfill walk -- every /danh-sach/:type the site
@@ -192,6 +200,17 @@ const BACKFILL_TICK_BUDGET_MS = 13 * 60 * 1000;
 // returns an empty page (shouldn't happen, but the cost of being wrong here
 // is a stuck cron forever, not a slow one).
 const BACKFILL_MAX_PAGES_PER_TYPE = 5000;
+// A page coming back empty is NOT proof a listing is exhausted -- it can
+// also mean a single fetch failed/timed out (kkphimClient.ts returns
+// totalPages: null in that case). Only conclude "this type is done" when
+// the API's own pagination metadata says so (page > totalPages); an
+// unexplained empty page gets a few immediate retries before the tick
+// gives up and leaves the cursor exactly where it was, to be retried next
+// tick. This is the fix for the bug the first production backfill run hit
+// 2026-08-07: treating any empty page as "exhausted" marked the whole
+// catalog done after ~1 page/type (91 movies synced against a real
+// phim-le listing alone reporting 16,920 items / 705 pages).
+const MAX_CONSECUTIVE_EMPTY_RETRIES = 3;
 
 /** Cron-driven backfill (Phase 7) -- deliberately NOT invoked over HTTP.
  * ADR-0002's own principle ("Cron is the ONLY component allowed to call
@@ -211,24 +230,38 @@ export async function runBackfillTick(env: Env): Promise<{ ticked: boolean; page
   let page = Number((await repos.syncState.get('backfill:page')) ?? '1');
   const deadline = Date.now() + BACKFILL_TICK_BUDGET_MS;
   let pagesProcessed = 0;
+  let consecutiveEmpty = 0;
 
   while (Date.now() < deadline && typeIndex < BACKFILL_TYPES.length) {
     const type = BACKFILL_TYPES[typeIndex] as string;
     if (page > BACKFILL_MAX_PAGES_PER_TYPE) {
       typeIndex++;
       page = 1;
+      consecutiveEmpty = 0;
       continue;
     }
 
-    const { slugsFound, result } = await runBackfillPage(env, type, page);
+    const { slugsFound, totalPages, result } = await runBackfillPage(env, type, page);
     pagesProcessed++;
 
     if (slugsFound === 0) {
-      // This type's listing is exhausted -- move to the next one.
-      typeIndex++;
-      page = 1;
+      if (totalPages !== null && page > totalPages) {
+        // Confirmed exhausted by the API's own pagination metadata, not
+        // guessed from an empty response.
+        typeIndex++;
+        page = 1;
+        consecutiveEmpty = 0;
+        continue;
+      }
+      // Unexplained empty page (transient failure, or totalPages unknown).
+      // Retry a bounded number of times, then leave the cursor where it is
+      // and let the NEXT tick retry -- never silently advance past a page
+      // we never actually confirmed was empty for a real reason.
+      consecutiveEmpty++;
+      if (consecutiveEmpty >= MAX_CONSECUTIVE_EMPTY_RETRIES) break;
       continue;
     }
+    consecutiveEmpty = 0;
 
     if (result.governed) {
       // Daily D1 write quota hit (free mode only, plan §2.2) -- stop for

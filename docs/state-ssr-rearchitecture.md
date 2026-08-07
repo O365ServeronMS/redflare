@@ -29,7 +29,7 @@ dữ liệu đã sync trước đó (kể cả bảng legacy cũ) mất sạch**
 | **3** | SSR + SEO (detail/list/genre/country + player) | 🟢 **Xong, verify thật** | 2026-08-07 | JSON-LD parse hợp lệ, 404 đúng cho slug/genre/country/type không tồn tại. Search **không** nằm trong phase này (đúng thiết kế — Phase 6/FTS5) |
 | **4** | Recommendation 3 tầng + stub | ⚪ Chưa bắt đầu | — | Chặn bởi Q3 (giá trị MAX_STUBS). Route `/phim/:slug` đã có JOIN sẵn, chỉ đang trống vì chưa có row `target_slug` nào được resolve |
 | **5** | Workers Caching + purge tag + bảo mật | 🟢 **Xong, verify thật trên production — trừ ETag/304** | 2026-08-07 | Đóng ADR-0001 Action Item 7. **ETag bị mất trên đường truyền, nguyên nhân chưa xác định** (xem log) |
-| **6** | FTS5 search + sitemap + quota counter | ⚪ Chưa bắt đầu | — | |
+| **6** | FTS5 search + sitemap + quota counter | 🟢 **Xong, verify thật trên D1 production** | 2026-08-07 | Tình cờ phát hiện + sửa 1 bug thật ở Phase 7 (backfill dừng sai ở 91 phim thay vì hàng chục nghìn) — xem log |
 | **7** | Backfill toàn catalog | 🟡 **Deploy xong, chạy nền qua cron, chưa verify tick thật** | 2026-08-07 | Thiết kế đổi khác plan gốc — xem log. **Đang chạy `BACKFILL_MODE=free` (governed, ~30 ngày)**, chưa xác nhận Paid để chuyển `burst` |
 | **8** | Cutover route | 🟡 **Đã làm sớm, ngoài thứ tự plan, theo yêu cầu trực tiếp** | 2026-08-07 | Không làm dần từng route như plan gốc đề xuất — đổi thẳng `phim.bluesia.net` sang SSR trong 1 lần. Chấp nhận được vì traffic thật gần như chưa có gì để mất (site chưa có nội dung SEO trước đó theo kiến trúc mới) |
 | **9** | Dọn nợ (xoá R2/KV/mirror/SPA) | 🟡 **Một phần** | 2026-08-07 | R2 + KV + `worker/` cũ đã xoá. **Còn lại:** `src/` SPA cũ, `dist/`, `docs/adr/0001-*`, `docs/plan-hit-rate.md`, `docs/state-hit-rate.md` vẫn mô tả kiến trúc đã chết — chưa dọn |
@@ -63,6 +63,63 @@ không chỉ đổi cấu hình.
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase 6: FTS5 search + sitemap, PHÁT HIỆN + SỬA bug thật của Phase 7
+
+**Trước khi build gì mới: kiểm tra tiến độ backfill thật (đang chạy nền từ Phase 7) —
+phát hiện hỏng.** `sync_state` cho thấy `backfill:done = "1"` chỉ sau `type_index = 4` (đi hết cả
+4 loại) với `page` vẫn ở `1`, và `movie` chỉ có **91 phim**. Verify trực tiếp `phimapi.com`:
+riêng `phim-le` đã có **16.920 phim / 705 trang**. Bug thật: `runBackfillTick` coi **1 trang trả
+về rỗng = loại đó đã hết**, nhưng trang rỗng cũng xảy ra khi 1 lần fetch đơn lẻ lỗi/timeout —
+hai tình huống trông giống hệt nhau qua tín hiệu `items.length === 0`, và code cũ không phân biệt
+được. Kết quả: cả backfill coi như xong sau khi mỗi loại chỉ xử lý đúng 1 trang.
+
+**Sửa bằng tín hiệu đáng tin hơn: `pagination.totalPages` từ chính response KKPhim**
+(`kkphimClient.ts` `getListingPage` giờ trả thêm `totalPages`). `runBackfillTick` chỉ kết luận
+"loại này đã hết" khi `page > totalPages` biết chắc từ API — không còn suy đoán từ mảng rỗng.
+Trang rỗng mà `totalPages` chưa vượt (lỗi tạm thời/không parse được response) → thử lại tối đa
+`MAX_CONSECUTIVE_EMPTY_RETRIES = 3` lần trong cùng tick, hết mức thì dừng tick **không đổi
+cursor** (tick sau thử lại đúng trang đó, không mất tiến độ, không nhảy cóc).
+
+**Verify thật trên D1 production** (không đoán, đã curl API thật): `getListingPage('phim-le', 1)`
+→ 24 item, `pagination.totalPages = 705`; page 2 cũng có 24 item thật — xác nhận API ổn, lỗi nằm
+ở logic phía tôi. Đã **reset cursor backfill** (`DELETE FROM sync_state WHERE key IN
+('backfill:done','backfill:type_index','backfill:page')`) để chạy lại từ đầu với code đã sửa.
+91 phim đã sync giữ nguyên (không mất dữ liệu, chỉ tiếp tục đúng từ đầu danh sách).
+
+**FTS5 search** (`migrations/0007_fts_search.sql`, `repositories/searchRepository.ts`,
+`lib/vietnamese.ts`). Một bug cú pháp SQL bắt được nhờ test trực tiếp trên D1 thật trước khi
+deploy: `f MATCH ?` (dùng alias) → lỗi `no such column: f`; cú pháp đúng là `fts_movie MATCH ?`
+(tên bảng thật, không phải alias) — khác với những gì một số ví dụ FTS5 online gợi ý, xác nhận
+qua `wrangler d1 execute` trực tiếp trước khi sửa code. `lib/vietnamese.ts` chuẩn hoá cả `đ`→`d`
+(unicode61 `remove_diacritics=2` không tự làm việc này, `đ` là ký tự riêng không phải tổ hợp) lẫn
+dấu thanh tiếng Việt — verify: `"Bạch Hồ Điệp"` → `"bach ho diep"`, và search cả `?q=bach` lẫn
+`?q=b%E1%BA%A1ch` (có dấu) đều ra cùng 1 kết quả.
+
+**Gap đã biết:** 91 phim sync trước khi tôi thêm `SearchRepository.indexMovie` vào
+`syncMovie.ts` **chưa có trong `fts_movie`** — chỉ những phim sync/backfill lại (hash đổi) từ
+giờ trở đi mới được index. Cần 1 lần reindex thủ công nếu muốn 91 phim đó tìm được ngay, hoặc
+đợi backfill tự đi qua lại (không chắc, vì backfill hiện đang ở trang mới, không quay lại các
+trang cũ trừ khi hash phim đó thay đổi).
+
+**Sitemap** (`render/sitemap.ts`, `routes/sitemap.ts`) — `/sitemap.xml` (index) +
+`/sitemap-movies-<n>.xml` (50.000 URL/shard, `tier='catalog'` only) + `/sitemap-static.xml`
+(4 loại danh sách + toàn bộ genre/country thật từ D1) + `/robots.txt`. **Một điểm OFFSET cố ý,
+khác mọi route khác:** `getSitemapPage` dùng `OFFSET` thay vì keyset — chấp nhận được vì sitemap
+chỉ bị crawler đọc thưa thớt, không tỉ lệ thuận với traffic người dùng thật như các trang list
+khác (lý do ADR-0002 cấm `OFFSET`).
+
+**Robots.txt: Cloudflare tự chèn thêm nội dung.** Verify thật cho thấy response `/robots.txt`
+có 1 khối "Cloudflare Managed content" (chặn AI bot: GPTBot, ClaudeBot, CCBot...) được **chèn
+trước** nội dung `renderRobotsTxt()` của tôi, không phải lỗi — tính năng platform-level, nội dung
+tôi viết vẫn xuất hiện nguyên vẹn ở cuối.
+
+**Quota counter** (`middleware/requestSampler.ts`) — sample 1-trong-20 request thật (loại trừ
+`/__sync/*`), ghi D1 qua `waitUntil` (không thêm độ trễ cho response), nhân ngược lại ×20 để ước
+lượng request/ngày, hiện trong `/__sync/status`. Chưa verify được số liệu thật (traffic hiện tại
+gần như chỉ có tôi test) — logic đã review, sẽ tự lộ khi traffic thật tăng.
+
+---
 
 ### 2026-08-07 — Phase 5: Workers Caching + purge + security headers
 
