@@ -32,24 +32,26 @@ main = "src-ssr/index.ts"
 # of the new SSR routes. Static asset serving returns in a later phase, once
 # there's something real to serve.
 
-# DB: same redflare-db as before. Legacy tables from the SPA-era worker
-# (stale, idx, recs, mirrored, mirror_queue, popularity, cache_stats) were
-# dropped by migrations/0006_drop_legacy_tables.sql at cutover; the SSR
-# schema (movie, episode, recommendation, genre, country, genre_movie,
-# country_movie, sync_state) is migrations/0005_ssr_schema.sql.
+# DB: recreated 2026-08-07 -- the original redflare-db (and the R2 bucket
+# below) were deleted directly by the account owner as part of the same
+# cleanup this cutover started, ahead of any code change on this side. New
+# database, new id, empty: migrations/0001-0004 (legacy schema) replay and
+# get dropped again by 0006, migrations/0005_ssr_schema.sql creates the
+# schema src-ssr/ actually uses. All prior synced data (the one test movie
+# from Phase 1/2 verification) is gone -- expected, nothing was backfilled
+# yet.
 [[d1_databases]]
 binding = "DB"
 database_name = "redflare-db"
-database_id = "6eaf211c-0fcb-4404-9cff-718048e7c0c7"
+database_id = "40c364b3-10a8-4d03-bd51-60debe94610a"
 
-# BUCKET: R2 bucket that used to serve mirrored artwork at img.bluesia.net.
-# Out of scope for this cutover (only worker/KV/D1 were touched) -- the SSR
-# code does not read or write it. Left bound rather than removed so a
-# decision about img.bluesia.net (DNS, existing cached URLs) isn't made as a
-# side effect of this change; revisit explicitly per ADR-0002 Finding 8.
-[[r2_buckets]]
-binding = "BUCKET"
-bucket_name = "redflare-r2"
+# R2 removed 2026-08-07 (account owner deleted the redflare-r2 bucket
+# directly) -- no [[r2_buckets]] binding here anymore. src-ssr/ never read
+# or wrote R2 to begin with (ADR-0002: images are hotlinked from
+# TMDB/phimimg, never mirrored), so this has no code-side effect. Any
+# lingering img.bluesia.net DNS/custom-domain attachment to the deleted
+# bucket is outside wrangler.toml's scope -- check the R2 dashboard if that
+# hostname needs cleaning up too.
 
 # Single cron: incremental sync (plan §2.1), matches src-ssr's scheduled()
 # handler. The old worker's hourly home-refresh and */10 mirror-drain crons

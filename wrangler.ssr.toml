@@ -21,7 +21,7 @@ preview_urls = false
 [[d1_databases]]
 binding = "DB"
 database_name = "redflare-db"
-database_id = "6eaf211c-0fcb-4404-9cff-718048e7c0c7"
+database_id = "40c364b3-10a8-4d03-bd51-60debe94610a"
 
 # SELF: service binding used by the sync orchestrator to fan out
 # /__sync/batch/:n and /__sync/backfill-shard/:n shards, same pattern as
