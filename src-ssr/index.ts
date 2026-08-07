@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Env } from './types/env';
+import { homeRoute } from './routes/home';
 import { detailRoute } from './routes/detail';
 import { listRoute } from './routes/list';
 import { genreRoute } from './routes/genre';
@@ -18,6 +19,7 @@ const app = new Hono<{ Bindings: Env; Variables: { nonce: string } }>();
 app.use('*', securityHeaders);
 app.use('*', requestSampler);
 
+app.route('/', homeRoute);
 app.route('/', detailRoute);
 app.route('/', listRoute);
 app.route('/', genreRoute);
@@ -26,14 +28,6 @@ app.route('/', playerRoute);
 app.route('/', searchRoute);
 app.route('/', sitemapRoute);
 app.route('/', syncRoute);
-
-// Home page (/) isn't built yet -- Phase 3 covers detail/list/genre/country,
-// Phase 6 adds search/sitemap (docs/plan-ssr-rearchitecture.md §3, §6).
-app.get('/', (c) =>
-  c.text(
-    'redflare-ssr: see /phim/:slug, /danh-sach/:type, /the-loai/:slug, /quoc-gia/:slug, /xem/:slug, /tim-kiem?q=, /sitemap.xml.'
-  )
-);
 
 // Every route-level 404 already sets its own short cache (cache/control.ts
 // apply404Cache); this is the catch-all for paths no route even attempted

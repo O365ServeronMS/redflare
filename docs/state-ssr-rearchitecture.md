@@ -26,7 +26,7 @@ dữ liệu đã sync trước đó (kể cả bảng legacy cũ) mất sạch**
 | **0** | Audit + ADR + plan | 🟢 **Xong** | 2026-08-07 | ADR-0002 *Proposed*, 8 finding, 9 action item |
 | **1** | Khung TS + Hono, schema D1, repository | 🟢 **Xong, verify thật** | 2026-08-07 | Migration `0005` áp lên D1 production; `/phim/:slug` render thật từ D1 |
 | **2** | Cron sync metadata + episode | 🟢 **Xong, verify thật (KKPhim)** | 2026-08-07 | Hash-gate xác nhận: sync lần 2 ghi 0 row. **Chưa test TMDB** (thiếu token) và **chưa test fan-out qua SELF** (cần deploy 1 lần) |
-| **3** | SSR + SEO (detail/list/genre/country + player) | 🟢 **Xong, verify thật** | 2026-08-07 | JSON-LD parse hợp lệ, 404 đúng cho slug/genre/country/type không tồn tại. Search **không** nằm trong phase này (đúng thiết kế — Phase 6/FTS5) |
+| **3** | SSR + SEO (detail/list/genre/country + player + **home**) | 🟢 **Xong, verify thật** | 2026-08-07 | JSON-LD parse hợp lệ, 404 đúng cho slug/genre/country/type không tồn tại. Trang chủ (`/`) cố ý để placeholder text lúc Phase 3 (chưa có dữ liệu thật), **build thật sau khi có 114 phim** — xem log |
 | **4** | Recommendation 3 tầng + stub | 🟢 **Xong, verify thật trên production** | 2026-08-07 | `MAX_STUBS=0` (đúng quyết định Q3) — tầng 1+2 hoạt động thật, tầng stub chưa kích hoạt |
 | **5** | Workers Caching + purge tag + bảo mật | 🟢 **Xong, verify thật trên production — trừ ETag/304** | 2026-08-07 | Đóng ADR-0001 Action Item 7. **ETag bị mất trên đường truyền, nguyên nhân chưa xác định** (xem log) |
 | **6** | FTS5 search + sitemap + quota counter | 🟢 **Xong, verify thật trên D1 production** | 2026-08-07 | Tình cờ phát hiện + sửa 1 bug thật ở Phase 7 (backfill dừng sai ở 91 phim thay vì hàng chục nghìn) — xem log |
@@ -63,6 +63,24 @@ không chỉ đổi cấu hình.
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Đóng nốt trang chủ (`/`), placeholder từ Phase 3
+
+Phase 3 cố ý để `/` trả text placeholder — lúc đó D1 chưa có dữ liệu thật, xây trang chủ khi
+chưa có gì để hiển thị là vô nghĩa. User báo lại đúng chỗ này sau khi thấy production trả
+text thay vì trang thật. D1 giờ có **114 phim thật** (backfill + resolve đã chạy vài tick) nên
+xây thật: `render/homePage.ts` + `routes/home.ts` — `<h1>`, nav 4 loại danh sách, form tìm kiếm
+(action `/tim-kiem`, route đã có từ Phase 6), lưới 24 phim mới nhất
+(`MovieRepository.getRecentMovies`, `ORDER BY last_synced DESC`, không phân trang — trang chủ là
+showcase cố định, không phải listing), JSON-LD `WebSite` + `SearchAction` (khai báo ô tìm kiếm
+cho Google Sitelinks Searchbox). Cùng pattern cache/SEO như mọi trang khác (`tier:home` tag,
+`applyPageCache`).
+
+**Verify thật qua `wrangler dev --remote`:** trang chủ render 24 phim thật kèm ảnh TMDB thật,
+form tìm kiếm submit đúng tới `/tim-kiem?q=` (200), đếm `<li>` = 28 (24 phim + 4 nav) khớp dự
+kiến.
+
+---
 
 ### 2026-08-07 — Phase 4: recommendation resolve 3 tầng, verify thật với dữ liệu thật
 

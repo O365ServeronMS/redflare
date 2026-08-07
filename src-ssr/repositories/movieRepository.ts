@@ -183,6 +183,18 @@ export class MovieRepository {
     return res.results ?? [];
   }
 
+  /** Home page (/) -- most-recently-synced catalog titles, single flat
+   * query, no pagination (the home page is a fixed-size showcase, not a
+   * listing -- see /danh-sach/:type for the paginated version of "recent
+   * titles"). */
+  async getRecentMovies(limit: number): Promise<MovieRow[]> {
+    const res = await this.db
+      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY last_synced DESC LIMIT ?")
+      .bind(limit)
+      .all<MovieRow>();
+    return res.results ?? [];
+  }
+
   async countByTier(tier: 'catalog' | 'stub'): Promise<number> {
     const row = await this.db
       .prepare('SELECT COUNT(*) as n FROM movie WHERE tier = ?')
