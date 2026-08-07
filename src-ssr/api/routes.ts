@@ -6,6 +6,7 @@ import { RecommendationRepository } from '../repositories/recommendationReposito
 import { TaxonomyRepository } from '../repositories/taxonomyRepository';
 import { SearchRepository } from '../repositories/searchRepository';
 import { toLegacyItems, toLegacyDetail, toLegacyEpisodes } from './legacyItem';
+import { buildHomeData } from './homeData';
 import { clampPage, buildPagination } from './pagination';
 import { isValidSlug } from '../middleware/validate';
 import { LIST_TYPE_LABELS } from '../lib/listTypes';
@@ -24,6 +25,13 @@ const MAX_KEYWORD_LENGTH = 100; // ADR-0002 "Security": reject, don't sanitize
 function applyApiCache(c: Context, tags: string[]) {
   applyPageCache(c, ['api', ...tags]);
 }
+
+// GET /api/home-data (docs/contract-legacy-api.md §1)
+apiRoute.get('/api/home-data', async (c) => {
+  const data = await buildHomeData(c.env.DB);
+  applyApiCache(c, ['home']);
+  return c.json(data);
+});
 
 // GET /api/movie/:slug (docs/contract-legacy-api.md §4)
 apiRoute.get('/api/movie/:slug', async (c) => {

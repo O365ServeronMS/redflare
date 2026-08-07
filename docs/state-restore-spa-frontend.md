@@ -5,10 +5,11 @@ File tracking cho [plan-restore-spa-frontend.md](plan-restore-spa-frontend.md).
 không phải git log.
 
 **Bắt đầu:** 2026-08-07
-**Trạng thái tổng:** 🟡 **F1–F3 xong.** `/api/*` (6 endpoint + alias) sống trên production, đọc
-D1 thật, `actor_json`/`popularity` đã capture được dữ liệu thật. **Vẫn chưa đụng một dòng giao
-diện nào** — SSR page cũ (giao diện hỏng) còn phục vụ song song. **F6 là điểm không quay lại**;
-**F7 (verify bằng mắt) mới là lúc trả lời được câu "đã giống giao diện cũ chưa".**
+**Trạng thái tổng:** 🟡 **F1–F4 xong.** Toàn bộ `/api/*` mà SPA cũ cần (7 endpoint kể cả
+home-data + alias) đã sống trên production, đọc D1 thật. **Vẫn chưa đụng một dòng giao diện
+nào** — SSR page cũ (giao diện hỏng) còn phục vụ song song. Còn lại: F5 (self-host font),
+**F6 (cutover — điểm không quay lại)**, F7 (verify bằng mắt — lúc trả lời được câu "đã giống
+giao diện cũ chưa"), F8 (docs).
 
 ---
 
@@ -19,7 +20,7 @@ diện nào** — SSR page cũ (giao diện hỏng) còn phục vụ song song. 
 | **F1** | Chốt contract legacy API (`docs/contract-legacy-api.md`) | 🟢 **Xong** | 2026-08-07 | Đọc hết `Grid.js`/`SearchOverlay.js`/`Player.js`/`HeroSlider.js`/`PosterCard.js`/`Carousel.js`. **Sửa 1 chỗ so với plan gốc:** `director` không được FE render ở đâu — bỏ khỏi scope F4 |
 | **F2** | `/api/*` JSON trên D1 (6 endpoint + alias) | 🟢 **Xong, verify thật trên production** | 2026-08-07 | Deploy qua `wrangler deploy` tay (Git integration vẫn đứt) |
 | **F3** | Migration 0009: `actor_json` + `popularity` + sync capture | 🟢 **Xong, verify thật trên D1 production** | 2026-08-07 | Bắt được + sửa 1 bug thật có sẵn từ Phase 5 (`cache.purge()` ném lỗi đồng bộ) — xem log |
-| **F4** | `/api/home-data` (dùng `popularity`) | ⚪ Chưa bắt đầu | — | Chặn bởi F3 — hero/trending xếp theo `popularity` |
+| **F4** | `/api/home-data` (dùng `popularity`) | 🟢 **Xong, verify thật trên D1 production** | 2026-08-07 | Shape bất đối xứng đúng (hero mảng trần, 4 rail `{items}`); hero/trending còn thưa vì popularity đang backfill dần |
 | **F5** | Self-host Inter, bỏ Google Fonts | ⚪ Chưa bắt đầu | — | Quyết định #2 của user. Không đụng dòng CSS design nào |
 | **F6** | **Cutover**: `[assets]`→`dist` + `run_worker_first`, CSP mới, xoá SSR render | ⚪ Chưa bắt đầu | — | **Điểm không quay lại.** Bẫy lớn nhất: thiếu `run_worker_first` → SPA fallback **nuốt sạch `/api/*`** |
 | **F7** | **Verify bằng mắt** — ảnh chụp thật, user duyệt | ⚪ Chưa bắt đầu | — | Ràng buộc cứng của user: chưa đảm bảo giống giao diện cũ thì chưa coi là xong |
@@ -42,6 +43,32 @@ Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặ
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase F4: `/api/home-data` từ D1, verify shape bất đối xứng
+
+**Vẫn thuần backend, chưa đụng giao diện.** `src-ssr/api/homeData.ts` (`buildHomeData` — hàm
+thuần, 5 truy vấn D1 song song, không gọi KKPhim/TMDB runtime), route mount trong `routes.ts`.
+Repository thêm 2 method: `getTrending` (`popularity DESC`, `NULLS LAST` bằng cách lọc
+`popularity IS NOT NULL`) và `getHeroPool` (lọc `type != 'hoathinh'` + `poster_path LIKE
+'%image.tmdb.org%'` để chỉ lấy phim có backdrop landscape w1280 — poster dọc phimimg sẽ méo
+trong khung hero; xếp theo `popularity`).
+
+**Verify thật trên D1 production** — đúng cái bẫy #2 (shape bất đối xứng):
+- Top-level đủ 5 key. `newMovies`/`phimLe`/`phimBo`/`trending` là `{items}` (24/12/12/12),
+  **`heroMovies` là MẢNG TRẦN** (13 phần tử) — không bọc `{items}`.
+- `heroMovies[0].poster_url` chứa `/t/p/w1280/`; **toàn bộ** hero có backdrop w1280 (bất biến
+  LCP preload của HeroSlider).
+- Không phần tử hero nào `type === 'hoathinh'`.
+- `trending` xếp theo popularity thật ("Cậu bé mất tích", "Xác Sống", "Nhật Ký Ma Cà Rồng").
+- Mỗi phần tử là legacy item đầy đủ (`_id`/`name`/`slug`/`thumb_url`/`poster_url`/`tmdb`/
+  `category`/`vote_average`).
+
+**Ghi chú thực trạng (không phải bug):** hiện chỉ 14/132 phim có `popularity` (resync sau F3
+mới bắt đầu, cron `*/30` điền dần), nên hero pool = 13 phần tử và toàn `type='series'` tình cờ.
+Khi backfill điền đủ popularity, hero sẽ đầy 20 slot và đa dạng type — đúng đánh đổi "cutover
+ngay với 132 phim" (quyết định #4). Không chặn F5/F6.
+
+---
 
 ### 2026-08-07 — Phase F3: migration `actor_json` + `popularity`, bắt được bug thật của Phase 5
 
