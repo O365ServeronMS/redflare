@@ -97,10 +97,22 @@ status KHÔNG cần build (`hit`, `warm`, `d1-recs`) so với tổng — mọi s
 còn lại (`miss`, `miss-fallback`, `stale-vps-down`, response lỗi không có
 header) đều thật sự chạm KKPhim/TMDB nên tính là "build".
 
-**Trạng thái: migration `0004_cache_stats.sql` đã apply, code đã deploy,
-`node --check` pass.** Bảng mới tạo — cần vài giờ tích luỹ mẫu (lấy mẫu
-1-trong-10) mới đọc được `origin_build_rate` có ý nghĩa thống kê; đọc ngay
-sau deploy sẽ cho `sampled_total` thấp/`null`.
+**Trạng thái: migration đã apply, code đã deploy, verify production OK.**
+Gửi 40 request `/api/list?type=phim-le` song song rồi kiểm tra
+`/api/health`:
+```json
+"cache_stats": {"window_hours": 24, "sampled_total": 2,
+  "by_status": {"hit": 1, "warm": 1}, "origin_build_rate": 0}
+```
+2/40 được lấy mẫu (~1-trong-10, đúng biên độ ngẫu nhiên kỳ vọng ~4).
+`origin_build_rate: 0` tính đúng — cả hai status mẫu được (`hit`, `warm`)
+đều thuộc tập không-cần-build. Cần vài giờ tích luỹ thêm mẫu qua traffic
+thật mới có con số đại diện đầy đủ mọi route family.
+
+**Tin tốt phát hiện cùng lúc, không thuộc phạm vi Phase 6:** `/api/health`
+lần đầu trả `"ok": true, "problems": []` trong suốt phiên này —
+`mirror.queued: 0`, `oldest_queued_min: 0`. Phase 3 (sharded mirror drain)
+đã dọn sạch hoàn toàn backlog ~1.200 ảnh từ đợt đổi nguồn KKPhim.
 
 ---
 
