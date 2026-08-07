@@ -11,9 +11,16 @@ import type { EpisodeRecord, MovieRow } from '../types/movie';
 const HLS_JS_CDN = 'https://cdn.jsdelivr.net/npm/hls.js@1.6.16/dist/hls.min.js';
 
 /** noindex -- duplicate content of the detail page for crawl purposes
- * (plan §3.3), and the one page whose CSP will need a script-src allowance
- * once Phase 5 adds security headers. */
-export function renderPlayerPage(movie: MovieRow, episode: EpisodeRecord, allEpisodes: EpisodeRecord[]): string {
+ * (plan §3.3). `nonce` (middleware/securityHeaders.ts) lets the CSP allow
+ * this one inline bootstrap script without 'unsafe-inline' anywhere; the
+ * jsdelivr <script src> tag is allowed by host instead, since a CSP nonce
+ * only needs to cover script content the policy can't otherwise name. */
+export function renderPlayerPage(
+  movie: MovieRow,
+  episode: EpisodeRecord,
+  allEpisodes: EpisodeRecord[],
+  nonce: string
+): string {
   const canonical = `${SITE_ORIGIN}/xem/${movie.slug}/${episode.epSlug}`;
   const title = escapeHtml(`${movie.title} - ${episode.epName}`);
   const m3u8 = episode.linkM3u8 ? escapeHtml(episode.linkM3u8) : '';
@@ -30,7 +37,7 @@ export function renderPlayerPage(movie: MovieRow, episode: EpisodeRecord, allEpi
 <ul>${episodeLinks}</ul>
 <a href="/phim/${escapeHtml(movie.slug)}">← Về trang phim</a>
 <script src="${HLS_JS_CDN}"></script>
-<script>
+<script nonce="${escapeHtml(nonce)}">
 (function () {
   var src = ${JSON.stringify(m3u8)};
   var video = document.getElementById('player');

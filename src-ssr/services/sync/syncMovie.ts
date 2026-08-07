@@ -1,3 +1,4 @@
+import { cache } from 'cloudflare:workers';
 import type { Env } from '../../types/env';
 import { MovieRepository } from '../../repositories/movieRepository';
 import { EpisodeRepository } from '../../repositories/episodeRepository';
@@ -66,6 +67,13 @@ export async function syncOneMovie(
 
     const rowsWritten =
       written + movie.episodes.length + movie.recommendationTargets.length + movie.genres.length * 2 + movie.countries.length * 2;
+
+    // Purges detail + player (both tagged `movie:<slug>`, Phase 5). List/
+    // genre/country pages that include this title are NOT purged here --
+    // there's no bounded way to know every listing a movie could appear on
+    // without querying them, so those rely on their own 60s max-age to
+    // pick up the change instead of exact invalidation.
+    await cache.purge({ tags: [`movie:${slug}`] }).catch(() => {});
 
     return { slug, outcome: 'written', rowsWritten };
   } catch {

@@ -6,9 +6,13 @@ import { genreRoute } from './routes/genre';
 import { countryRoute } from './routes/country';
 import { playerRoute } from './routes/player';
 import { syncRoute } from './routes/sync';
+import { securityHeaders } from './middleware/securityHeaders';
+import { apply404Cache } from './cache/control';
 import { runIncrementalSync, runBackfillTick } from './services/sync/orchestrator';
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { nonce: string } }>();
+
+app.use('*', securityHeaders);
 
 app.route('/', detailRoute);
 app.route('/', listRoute);
@@ -21,6 +25,14 @@ app.route('/', syncRoute);
 // only (docs/plan-ssr-rearchitecture.md §3). Search is explicitly deferred
 // to Phase 6 (FTS5), not reimplemented here.
 app.get('/', (c) => c.text('redflare-ssr: Phase 3 -- see /phim/:slug, /danh-sach/:type, /the-loai/:slug, /quoc-gia/:slug, /xem/:slug.'));
+
+// Every route-level 404 already sets its own short cache (cache/control.ts
+// apply404Cache); this is the catch-all for paths no route even attempted
+// to match.
+app.notFound((c) => {
+  apply404Cache(c);
+  return c.text('Not found', 404);
+});
 
 export default {
   fetch: app.fetch,

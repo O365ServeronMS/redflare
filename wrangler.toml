@@ -25,6 +25,18 @@ routes = [
 # headers, static assets). Only /phim/:slug and /__sync/* are live.
 main = "src-ssr/index.ts"
 
+# Workers Caching (Phase 5, closes ADR-0001 Action Item 7 / ADR-0002 Finding
+# 4) -- chosen over the Cache API this project used to run: a HIT never
+# invokes the Worker at all (no CPU billed, no D1 touched), and concurrent
+# misses for the same URL collapse into one Worker invocation instead of one
+# each -- the latter matters because D1 is single-threaded (Cloudflare docs:
+# "processes queries one at a time"), so a cold-cache burst on a popular
+# title used to mean N simultaneous D1 hits. src-ssr/cache/control.ts sets
+# Cache-Control/Cache-Tag per response; src-ssr/services/sync/syncMovie.ts
+# purges by tag when a title's data actually changes.
+[cache]
+enabled = true
+
 # No [assets] block: the old dist/ (Vite SPA build) is retired along with
 # worker/index.js. Keeping [assets] here would let Cloudflare's asset layer
 # intercept requests with the OLD dist/index.html (SPA-fallback) BEFORE this

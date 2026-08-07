@@ -28,7 +28,7 @@ dữ liệu đã sync trước đó (kể cả bảng legacy cũ) mất sạch**
 | **2** | Cron sync metadata + episode | 🟢 **Xong, verify thật (KKPhim)** | 2026-08-07 | Hash-gate xác nhận: sync lần 2 ghi 0 row. **Chưa test TMDB** (thiếu token) và **chưa test fan-out qua SELF** (cần deploy 1 lần) |
 | **3** | SSR + SEO (detail/list/genre/country + player) | 🟢 **Xong, verify thật** | 2026-08-07 | JSON-LD parse hợp lệ, 404 đúng cho slug/genre/country/type không tồn tại. Search **không** nằm trong phase này (đúng thiết kế — Phase 6/FTS5) |
 | **4** | Recommendation 3 tầng + stub | ⚪ Chưa bắt đầu | — | Chặn bởi Q3 (giá trị MAX_STUBS). Route `/phim/:slug` đã có JOIN sẵn, chỉ đang trống vì chưa có row `target_slug` nào được resolve |
-| **5** | Workers Caching + purge tag + bảo mật | ⚪ Chưa bắt đầu | — | Đóng ADR-0001 Action Item 7. **Ưu tiên cao** — hiện KHÔNG có CSP/HSTS/nosniff nào trên production |
+| **5** | Workers Caching + purge tag + bảo mật | 🟢 **Xong, verify qua preview (ETag chưa xác nhận được, xem log)** | 2026-08-07 | Đóng ADR-0001 Action Item 7 |
 | **6** | FTS5 search + sitemap + quota counter | ⚪ Chưa bắt đầu | — | |
 | **7** | Backfill toàn catalog | 🟡 **Deploy xong, chạy nền qua cron, chưa verify tick thật** | 2026-08-07 | Thiết kế đổi khác plan gốc — xem log. **Đang chạy `BACKFILL_MODE=free` (governed, ~30 ngày)**, chưa xác nhận Paid để chuyển `burst` |
 | **8** | Cutover route | 🟡 **Đã làm sớm, ngoài thứ tự plan, theo yêu cầu trực tiếp** | 2026-08-07 | Không làm dần từng route như plan gốc đề xuất — đổi thẳng `phim.bluesia.net` sang SSR trong 1 lần. Chấp nhận được vì traffic thật gần như chưa có gì để mất (site chưa có nội dung SEO trước đó theo kiến trúc mới) |
@@ -63,6 +63,61 @@ không chỉ đổi cấu hình.
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase 5: Workers Caching + purge + security headers
+
+**Workers Caching, không phải Cache API** (ADR-0002 Finding 4, đóng ADR-0001 Action Item 7):
+`[cache] enabled = true` trong `wrangler.toml`. Khác Cache API ở 2 điểm quyết định: HIT không
+chạy Worker (0 CPU, 0 truy vấn D1), và request đồng thời cho cùng URL gộp lại thành 1 lần chạy
+Worker thay vì N lần — quan trọng vì D1 đơn luồng (doc Cloudflare: *"processes queries one at a
+time"*), nên trước đây một đợt truy cập đồng loạt vào 1 phim hot lúc cache nguội = N lần đập
+thẳng D1 cùng lúc.
+
+**`src-ssr/cache/control.ts`** — `applyPageCache` (header chuẩn cho mọi trang thật: `max-age=60,
+stale-while-revalidate=86400, stale-if-error=604800`, **không `s-maxage`** — đúng bài học đã rút
+ra ở kiến trúc cũ, `s-maxage` mang ngữ nghĩa `proxy-revalidate` nên vô hiệu hoá SWR đứng cạnh
+nó), `apply404Cache` (`max-age=30`, khớp quy ước cũ để phim mới sync không mất cả giờ mới hết
+404), `applyNoStore` (route `/__sync/*`), `buildEtag` (suy ra từ `slug-last_synced-
+TEMPLATE_VERSION`, không hash body — không tốn CPU mỗi lần miss).
+
+**Cache-Tag + purge theo tag.** Mỗi trang gắn tag (`movie:<slug>`, `tier:detail`/`tier:list`/
+`tier:player`, `type:`/`genre:`/`country:<slug>`). `syncMovie.ts` gọi
+`cache.purge({ tags: ['movie:<slug>'] })` (import từ `cloudflare:workers`, không cần `ctx`) ngay
+sau khi ghi thành công — thay hẳn bài học đắt của kiến trúc cũ (`CLAUDE.md`: *"Purge Everything
+trên dashboard... entries sẽ không tự lành"*). **Có giới hạn cố ý:** chỉ purge `movie:<slug>`
+(trang detail + player), KHÔNG purge mọi trang list/genre/country có chứa phim đó — không có
+cách nào biết hết những trang nào sẽ hiển thị 1 phim mà không cần truy vấn thêm; các trang đó tự
+làm mới qua `max-age=60`.
+
+**Cache-key normalization** (`lib/canonicalQuery.ts`) — mọi query param ngoài allow-list (chỉ
+`cursor` cho trang list/genre/country, không param nào cho trang detail) → 301 về URL canonical.
+Chặn `?utm_source=...` sinh cache entry vô hạn (ADR-0002 "cache poisoning là vấn đề cardinality
+query param, không phải path").
+
+**CSP không `unsafe-inline`.** `middleware/securityHeaders.ts` sinh 1 nonce/request, gắn vào
+script bootstrap inline duy nhất của trang `/xem` (`render/playerPage.ts`); script `<script src>`
+từ jsdelivr được allow qua host list, không cần nonce (CSP chỉ bắt buộc nonce cho nội dung inline
+policy không định danh được cách khác). Kèm HSTS, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy`, `Permissions-Policy`.
+
+**Verify qua `wrangler dev --remote`:** Cache-Control/Cache-Tag/CSP/nonce/Permissions-Policy/
+Referrer-Policy/X-Content-Type-Options đều đúng trên `/phim/:slug`. Redirect 301 đúng: query lạ
+bị strip, `cursor` hợp lệ được giữ lại. `/__sync/status` không key → 404 **và** có
+`Cache-Control: private, no-store` (đặt trước `requireCronKey` trong middleware chain — đặt sau
+thì response 404-vì-thiếu-key sẽ không được gắn no-store, vì `requireCronKey` return sớm không
+gọi `next()`).
+
+**Chưa xác nhận được: ETag/304.** Header `ETag` không xuất hiện trong response qua preview tunnel
+(`wrangler dev --remote`) dù code gọi `c.header('ETag', ...)` đúng trước `c.html()`. Cùng phiên
+test này cũng thấy tunnel chèn script lạ (`__CF$cv$params`, challenge platform) không phải từ code
+— nghi ngờ tunnel preview không đại diện chính xác hành vi response thật. Cũng quan sát
+`Strict-Transport-Security: max-age=15552000; preload` thay vì `max-age=63072000;
+includeSubDomains; preload` tôi set trong code — nhiều khả năng zone có cấu hình HSTS riêng trên
+dashboard override giá trị Worker gửi (giả thuyết hợp lý, không phải bug code). **Cần verify lại
+trên production thật sau deploy** (`curl -I` custom domain, không qua tunnel) trước khi coi Phase
+5 là đóng hoàn toàn.
+
+---
 
 ### 2026-08-07 — Phase 7: backfill, thiết kế lại thành cron-driven (không cần CRON_KEY)
 

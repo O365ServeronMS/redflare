@@ -4,8 +4,18 @@ import { requireCronKey } from '../middleware/cronKey';
 import { syncSlugBatch, runIncrementalSync, runBackfillPage } from '../services/sync/orchestrator';
 import { SyncStateRepository } from '../repositories/syncStateRepository';
 import { MovieRepository } from '../repositories/movieRepository';
+import { applyNoStore } from '../cache/control';
 
 export const syncRoute = new Hono<{ Bindings: Env }>();
+// Ops routes reflect live/mutating state -- never cache-eligible, including
+// the CRON_KEY rejection itself (requireCronKey returns 404 without calling
+// next(), so this has to run BEFORE it, not as a separate after-the-fact
+// middleware, or an unauthorized 404 could get cached and served to the
+// next caller who DOES have the right key).
+syncRoute.use('/__sync/*', async (c, next) => {
+  applyNoStore(c);
+  await next();
+});
 syncRoute.use('/__sync/*', requireCronKey);
 
 // Reached via env.SELF from runIncrementalSync's fan-out -- see
