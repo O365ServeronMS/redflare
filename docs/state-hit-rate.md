@@ -10,8 +10,15 @@ Phase 9 phân rã cho thấy miss cache THẬT của `phim.bluesia.net` chỉ **
 Loại nhiễu giám sát + rác → **93,0%**; cộng sửa 5xx → **96,5%, vượt mục tiêu
 95%**. `img.bluesia.net`: 404 chiếm 25% nhưng **không phải ảnh thiếu** — là
 404 bị CDN cache lại từ thời backlog (60/60 key mẫu đều trả 200); purge sạch
-→ trần ~98%. **Phase 7 — user bỏ qua** (tốn tiền). **Việc còn lại chủ yếu
-cần quyền của bạn** — xem plan §9.4 (L1–L6).
+→ trần ~98%. **Phase 7 — user bỏ qua** (tốn tiền).
+
+**Phase 10 (đang làm):** user đã chạy L1 (Purge Everything) — đang phục
+hồi. L5 (điều tra 504) tìm ra **cơ chế thật** (`enrich.js` timeout TMDB 8s ×
+2 lần thử = tối đa 16s/item, worst-case 64s/trang) — nhưng cũng phát hiện
+**con số "8,0%/1.789 lỗi" ở Phase 6/9 bị chính tôi làm nhiễu một phần** (IP
+test của tôi chiếm 26% mẫu). Đo lại trên cửa sổ sạch: 504 thật **~11,4%** —
+vấn đề có thật, không phải ảo giác đo lường, chỉ là con số cũ không đáng
+tin. Chưa sửa `enrich.js` — cần xác nhận trước.
 
 ---
 
@@ -29,6 +36,7 @@ cần quyền của bạn** — xem plan §9.4 (L1–L6).
 | **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚫ **Bỏ qua** — user quyết định | 2026-08-06 | Không triển khai |
 | **8** | Dọn nợ khảo sát lộ ra | 🟢 **Xong** | 2026-08-06 | 90 KV key rác đã xoá, `stale` D1 có eviction, ADR-0001 đã đính chính |
 | **9** | Phân rã miss thật | 🟢 **Xong (phân tích)** | 2026-08-07 | Miss cache thật chỉ 3,1% — cache hết là nút thắt; 4/6 đòn bẩy cần quyền bạn |
+| **10** | L1 verify + L5 điều tra 504 | 🟡 **L1 đang phục hồi; L5 tìm ra cơ chế, chưa sửa** | 2026-08-07 | 504 thật ~11%, không phải nhiễu test; cần xác nhận trước khi sửa `enrich.js` |
 
 Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặn/sự cố · ⚫ bỏ
 
@@ -68,6 +76,53 @@ npx wrangler d1 execute redflare-db --remote --command "SELECT (SELECT COUNT(*) 
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase 10: L1 verify + L5 điều tra 504 — tự sửa sai của chính mình
+
+**L1 (Purge Everything, user chạy 02:39:52 UTC):** verify ngay — 2/3 ảnh
+từng 404-đóng-băng nay trả `200 MISS`; 1/3 vẫn 404 đúng (ảnh chết thật ở
+upstream). `/api/health` vẫn `ok: true` ngay sau purge (D1/KV không bị
+đụng, chỉ CDN cache bị xoá). Đo 20 phút sau purge: img HIT 47,5%, 404 còn
+12,5% (từ 25%) — đang phục hồi, chưa phải số cuối, cần đợi cache re-warm
+vài giờ.
+
+**L5 (điều tra 504) — phát hiện quan trọng nhất: tự làm nhiễu chính phép đo
+của mình.** Lọc 504 theo `clientIP` → **`167.253.158.19` chính là IP
+outbound của môi trường tôi** (xác nhận qua `api.ipify.org`), chiếm 26%
+lượng 504 trong cửa sổ 3h dùng để kết luận "1.789 lỗi thật" ở nhật ký Phase
+6/9 trước đó. Nguyên nhân: suốt phiên làm việc này tôi liên tục gửi burst
+request đồng thời (40, 15, 20 request...) để verify từng phase — traffic đó
+lẫn vào chính cửa sổ đo lường.
+
+**Không phải toàn bộ là nhiễu — 504 là vấn đề thật.** Đo lại trên cửa sổ 20
+phút **hoàn toàn sạch** (bắt đầu 02:50:05 UTC, xác nhận zero request từ IP
+tôi): **53/466 = 11,4%** lỗi 504, từ 2 IP độc lập request path duyệt web
+bình thường — không phải tôi.
+
+**Tìm ra cơ chế:** [worker/lib/enrich.js](../worker/lib/enrich.js)
+`fetchWithTimeout` — 8s timeout + 1 retry = tối đa **16s/lần gọi TMDB**.
+`CARD_CONCURRENCY=6` (trần nền tảng) → trang 24 item chạy 4 đợt tuần tự →
+worst case `4×16s=64s` nếu mỗi đợt đều dính ≥1 lần gọi chậm/treo. Khớp với
+biến động 5xx theo giờ đã ghi ở Phase 6 (39,5%→~2%→6-10%) — hình dạng của
+"TMDB thỉnh thoảng chậm", không phải bug cố định. Không tái hiện được bằng
+test đơn lẻ của tôi vì tail latency phụ thuộc thời điểm TMDB, không theo
+yêu cầu.
+
+**Không đo được thêm:** `originResponseDurationMs`/`edgeTimeToFirstByteMsP95`
+— cả hai chỉ dành cho gói trả phí (xác nhận qua GraphQL introspection,
+`does not have access to the field`).
+
+**Đề xuất sửa, chưa triển khai (cần xác nhận trước khi đụng logic lõi):**
+giảm timeout/bỏ retry TMDB, và — giá trị nhất — thêm **deadline tổng cho cả
+lượt enrich** để một vài item chậm không kéo cả trang treo tới 64s.
+
+**Bài học quy trình:** khi đo hiệu năng production bằng cách gửi test
+traffic liên tục trong nhiều giờ, phải **lọc IP của chính mình** trước khi
+kết luận số liệu — nếu không, kết luận "phát hiện lỗi thật" có thể một phần
+là do chính hoạt động verify gây ra. Chi tiết đầy đủ +bảng số ở
+[plan-hit-rate.md](plan-hit-rate.md) §10.
+
+---
 
 ### 2026-08-07 — Phase 9: phân rã miss — cache KHÔNG còn là nút thắt
 

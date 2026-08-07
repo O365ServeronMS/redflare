@@ -752,6 +752,76 @@ không chạm được vào 6,7% health-check, 3,8% rác non-GET, hay 3,1% 5xx.
 
 ---
 
+### Phase 10 — L1 verify + L5 điều tra 504 (2026-08-07)
+
+#### §10.1 — L1: đã purge, đang phục hồi đúng hướng
+
+User chạy Purge Everything lúc `02:39:52 UTC`. Verify ngay sau đó:
+
+- 2/3 key từng bị 404-đóng-băng → **giờ trả `200 MISS`** (không còn
+  `EXPIRED` từ 404 cache cũ).
+- 1/3 vẫn 404 **đúng** — đây là ảnh chết thật ở upstream đã xác nhận ở §9.3.
+- `/api/health` vẫn `ok: true` ngay sau purge — tầng D1/KV không bị đụng,
+  Purge Everything chỉ xoá cache CDN. `/api/list` trả `x-catalog-cache: warm`
+  ngay lập tức dù cache CDN vừa sạch — đúng thiết kế "Render Once → Cache
+  Everywhere" (KV warm set phục vụ trong lúc CDN nạp lại).
+
+Đo cửa sổ 20 phút ngay sau purge (traffic đang nạp lại, chưa ổn định):
+img HIT 47,5%, 404 giảm còn 12,5% (từ 25%). **Chưa phải số cuối** — cần đợi
+vài giờ để cache re-warm hoàn toàn trước khi đánh giá trần thật.
+
+#### §10.2 — L5: 504 là thật, nhưng phần lớn phép đo trước đó bị nhiễu bởi chính tôi
+
+**Sửa sai quan trọng:** khi lọc 504 theo `clientIP`, phát hiện
+**`167.253.158.19` — chính là IP outbound của môi trường tôi** (xác nhận qua
+`api.ipify.org`). IP này chiếm 53/205 (26%) lượng 504 trong cửa sổ 3h đã
+dùng để kết luận "1.789 lỗi thật" ở Phase 6/9 trước đó — vì suốt phiên này
+tôi liên tục gửi burst đồng thời (40 request, 15 request...) để verify từng
+phase. **Con số "8,0% lỗi thật" ở Phase 6 log bị thổi phồng một phần bởi
+chính hoạt động verify của tôi, không hoàn toàn là traffic thật.**
+
+**Nhưng không phải toàn bộ là nhiễu.** Đo lại trên **cửa sổ 20 phút hoàn
+toàn sạch** (bắt đầu `02:50:05 UTC`, xác nhận zero request từ IP của tôi):
+**53 lỗi 504 thật / 466 request = 11,4%** — từ 2 IP độc lập
+(`2a06:98c0:3600::103`, `117.4.147.177`) request các path duyệt web bình
+thường (`/api/movie/gia-toc-rong-phan-3`, `/api/recommendation/movie/...`,
+`/`) — không phải test của tôi. **504 là vấn đề thật, không phải ảo giác đo
+lường.** (Cửa sổ này cũng ngay sau purge nên có thể bị đẩy cao tạm thời bởi
+làn sóng cold-build — chưa tách được hai yếu tố.)
+
+**Cơ chế tìm được, khớp với mọi quan sát:**
+[worker/lib/enrich.js](../worker/lib/enrich.js) `fetchWithTimeout` —
+timeout **8 giây + 1 lần retry = tối đa 16 giây/lần gọi TMDB**.
+`CARD_CONCURRENCY = 6` (giới hạn nền tảng), nên trang 24 item chạy
+**4 đợt tuần tự**. Nếu mỗi đợt đều dính ít nhất 1 lần gọi TMDB chậm/treo:
+`4 × 16s = 64 giây` — thừa sức vượt ngưỡng chờ mà trình duyệt/Cloudflare
+coi là "gateway timeout".
+
+Khớp với dữ liệu độc lập: tỉ lệ 5xx theo giờ dao động mạnh
+(**39,5% → ~2% → 6–10%** trong cùng 1 ngày, xem §Phase 6 log) — đúng hình
+dạng của "TMDB thỉnh thoảng chậm/treo", không phải lỗi cố định trong code.
+Test trực tiếp của tôi (đơn lẻ, 15-20 request đồng thời) đều nhanh (0,5–4s)
+vì **đúng lúc TMDB đang đáp ứng tốt** — tail latency phụ thuộc thời điểm,
+không tái hiện được theo yêu cầu.
+
+**Không đo được thêm:** `originResponseDurationMs` / `edgeTimeToFirstByteMsP95`
+— cả hai đều **chỉ dành cho gói trả phí** (`does not have access to the
+field`, xác nhận qua GraphQL introspection). Free plan không cho xem
+percentile latency thật, chỉ suy luận gián tiếp qua cacheStatus/status code.
+
+**Đề xuất sửa (chưa triển khai — cần xác nhận trước khi đụng vào
+`enrich.js`, logic lõi ảnh hưởng mọi trang):**
+1. Giảm timeout mỗi lần gọi TMDB (8s → 3-4s) và/hoặc bỏ retry — thu hẹp
+   worst-case mỗi item từ 16s xuống 3-8s.
+2. Thêm **deadline tổng cho cả lượt enrich** (ví dụ 8-10s), hết giờ thì trả
+   về những item đã enrich xong + fallback KKPhim cho phần còn lại — thay vì
+   để một vài item chậm kéo cả trang treo tới 64s. Đây là thay đổi có giá
+   trị nhất: chặn đứng worst-case bất kể TMDB chậm cỡ nào.
+3. Không tăng `CARD_CONCURRENCY` — đã chạm trần nền tảng (6 kết nối đồng
+   thời/invocation), không có dư địa.
+
+---
+
 ## §7. Trade-offs
 
 **1. Độ mới vs hit rate.** SWR nghĩa là user có thể nhận bản cũ tới 1 giờ trong
