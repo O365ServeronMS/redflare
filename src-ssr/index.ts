@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Env } from './types/env';
+import { apiRoute } from './api/routes';
 import { homeRoute } from './routes/home';
 import { detailRoute } from './routes/detail';
 import { listRoute } from './routes/list';
@@ -18,6 +19,12 @@ const app = new Hono<{ Bindings: Env; Variables: { nonce: string } }>();
 
 app.use('*', securityHeaders);
 app.use('*', requestSampler);
+
+// /api/* mounted first -- docs/plan-restore-spa-frontend.md Phase F2. Not a
+// routing-precedence necessity in Hono (paths don't overlap with the SSR
+// routes below), just keeps the "this is the layer that matters for F5's
+// cutover" grouping visible in one place.
+app.route('/', apiRoute);
 
 app.route('/', homeRoute);
 app.route('/', detailRoute);

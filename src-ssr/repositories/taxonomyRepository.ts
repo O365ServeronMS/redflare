@@ -85,6 +85,51 @@ export class TaxonomyRepository {
     return { items, nextCursor };
   }
 
+  // ---- Legacy /api/genre|country (docs/contract-legacy-api.md §3) ----
+  // Same OFFSET exception as MovieRepository's *Offset methods -- clamped
+  // to page <= 200 at the route layer.
+
+  async getMoviesByGenreOffset(genreSlug: string, page: number, limit: number): Promise<MovieRow[]> {
+    return this.pagedJoinOffset('genre_movie', 'genre_slug', genreSlug, page, limit);
+  }
+
+  async getMoviesByCountryOffset(countrySlug: string, page: number, limit: number): Promise<MovieRow[]> {
+    return this.pagedJoinOffset('country_movie', 'country_slug', countrySlug, page, limit);
+  }
+
+  async countByGenre(genreSlug: string): Promise<number> {
+    return this.countJoin('genre_movie', 'genre_slug', genreSlug);
+  }
+
+  async countByCountry(countrySlug: string): Promise<number> {
+    return this.countJoin('country_movie', 'country_slug', countrySlug);
+  }
+
+  private async pagedJoinOffset(
+    joinTable: string,
+    joinCol: string,
+    value: string,
+    page: number,
+    limit: number
+  ): Promise<MovieRow[]> {
+    const res = await this.db
+      .prepare(
+        `SELECT m.* FROM ${joinTable} j JOIN movie m ON m.slug = j.slug
+         WHERE j.${joinCol} = ? ORDER BY m.last_synced DESC LIMIT ? OFFSET ?`
+      )
+      .bind(value, limit, (page - 1) * limit)
+      .all<MovieRow>();
+    return res.results ?? [];
+  }
+
+  private async countJoin(joinTable: string, joinCol: string, value: string): Promise<number> {
+    const row = await this.db
+      .prepare(`SELECT COUNT(*) as n FROM ${joinTable} WHERE ${joinCol} = ?`)
+      .bind(value)
+      .first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
   async listGenres(): Promise<TaxonomyRef[]> {
     const res = await this.db.prepare('SELECT slug, name FROM genre ORDER BY name').all<TaxonomyRef>();
     return res.results ?? [];

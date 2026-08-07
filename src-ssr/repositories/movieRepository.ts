@@ -195,6 +195,45 @@ export class MovieRepository {
     return res.results ?? [];
   }
 
+  // ---- Legacy /api/* (docs/contract-legacy-api.md) -- OFFSET pagination ----
+  // Deliberate, documented exception to the "no OFFSET" rule the rest of
+  // this codebase follows (ADR-0002): Grid.js (src/modules/Grid/Grid.js)
+  // builds `?page=N` links directly and there is no way to change that
+  // without touching src/, which plan-restore-spa-frontend.md forbids.
+  // The cost is bounded by clamping page to [1, 200] at the route layer
+  // (src-ssr/api/routes.ts) -- worst case 200 x 24 = 4,800 rows scanned,
+  // trivial against the 5M rows-read/day quota.
+
+  /** `/api/list?type=phim-moi-cap-nhat` -- newest across every type. */
+  async getRecentMoviesOffset(page: number, limit: number): Promise<MovieRow[]> {
+    const res = await this.db
+      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY last_synced DESC LIMIT ? OFFSET ?")
+      .bind(limit, (page - 1) * limit)
+      .all<MovieRow>();
+    return res.results ?? [];
+  }
+
+  async countCatalog(): Promise<number> {
+    return this.countByTier('catalog');
+  }
+
+  /** `/api/list?type=<phim-le|phim-bo|hoat-hinh|tv-shows>` */
+  async getPageByTypeOffset(type: string, page: number, limit: number): Promise<MovieRow[]> {
+    const res = await this.db
+      .prepare('SELECT * FROM movie WHERE type = ? ORDER BY last_synced DESC LIMIT ? OFFSET ?')
+      .bind(type, limit, (page - 1) * limit)
+      .all<MovieRow>();
+    return res.results ?? [];
+  }
+
+  async countByType(type: string): Promise<number> {
+    const row = await this.db
+      .prepare('SELECT COUNT(*) as n FROM movie WHERE type = ?')
+      .bind(type)
+      .first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
   async countByTier(tier: 'catalog' | 'stub'): Promise<number> {
     const row = await this.db
       .prepare('SELECT COUNT(*) as n FROM movie WHERE tier = ?')

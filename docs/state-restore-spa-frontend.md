@@ -5,9 +5,9 @@ File tracking cho [plan-restore-spa-frontend.md](plan-restore-spa-frontend.md).
 không phải git log.
 
 **Bắt đầu:** 2026-08-07
-**Trạng thái tổng:** 🟡 **F1 xong.** [`contract-legacy-api.md`](contract-legacy-api.md) đã
-chốt, trích thẳng `file:line` từ `src/`. Production hiện vẫn đang chạy SSR tự chế (giao diện
-hỏng) — F2–F4 deploy được mà không đụng giao diện; F5 là điểm cutover thật.
+**Trạng thái tổng:** 🟡 **F1 + F2 xong.** `/api/*` (6 endpoint + alias) đã sống trên production,
+đọc D1 thật, verify từng field khớp `contract-legacy-api.md`. SSR page cũ (giao diện hỏng) vẫn
+đang phục vụ song song — F2 không đụng gì tới giao diện. F5 là điểm cutover thật.
 
 ---
 
@@ -16,7 +16,7 @@ hỏng) — F2–F4 deploy được mà không đụng giao diện; F5 là đi�
 | Phase | Nội dung | Trạng thái | Ngày | Ghi chú |
 |---|---|---|---|---|
 | **F1** | Chốt contract legacy API (`docs/contract-legacy-api.md`) | 🟢 **Xong** | 2026-08-07 | Đọc hết `Grid.js`/`SearchOverlay.js`/`Player.js`/`HeroSlider.js`/`PosterCard.js`/`Carousel.js`. **Sửa 1 chỗ so với plan gốc:** `director` không được FE render ở đâu — bỏ khỏi scope F4 |
-| **F2** | `/api/*` JSON trên D1 (6 endpoint + alias) | ⚪ Chưa bắt đầu | — | Sẵn sàng bắt đầu — không còn gì chặn |
+| **F2** | `/api/*` JSON trên D1 (6 endpoint + alias) | 🟢 **Xong, verify thật trên production** | 2026-08-07 | Deploy qua `wrangler deploy` tay (Git integration vẫn đứt) |
 | **F3** | `/api/home-data` từ D1 | ⚪ Chưa bắt đầu | — | Chặn bởi F2 |
 | **F4** | Cột `actor_json`/`director_json` + sync capture | ⚪ Chưa bắt đầu | — | Hash đổi → toàn catalog tự resync một vòng (chủ ý) |
 | **F5** | Cutover: `dist/` + SPA fallback, CSP mới, xoá SSR render | ⚪ Chưa bắt đầu | — | **Điểm không quay lại.** 2 ngoại lệ sửa `src/` được phép: preconnect `index.html`, inline onclick `main.js` |
@@ -37,6 +37,43 @@ Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặ
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase F2: `/api/*` JSON trên D1, verify thật với dữ liệu thật
+
+**Xây mới:** `src-ssr/api/legacyItem.ts` (`toLegacyItem`/`toLegacyDetail`/`toLegacyEpisodes` —
+mapper duy nhất, dùng chung mọi route trả list), `src-ssr/api/pagination.ts` (clamp
+`page ∈ [1,200]`, builder `{totalItems, totalItemsPerPage, currentPage, totalPages}`),
+`src-ssr/api/routes.ts` (6 endpoint + alias). Repository thêm method OFFSET-pagination
+(`getRecentMoviesOffset`, `getPageByTypeOffset`, `getMoviesByGenreOffset`,
+`getMoviesByCountryOffset` + các hàm `count*`) — **ngoại lệ có chủ ý thứ ba** với luật
+"không OFFSET" của ADR-0002 (sau sitemap, sau legacy list ở SSR cũ), lý do: `Grid.js`
+(`src/modules/Grid/Grid.js`) tự build link `?page=N`, không sửa được vì luật "không sửa
+`src/`". Chi phí bị chặn bởi clamp 200 trang × 24 = tối đa 4.800 rows/query.
+
+**Verify thật trên D1 production** (không phải chỉ đọc code, từng endpoint):
+- `/api/movie/bach-ho-diep` — khớp contract 100%: `content` là text đã strip, `actor: []`
+  đúng dự kiến (F4 chưa chạy), `episodes` regroup đúng theo `server_name`.
+- `/api/list?type=phim-le` — shape `data.{items,params.pagination,titlePage}` đúng.
+- `/api/list?type=phim-moi-cap-nhat` — xác nhận **shape phẳng khác hẳn**, đúng bẫy #2 đã
+  ghi trong plan.
+- `/api/genre?slug=chinh-kich` — `titlePage: "Chính Kịch"` (tên thật có dấu từ D1, không
+  phải title-case slug — đúng bẫy #10).
+- **Bắt được 1 phát hiện thú vị lúc test `/api/search`:** query đầu tiên (`keyword=bach`,
+  `keyword=thien+than`) trả rỗng — tưởng là bug, hoá ra do đoán sai tên phim thật (slug
+  `thien-than-dem` thật ra có `title = "Malaikat Malam"`, tiếng Indonesia, không phải
+  "Thiên Thần Đêm" như suy từ slug). Test lại với tên thật lấy từ D1
+  (`toi-pham-thi-tran-nho` → "Tội Phạm Thị Trấn Nhỏ") xác nhận search **hoạt động đúng**,
+  cả có dấu lẫn không dấu ra cùng 1 kết quả — không phải bug, là bài học "đừng đoán dữ
+  liệu test từ slug".
+- `/api/recommendation/tv/272059` + alias `/api/related/tv/272059` — cả hai trả **giống
+  hệt nhau**, 9 phim thật. tmdb id không tồn tại → `200 {"items":[]}`, **không 404** (đúng
+  contract §6 — client không catch lỗi riêng cho route này).
+- `/api/home-data` → 404 (đúng — chưa build, đó là scope F3).
+
+**Deploy:** Git integration vẫn đứt (chưa nối lại từ sự cố trước) — dùng
+`npx wrangler deploy` tay.
+
+---
 
 ### 2026-08-07 — Phase F1: chốt contract, sửa 1 sai sót của plan gốc
 
