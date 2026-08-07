@@ -4,12 +4,14 @@ File tracking cho [plan-hit-rate.md](plan-hit-rate.md). **Cập nhật file này
 khi một phase đổi trạng thái** — nó là nguồn sự thật về tiến độ, không phải git log.
 
 **Bắt đầu:** 2026-08-06
-**Trạng thái tổng:** 🟢 Phase 0–6, 8 xong, đã deploy và **đo thật bằng
-GraphQL Analytics** — zone-wide HIT thật: `phim.bluesia.net` 76,8%,
-`img.bluesia.net` 67,2% (so baseline 35%). **Phase 7 — user quyết định bỏ
-qua** (tốn tiền, không triển khai). Một phát hiện mới ngoài phạm vi plan:
-504/502 thật ~8% traffic `phim.bluesia.net`, chưa điều tra — xem nhật ký
-2026-08-07.
+**Trạng thái tổng:** 🟢 Phase 0–6, 8, 9 xong. **Cache đã hết là nút thắt** —
+Phase 9 phân rã cho thấy miss cache THẬT của `phim.bluesia.net` chỉ **3,1%**
+(6h window: HIT 83,2%, `/api/health` 6,7%, non-GET rác 3,8%, 5xx 3,1%).
+Loại nhiễu giám sát + rác → **93,0%**; cộng sửa 5xx → **96,5%, vượt mục tiêu
+95%**. `img.bluesia.net`: 404 chiếm 25% nhưng **không phải ảnh thiếu** — là
+404 bị CDN cache lại từ thời backlog (60/60 key mẫu đều trả 200); purge sạch
+→ trần ~98%. **Phase 7 — user bỏ qua** (tốn tiền). **Việc còn lại chủ yếu
+cần quyền của bạn** — xem plan §9.4 (L1–L6).
 
 ---
 
@@ -26,6 +28,7 @@ qua** (tốn tiền, không triển khai). Một phát hiện mới ngoài phạ
 | **6** | Đo lường tách theo class | 🟢 **Xong hoàn toàn — A/B/C đều đo được** | 2026-08-07 | Zone-wide thật: phim 76,8%, img 67,2% (so baseline 35%) |
 | **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚫ **Bỏ qua** — user quyết định | 2026-08-06 | Không triển khai |
 | **8** | Dọn nợ khảo sát lộ ra | 🟢 **Xong** | 2026-08-06 | 90 KV key rác đã xoá, `stale` D1 có eviction, ADR-0001 đã đính chính |
+| **9** | Phân rã miss thật | 🟢 **Xong (phân tích)** | 2026-08-07 | Miss cache thật chỉ 3,1% — cache hết là nút thắt; 4/6 đòn bẩy cần quyền bạn |
 
 Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặn/sự cố · ⚫ bỏ
 
@@ -65,6 +68,43 @@ npx wrangler d1 execute redflare-db --remote --command "SELECT (SELECT COUNT(*) 
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase 9: phân rã miss — cache KHÔNG còn là nút thắt
+
+**Câu hỏi đặt ra:** "77,65%/66,08% vẫn xa 95%, cần giải pháp mạnh tay nào?"
+**Kết quả phân rã đảo ngược tiền đề của câu hỏi** — chi tiết đầy đủ +
+bảng số ở [plan-hit-rate.md](plan-hit-rate.md) §9.
+
+**Phát hiện 1 — con số 24h bị nhiễm.** 77,65/66,08 gộp cả giai đoạn ~1.200
+ảnh còn kẹt trong mirror queue (Phase 3 chỉ vừa dọn xong). Cửa sổ 6h:
+phim **82,8%**, img **81,6%**. 5xx theo giờ giảm từ **39,5% → ~2%** trong
+ngày, đúng theo tiến độ Phase 1–5 landing.
+
+**Phát hiện 2 — miss cache THẬT của `phim.bluesia.net` chỉ 3,1%.**
+Phân rã 6h (n=5.471): HIT 83,2% | `/api/health` 6,7% (`no-store` đúng thiết
+kế) | non-GET rác 3,8% | 5xx 3,1% | **miss cache thật 3,1%**. Nghĩa là trên
+phần traffic thật sự cacheable, cache đang chạy ~96–97% hiệu quả. Bỏ nhiễu
+giám sát + rác khỏi mẫu số → **93,0%**; cộng sửa 5xx → **96,5%, vượt mục
+tiêu 95%**.
+
+**Phát hiện 3 — 404 của img KHÔNG phải ảnh thiếu, mà là 404 bị CACHE.**
+Kiểm chứng: lấy mẫu **60 key ngẫu nhiên** từ D1 `mirrored` → **60/60 trả
+200**. 4 key đang 404 trong analytics → **4/4 giờ trả 200**, kèm
+`cf-cache-status: EXPIRED`. R2 trả 404 **không có `cache-control`** nên CDN
+áp default TTL → 404 sinh ra thời backlog bị đóng băng ở edge kể cả sau khi
+object đã vào R2. Purge sạch → trần img ≈ **98%**.
+
+Ngoại lệ: **1 ảnh chiếm 62% lượng 404 gần đây** — chết thật ở upstream
+(phimimg.com cũng 404), `mirrored:0, queue:0`, client fallback cũng 404.
+
+**Quyết định: KHÔNG thêm cơ chế cache nào.** Với miss thật 3,1%, mọi giải
+pháp "mạnh tay" kiểu Cache Reserve/thêm tầng cache đều nhắm sai chỗ — không
+chạm được vào 6,7% health-check, 3,8% rác non-GET, hay 3,1% 5xx. Đòn bẩy
+đúng (L1–L6) liệt kê ở plan §9.4; **4/6 cần quyền tôi không có** (token chỉ
+Analytics Read — đã verify: purge trả `Authentication error`, đọc chi tiết
+ruleset cũng bị từ chối).
+
+---
 
 ### 2026-08-07 — O6 đóng: đo thật bằng GraphQL Analytics, phát hiện 504 mới
 

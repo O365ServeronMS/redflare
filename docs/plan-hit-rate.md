@@ -671,6 +671,87 @@ liệu duy nhất).
 
 ---
 
+### Phase 9 — Phân rã miss thật (2026-08-07): **cache KHÔNG còn là nút thắt**
+
+Câu hỏi đặt ra: "77,65% / 66,08% vẫn xa 95%, cần giải pháp mạnh tay nào?"
+Trước khi thêm bất kỳ cơ chế cache nào nữa, phân rã xem **miss thật sự đến
+từ đâu**. Kết quả **đảo ngược tiền đề của câu hỏi**.
+
+#### §9.1 — Cửa sổ 24h bị nhiễm bởi backlog migration
+
+| Cửa sổ | phim HIT | img HIT | img 404 | phim 5xx |
+|---|---|---|---|---|
+| 24h | 77,3% | 67,2% | 33,6% | 11,5% |
+| 6h | **82,8%** | **81,6%** | 25,0% | 6,3% |
+| 3h | 79,3% | 78,6% | 40,0% | 7,9% |
+
+Con số 24h (77,65/66,08 mà bạn thấy) **gộp cả giai đoạn ~1.200 ảnh còn trong
+mirror queue** — Phase 3 chỉ vừa dọn sạch (`queued: 0`). Đo cửa sổ gần hơn
+đã tốt hơn đáng kể. 5xx theo giờ: **39,5% (02:00) → ~2% (15:00–21:00) →
+6–10% (23:00–01:00)** — giảm mạnh đúng theo tiến độ Phase 1–5 landing.
+
+#### §9.2 — Phân rã miss: `phim.bluesia.net` (6h, n=5.471)
+
+| | Số | % | Loại |
+|---|---|---|---|
+| ✅ HIT | 4.554 | **83,2%** | cached |
+| ❌ `/api/health` | 368 | **6,7%** | `no-store` **đúng thiết kế** — không bao giờ HIT được |
+| ❌ non-GET (405) | 209 | **3,8%** | PUT/POST rác — không bao giờ cacheable |
+| ❌ 5xx | 170 | **3,1%** | timeout/lỗi |
+| ◻ **miss cache thật** | **168** | **3,1%** | ← thứ duy nhất cache có thể sửa |
+
+**Đây là phát hiện quyết định: miss cache THẬT chỉ 3,1%.** Trên phần traffic
+thật sự cacheable, hệ cache đang chạy ở **~96–97% hiệu quả**. Thêm cơ chế
+cache nữa gần như không còn gì để thu.
+
+Nếu bỏ nhiễu giám sát + rác khỏi mẫu số:
+`4.554 / (5.471 − 368 − 209) = ` **93,0%**. Cộng thêm sửa 5xx →
+`4.724 / 4.894 = ` **96,5% — vượt mục tiêu 95%.**
+
+#### §9.3 — Phân rã miss: `img.bluesia.net` (6h, n=1.258)
+
+| | Số | % |
+|---|---|---|
+| ✅ HIT 200 | 828 | 65,8% |
+| ❌ **404** | 314 | **25,0%** |
+| ◻ miss 200 thật | 91 | 7,2% |
+| ❌ 403 | 25 | 2,0% |
+
+**404 là toàn bộ vấn đề của img** — và **không phải ảnh bị thiếu**. Đã kiểm
+chứng: lấy mẫu **60 key ngẫu nhiên** từ D1 `mirrored` → **60/60 trả 200**.
+Test riêng 4 key đang 404 trong analytics → **4/4 giờ trả 200**, với
+`cf-cache-status: EXPIRED`.
+
+**Nguyên nhân thật: Cloudflare đã CACHE các response 404** sinh ra trong giai
+đoạn backlog. R2 trả 404 **không kèm `cache-control`**, nên CDN áp default
+edge TTL cho 404 → 404 bị đóng băng ở edge **kể cả sau khi object đã vào
+R2**. Tự lành nhưng chậm, từng entry một.
+
+→ Nếu purge sạch 404 đã cache: trần lý thuyết img ≈ **98,0%**.
+
+Ngoại lệ đáng chú ý: **1 ảnh duy nhất chiếm 62% lượng 404 gần đây**
+(`kkphim/uploads/movies/public/images/Post/1/phap-su-tu-linh-ta-chinh-la-thien-tai.jpg`,
+195/312 request trong 3h) — ảnh này **chết thật ở upstream** (phimimg.com
+cũng trả 404), `mirrored: 0, queue: 0`. Client fallback cũng 404 → ảnh vỡ
+vĩnh viễn, và mỗi lượt xem lại nện thêm request.
+
+#### §9.4 — Kết luận: 95% khả thi, nhưng KHÔNG bằng cache
+
+| # | Đòn bẩy | Tác động ước tính | Ai làm được |
+|---|---|---|---|
+| **L1** | **Purge 404 đã cache trên `img.bluesia.net`** | img 66% → ~90–98% | **Cần bạn** (token read-only) |
+| **L2** | Cache Rule: `img.bluesia.net` + status 404 → Edge TTL rất ngắn / bypass | chặn tái phát L1 | **Cần bạn** |
+| **L3** | Bỏ `/api/health` khỏi `phim.bluesia.net` (đổi sang subdomain riêng) **hoặc** giảm tần suất poll của `monitor.bluesia.net` | phim +6,7pp | **Cần bạn** (dashboard/monitor config) |
+| **L4** | Chặn non-GET tới `/api/*` ở WAF | phim +3,8pp | **Cần bạn** |
+| **L5** | Điều tra & sửa 504 | phim +3,1pp (và +8pp ở giờ cao điểm) | Tôi làm được (cần phiên riêng) |
+| **L6** | Đo hit-rate trên **traffic cacheable** (loại health + non-GET) thay vì gộp tất cả | đo đúng thay vì đo sai | Tôi làm được |
+
+**Không đề xuất thêm cơ chế cache nào.** Với miss thật 3,1%, mọi giải pháp
+"mạnh tay" kiểu Cache Reserve / thêm tầng cache đều nhắm sai chỗ — chúng
+không chạm được vào 6,7% health-check, 3,8% rác non-GET, hay 3,1% 5xx.
+
+---
+
 ## §7. Trade-offs
 
 **1. Độ mới vs hit rate.** SWR nghĩa là user có thể nhận bản cũ tới 1 giờ trong
