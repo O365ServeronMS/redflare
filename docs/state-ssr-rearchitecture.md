@@ -28,7 +28,7 @@ dữ liệu đã sync trước đó (kể cả bảng legacy cũ) mất sạch**
 | **2** | Cron sync metadata + episode | 🟢 **Xong, verify thật (KKPhim)** | 2026-08-07 | Hash-gate xác nhận: sync lần 2 ghi 0 row. **Chưa test TMDB** (thiếu token) và **chưa test fan-out qua SELF** (cần deploy 1 lần) |
 | **3** | SSR + SEO (detail/list/genre/country + player) | 🟢 **Xong, verify thật** | 2026-08-07 | JSON-LD parse hợp lệ, 404 đúng cho slug/genre/country/type không tồn tại. Search **không** nằm trong phase này (đúng thiết kế — Phase 6/FTS5) |
 | **4** | Recommendation 3 tầng + stub | ⚪ Chưa bắt đầu | — | Chặn bởi Q3 (giá trị MAX_STUBS). Route `/phim/:slug` đã có JOIN sẵn, chỉ đang trống vì chưa có row `target_slug` nào được resolve |
-| **5** | Workers Caching + purge tag + bảo mật | 🟢 **Xong, verify qua preview (ETag chưa xác nhận được, xem log)** | 2026-08-07 | Đóng ADR-0001 Action Item 7 |
+| **5** | Workers Caching + purge tag + bảo mật | 🟢 **Xong, verify thật trên production — trừ ETag/304** | 2026-08-07 | Đóng ADR-0001 Action Item 7. **ETag bị mất trên đường truyền, nguyên nhân chưa xác định** (xem log) |
 | **6** | FTS5 search + sitemap + quota counter | ⚪ Chưa bắt đầu | — | |
 | **7** | Backfill toàn catalog | 🟡 **Deploy xong, chạy nền qua cron, chưa verify tick thật** | 2026-08-07 | Thiết kế đổi khác plan gốc — xem log. **Đang chạy `BACKFILL_MODE=free` (governed, ~30 ngày)**, chưa xác nhận Paid để chuyển `burst` |
 | **8** | Cutover route | 🟡 **Đã làm sớm, ngoài thứ tự plan, theo yêu cầu trực tiếp** | 2026-08-07 | Không làm dần từng route như plan gốc đề xuất — đổi thẳng `phim.bluesia.net` sang SSR trong 1 lần. Chấp nhận được vì traffic thật gần như chưa có gì để mất (site chưa có nội dung SEO trước đó theo kiến trúc mới) |
@@ -107,15 +107,34 @@ bị strip, `cursor` hợp lệ được giữ lại. `/__sync/status` không ke
 thì response 404-vì-thiếu-key sẽ không được gắn no-store, vì `requireCronKey` return sớm không
 gọi `next()`).
 
-**Chưa xác nhận được: ETag/304.** Header `ETag` không xuất hiện trong response qua preview tunnel
-(`wrangler dev --remote`) dù code gọi `c.header('ETag', ...)` đúng trước `c.html()`. Cùng phiên
-test này cũng thấy tunnel chèn script lạ (`__CF$cv$params`, challenge platform) không phải từ code
-— nghi ngờ tunnel preview không đại diện chính xác hành vi response thật. Cũng quan sát
-`Strict-Transport-Security: max-age=15552000; preload` thay vì `max-age=63072000;
-includeSubDomains; preload` tôi set trong code — nhiều khả năng zone có cấu hình HSTS riêng trên
-dashboard override giá trị Worker gửi (giả thuyết hợp lý, không phải bug code). **Cần verify lại
-trên production thật sau deploy** (`curl -I` custom domain, không qua tunnel) trước khi coi Phase
-5 là đóng hoàn toàn.
+**Verify thật trên production (`curl` trực tiếp `phim.bluesia.net`, cả HTTP/1.1 lẫn HTTP/2, không
+qua tunnel):** `Cache-Control`, `Content-Security-Policy` (nonce đổi mỗi response), `Permissions-
+Policy`, `Referrer-Policy`, `X-Content-Type-Options`, redirect 301 canonical, `Cache-Tag` bị
+Cloudflare tự strip khỏi response client thấy (đúng như doc: *"Cloudflare consumes this header and
+strips it before the response reaches the client"* — không phải lỗi) — tất cả đúng. `cf-cache-
+status: HIT` + `age` tăng dần xác nhận Workers Caching thật sự hoạt động (Worker không chạy lại
+trên HIT).
+
+**Hai điểm chưa giải thích được, ghi lại trung thực thay vì báo xong:**
+
+1. **`ETag` bị mất hoàn toàn trên đường truyền** — code gọi `c.header('ETag', etag)` đúng trước
+   `c.html()`/`c.body(null, 304)`, xác nhận qua `curl -v` cả HTTP/1.1 và HTTP/2 lên thẳng
+   `phim.bluesia.net`: header không xuất hiện ở bất kỳ đâu. Tìm được 1 manh mối trong doc
+   Cloudflare — tính năng **Cache Response Rules** có thể *"Strip headers that block caching:
+   Remove Set-Cookie, ETag, or Last-Modified headers from origin responses before caching"* — nhưng
+   cùng bộ doc lại khẳng định rõ *"No zone configuration for caching applies to Workers Caching...
+   Cache Rules, Cache Response Rules... have no effect on a Worker's cache"*, tức về lý thuyết
+   không nên áp dụng ở đây. Hai đoạn tự mâu thuẫn, chưa có cách xác minh thêm từ phía tôi (không có
+   quyền truy cập dashboard Rules). Không ảnh hưởng chức năng — trang vẫn render đúng 200, chỉ mất
+   tối ưu 304 (giảm băng thông cho lượt xem lại), không phải lỗi đúng/sai nội dung.
+2. **`Strict-Transport-Security: max-age=15552000; preload`** thay vì `max-age=63072000;
+   includeSubDomains; preload` code set — nhiều khả năng zone có cấu hình HSTS riêng trên dashboard
+   Edge Certificates override giá trị Worker gửi. Không phải lỗi bảo mật (giá trị zone vẫn hợp lệ,
+   chỉ ngắn hơn và thiếu `includeSubDomains`) nhưng đáng để kiểm tra dashboard nếu muốn giá trị
+   khớp đúng ý định.
+
+Cả hai đều là **quan sát platform, không phải bug trong `src-ssr/`** — nếu muốn điều tra sâu hơn
+cần quyền truy cập Cloudflare dashboard (Rules/Edge Certificates) mà phiên làm việc này không có.
 
 ---
 
