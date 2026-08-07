@@ -1,35 +1,91 @@
 import { escapeHtml } from './escape';
+import { renderPage } from './layout';
+import { breadcrumbJsonLd, movieJsonLd, SITE_ORIGIN, truncateDescription } from './seo';
 import type { EpisodeRecord, MovieRow } from '../types/movie';
 
-// Deliberately minimal -- this exists to satisfy Phase 1's verify criterion
-// ("wrangler dev returns one real detail page from D1") and to give Phase 2
-// something to look at while sync is being built. Full SEO surface
-// (canonical, OG/Twitter Card, JSON-LD, breadcrumb, meta description
-// tuning, recommendation block) is Phase 3 scope (plan-ssr-rearchitecture.md
-// §3.2) -- do not extend this file to cover that; Phase 3 replaces it.
-export function renderDetailPage(movie: MovieRow, episodes: EpisodeRecord[]): string {
+export interface DetailPageInput {
+  movie: MovieRow;
+  episodes: EpisodeRecord[];
+  recommendations: MovieRow[];
+}
+
+function recommendationCard(m: MovieRow): string {
+  const title = escapeHtml(m.title);
+  const img = m.thumb_path ?? m.poster_path ?? '';
+  const cta = m.has_stream ? 'Xem Ngay' : 'Xem Trailer';
+  return `<li>
+  <a href="/phim/${escapeHtml(m.slug)}">
+    ${img ? `<img src="${escapeHtml(img)}" alt="${title}" width="342" height="513" loading="lazy">` : ''}
+    <span>${title}</span>
+    <em>${cta}</em>
+  </a>
+</li>`;
+}
+
+/** Full SEO detail page (plan §3.2/§3.3). Player strategy per ADR-0002:
+ * has_stream -> "Xem Ngay" linking to the one hydrated route (/xem/:slug),
+ * else "Xem Trailer" -- a movie with zero stream still gets a complete,
+ * indexable detail page (the whole point of the handoff's "always show
+ * recommendations, never hide unstreamed titles" rule for SEO/crawl
+ * depth). */
+export function renderDetailPage(input: DetailPageInput): string {
+  const { movie, episodes, recommendations } = input;
+  const canonical = `${SITE_ORIGIN}/phim/${movie.slug}`;
   const title = escapeHtml(movie.title);
-  const overview = escapeHtml(movie.overview ?? '');
-  const posterSrc = movie.poster_path ? escapeHtml(movie.poster_path) : '';
-  const cta = movie.has_stream ? 'Xem Ngay' : 'Xem Trailer';
+  const overview = movie.overview ?? '';
 
-  const episodeList = episodes
-    .map((ep) => `<li>${escapeHtml(ep.server)} — ${escapeHtml(ep.epName)}</li>`)
-    .join('');
+  const cta = movie.has_stream
+    ? `<a href="/xem/${escapeHtml(movie.slug)}">▶ Xem Ngay</a>`
+    : movie.youtube_trailer_key
+      ? `<div><iframe width="560" height="315" loading="lazy"
+          src="https://www.youtube.com/embed/${escapeHtml(movie.youtube_trailer_key)}"
+          title="${title} - Trailer" allowfullscreen></iframe></div>`
+      : '';
 
-  return `<!doctype html>
-<html lang="vi">
-<head>
-<meta charset="utf-8">
-<title>${title}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body>
-<h1>${title}</h1>
-${posterSrc ? `<img src="${posterSrc}" alt="${title}" width="1280" height="720" loading="eager">` : ''}
-<p>${overview}</p>
-<p><a href="/xem/${escapeHtml(movie.slug)}">${cta}</a></p>
-<ul>${episodeList}</ul>
-</body>
-</html>`;
+  const episodeList =
+    episodes.length > 0
+      ? `<ul>${episodes.map((e) => `<li>${escapeHtml(e.server)} — ${escapeHtml(e.epName)}</li>`).join('')}</ul>`
+      : '';
+
+  const recBlock =
+    recommendations.length > 0
+      ? `<section aria-label="Có thể bạn cũng thích">
+  <h2>Có thể bạn cũng thích</h2>
+  <ul>${recommendations.map(recommendationCard).join('')}</ul>
+</section>`
+      : '';
+
+  const genres: { slug: string; name: string }[] = JSON.parse(movie.genres_json || '[]');
+  const countries: { slug: string; name: string }[] = JSON.parse(movie.countries_json || '[]');
+  const genreLinks = genres.map((g) => `<a href="/the-loai/${escapeHtml(g.slug)}">${escapeHtml(g.name)}</a>`).join(', ');
+  const countryLinks = countries
+    .map((c) => `<a href="/quoc-gia/${escapeHtml(c.slug)}">${escapeHtml(c.name)}</a>`)
+    .join(', ');
+
+  const body = `<h1>${title}</h1>
+${movie.poster_path ? `<img src="${escapeHtml(movie.poster_path)}" alt="${title}" width="1280" height="720" loading="eager">` : ''}
+<p>${escapeHtml(overview)}</p>
+<p>${genreLinks}</p>
+<p>${countryLinks}</p>
+${cta}
+${episodeList}
+${recBlock}`;
+
+  return renderPage(
+    {
+      title: `${movie.title} - Xem Phim | Film Bluesia`,
+      description: truncateDescription(overview || movie.title),
+      canonical,
+      ogType: movie.tmdb_type === 'tv' ? 'video.tv_show' : 'video.movie',
+      ogImage: movie.poster_path,
+      jsonLd: [
+        movieJsonLd(movie, canonical),
+        breadcrumbJsonLd([
+          { name: 'Trang chủ', url: SITE_ORIGIN },
+          { name: movie.title, url: canonical },
+        ]),
+      ],
+    },
+    body
+  );
 }

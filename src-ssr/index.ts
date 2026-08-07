@@ -1,15 +1,26 @@
 import { Hono } from 'hono';
 import type { Env } from './types/env';
 import { detailRoute } from './routes/detail';
+import { listRoute } from './routes/list';
+import { genreRoute } from './routes/genre';
+import { countryRoute } from './routes/country';
+import { playerRoute } from './routes/player';
 import { syncRoute } from './routes/sync';
 import { runIncrementalSync } from './services/sync/orchestrator';
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.route('/', detailRoute);
+app.route('/', listRoute);
+app.route('/', genreRoute);
+app.route('/', countryRoute);
+app.route('/', playerRoute);
 app.route('/', syncRoute);
 
-app.get('/', (c) => c.text('redflare-ssr: Phase 1/2 skeleton. See /phim/:slug and /__sync/status.'));
+// Home page (/) isn't built yet -- Phase 3 covers detail/list/genre/country
+// only (docs/plan-ssr-rearchitecture.md §3). Search is explicitly deferred
+// to Phase 6 (FTS5), not reimplemented here.
+app.get('/', (c) => c.text('redflare-ssr: Phase 3 -- see /phim/:slug, /danh-sach/:type, /the-loai/:slug, /quoc-gia/:slug, /xem/:slug.'));
 
 export default {
   fetch: app.fetch,

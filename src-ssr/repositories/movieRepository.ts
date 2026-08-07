@@ -1,5 +1,11 @@
 import { chunkByParams } from '../db/chunk';
+import type { Cursor } from '../lib/cursor';
 import type { MovieRow, NormalizedMovie } from '../types/movie';
+
+export interface Page<T> {
+  items: T[];
+  nextCursor: Cursor | null;
+}
 
 // Columns bound per row in the upsert below. At D1's 100-param cap that's
 // 3 rows/statement (27 cols x 3 = 81, x4 would be 108 -- over) -- see
@@ -130,6 +136,26 @@ export class MovieRepository {
       for (const row of res.results ?? []) out.set(row.slug, row.source_hash);
     }
     return out;
+  }
+
+  /** Keyset-paginated listing for /danh-sach/:type (plan §3.1: no OFFSET --
+   * a deep-page crawl request would otherwise scan and bill every skipped
+   * row against the D1 rows-read quota). Fetches limit+1 to know whether a
+   * next page exists without a separate COUNT. */
+  async getPageByType(type: string, cursor: Cursor | null, limit: number): Promise<Page<MovieRow>> {
+    const sql = cursor
+      ? `SELECT * FROM movie WHERE type = ? AND (last_synced < ? OR (last_synced = ? AND slug > ?))
+         ORDER BY last_synced DESC, slug ASC LIMIT ?`
+      : `SELECT * FROM movie WHERE type = ? ORDER BY last_synced DESC, slug ASC LIMIT ?`;
+    const binds = cursor
+      ? [type, cursor.lastSynced, cursor.lastSynced, cursor.slug, limit + 1]
+      : [type, limit + 1];
+    const res = await this.db.prepare(sql).bind(...binds).all<MovieRow>();
+    const rows = res.results ?? [];
+    const items = rows.slice(0, limit);
+    const last = items[items.length - 1];
+    const nextCursor = rows.length > limit && last ? { lastSynced: last.last_synced, slug: last.slug } : null;
+    return { items, nextCursor };
   }
 
   async countByTier(tier: 'catalog' | 'stub'): Promise<number> {

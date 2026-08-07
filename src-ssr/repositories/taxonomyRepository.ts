@@ -1,5 +1,7 @@
 import { chunkByParams } from '../db/chunk';
-import type { TaxonomyRef } from '../types/movie';
+import type { Cursor } from '../lib/cursor';
+import type { Page } from './movieRepository';
+import type { MovieRow, TaxonomyRef } from '../types/movie';
 
 export class TaxonomyRepository {
   constructor(private readonly db: D1Database) {}
@@ -41,6 +43,46 @@ export class TaxonomyRepository {
     // deletes) -- no need to route through chunkByParams here, each
     // statement binds at most 2 params.
     await this.db.batch(statements);
+  }
+
+  async getGenre(slug: string): Promise<TaxonomyRef | null> {
+    return this.db.prepare('SELECT slug, name FROM genre WHERE slug = ?').bind(slug).first<TaxonomyRef>();
+  }
+
+  async getCountry(slug: string): Promise<TaxonomyRef | null> {
+    return this.db.prepare('SELECT slug, name FROM country WHERE slug = ?').bind(slug).first<TaxonomyRef>();
+  }
+
+  /** Same keyset reasoning as MovieRepository.getPageByType -- join to
+   * movie for last_synced ordering, no OFFSET. */
+  async getMoviesByGenre(genreSlug: string, cursor: Cursor | null, limit: number): Promise<Page<MovieRow>> {
+    return this.pagedJoin('genre_movie', 'genre_slug', genreSlug, cursor, limit);
+  }
+
+  async getMoviesByCountry(countrySlug: string, cursor: Cursor | null, limit: number): Promise<Page<MovieRow>> {
+    return this.pagedJoin('country_movie', 'country_slug', countrySlug, cursor, limit);
+  }
+
+  private async pagedJoin(
+    joinTable: string,
+    joinCol: string,
+    value: string,
+    cursor: Cursor | null,
+    limit: number
+  ): Promise<Page<MovieRow>> {
+    const sql = cursor
+      ? `SELECT m.* FROM ${joinTable} j JOIN movie m ON m.slug = j.slug
+         WHERE j.${joinCol} = ? AND (m.last_synced < ? OR (m.last_synced = ? AND m.slug > ?))
+         ORDER BY m.last_synced DESC, m.slug ASC LIMIT ?`
+      : `SELECT m.* FROM ${joinTable} j JOIN movie m ON m.slug = j.slug
+         WHERE j.${joinCol} = ? ORDER BY m.last_synced DESC, m.slug ASC LIMIT ?`;
+    const binds = cursor ? [value, cursor.lastSynced, cursor.lastSynced, cursor.slug, limit + 1] : [value, limit + 1];
+    const res = await this.db.prepare(sql).bind(...binds).all<MovieRow>();
+    const rows = res.results ?? [];
+    const items = rows.slice(0, limit);
+    const last = items[items.length - 1];
+    const nextCursor = rows.length > limit && last ? { lastSynced: last.last_synced, slug: last.slug } : null;
+    return { items, nextCursor };
   }
 
   async listGenres(): Promise<TaxonomyRef[]> {

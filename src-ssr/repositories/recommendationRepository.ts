@@ -1,5 +1,5 @@
 import { chunkByParams } from '../db/chunk';
-import type { TmdbType } from '../types/movie';
+import type { MovieRow, TmdbType } from '../types/movie';
 
 const REC_COLUMNS = 5;
 
@@ -30,6 +30,21 @@ export class RecommendationRepository {
       }
     }
     await this.db.batch(statements);
+  }
+
+  /** The detail page's 3rd query (plan §3.1) -- a single JOIN, not a loop
+   * over getBySlugs for each target. Rows with target_slug still NULL
+   * (unresolved -- Phase 4 hasn't run, or the target never resolved) are
+   * excluded by the JOIN itself, not filtered after the fact. */
+  async getResolvedForSlug(slug: string, limit: number): Promise<MovieRow[]> {
+    const res = await this.db
+      .prepare(
+        `SELECT m.* FROM recommendation r JOIN movie m ON m.slug = r.target_slug
+         WHERE r.slug = ? ORDER BY r.sort_order LIMIT ?`
+      )
+      .bind(slug, limit)
+      .all<MovieRow>();
+    return res.results ?? [];
   }
 
   /** Unresolved edges grouped by target, most-referenced first -- the order
