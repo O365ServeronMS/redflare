@@ -1,5 +1,6 @@
 import { escapeHtml } from './escape';
 import { renderPage } from './layout';
+import { movieGrid } from './card';
 import { breadcrumbJsonLd, SITE_ORIGIN, truncateDescription } from './seo';
 import { encodeCursor, type Cursor } from '../lib/cursor';
 import type { MovieRow } from '../types/movie';
@@ -13,20 +14,9 @@ export interface ListPageInput {
   nextCursor: Cursor | null;
 }
 
-function cardHtml(m: MovieRow): string {
-  const title = escapeHtml(m.title);
-  const img = m.thumb_path ?? m.poster_path ?? '';
-  return `<li>
-  <a href="/phim/${escapeHtml(m.slug)}">
-    ${img ? `<img src="${escapeHtml(img)}" alt="${title}" width="342" height="513" loading="lazy">` : ''}
-    <span>${title}</span>
-  </a>
-</li>`;
-}
-
 /** Shared by /danh-sach/:type, /the-loai/:slug, /quoc-gia/:slug (plan §3:
  * "Trang list/genre/country: 1 COUNT + 1 SELECT LIMIT 24" -- the COUNT is
- * skipped here since keyset pagination doesn't need a total to produce a
+ * skipped since keyset pagination doesn't need a total to produce a
  * next-page link, only the movie repository's limit+1 probe). */
 export function renderListPage(input: ListPageInput): string {
   const canonical = `${SITE_ORIGIN}${input.canonicalPath}`;
@@ -34,9 +24,9 @@ export function renderListPage(input: ListPageInput): string {
     ? `${input.canonicalPath}?cursor=${encodeURIComponent(encodeCursor(input.nextCursor))}`
     : null;
 
-  const body = `<h1>${escapeHtml(input.h1)}</h1>
-<ul>${input.items.map(cardHtml).join('')}</ul>
-${nextHref ? `<a href="${escapeHtml(nextHref)}" rel="next">Trang sau</a>` : ''}`;
+  const body = `<h1 class="page-title">${escapeHtml(input.h1)}</h1>
+${input.items.length === 0 ? '<p class="empty">Chưa có phim nào trong mục này.</p>' : movieGrid(input.items)}
+${nextHref ? `<nav class="pager"><a class="pager__next" href="${escapeHtml(nextHref)}" rel="next">Trang sau →</a></nav>` : ''}`;
 
   return renderPage(
     {

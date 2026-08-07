@@ -1,41 +1,17 @@
-import { escapeHtml } from './escape';
 import { renderPage } from './layout';
+import { movieGrid } from './card';
 import { SITE_ORIGIN, SITE_NAME } from './seo';
-import { LIST_TYPE_LABELS } from '../lib/listTypes';
 import type { MovieRow } from '../types/movie';
 
-function cardHtml(m: MovieRow): string {
-  const title = escapeHtml(m.title);
-  const img = m.thumb_path ?? m.poster_path ?? '';
-  const cta = m.has_stream ? 'Xem Ngay' : 'Xem Trailer';
-  return `<li>
-  <a href="/phim/${escapeHtml(m.slug)}">
-    ${img ? `<img src="${escapeHtml(img)}" alt="${title}" width="342" height="513" loading="lazy">` : ''}
-    <span>${title}</span>
-    <em>${cta}</em>
-  </a>
-</li>`;
-}
-
-/** The one page Phase 3 deliberately left as a placeholder (it covered
- * detail/list/genre/country only, plan §3) -- built once the catalog had
- * real synced data to show instead of an empty shell. Same rendering
- * primitives as every other page: no framework, no client JS, full SEO. */
+/** Header/nav/search live in the layout now (every page gets them), so this
+ * is just the content. */
 export function renderHomePage(recent: MovieRow[]): string {
-  const navLinks = Object.entries(LIST_TYPE_LABELS)
-    .map(([slug, { label }]) => `<li><a href="/danh-sach/${escapeHtml(slug)}">${escapeHtml(label)}</a></li>`)
-    .join('');
-
-  const body = `<h1>${escapeHtml(SITE_NAME)}</h1>
-<nav><ul>${navLinks}</ul></nav>
-<form action="/tim-kiem" method="get" role="search">
-  <input type="text" name="q" placeholder="Tìm phim..." maxlength="100" required>
-  <button type="submit">Tìm</button>
-</form>
-<section aria-label="Phim mới cập nhật">
-  <h2>Phim Mới Cập Nhật</h2>
-  <ul>${recent.map(cardHtml).join('')}</ul>
-</section>`;
+  const body = `<h1 class="page-title">Phim Mới Cập Nhật</h1>
+${
+  recent.length === 0
+    ? '<p class="empty">Chưa có phim nào. Dữ liệu đang được đồng bộ.</p>'
+    : movieGrid(recent)
+}`;
 
   return renderPage(
     {

@@ -1,0 +1,5 @@
+# Long-lived browser cache for the stylesheet -- render/layout.ts appends a
+# ?v=N query string (STYLES_VERSION) that changes when the CSS changes, so
+# a stale copy can never outlive an actual edit.
+/styles.css
+  Cache-Control: public, max-age=31536000

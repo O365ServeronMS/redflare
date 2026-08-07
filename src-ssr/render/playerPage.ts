@@ -3,18 +3,15 @@ import { renderPage } from './layout';
 import { SITE_ORIGIN } from './seo';
 import type { EpisodeRecord, MovieRow } from '../types/movie';
 
-// hls.js from a CDN, not bundled -- there is no static-asset pipeline yet
-// (wrangler.toml has no [assets] block since the 2026-08-07 cutover). This
-// is the one page in the whole SSR app that runs any client JS at all
-// (plan §3.3: "đây là trang duy nhất được hydrate"); every other route is
-// pure server-rendered HTML with zero script tags.
+// hls.js from a CDN, not bundled -- the assets pipeline serves styles only
+// (public-ssr/), there is no JS build step for the SSR app. This is the one
+// page in the whole site that runs any client JS at all (plan §3.3); every
+// other route is pure server-rendered HTML with zero script tags.
 const HLS_JS_CDN = 'https://cdn.jsdelivr.net/npm/hls.js@1.6.16/dist/hls.min.js';
 
 /** noindex -- duplicate content of the detail page for crawl purposes
  * (plan §3.3). `nonce` (middleware/securityHeaders.ts) lets the CSP allow
- * this one inline bootstrap script without 'unsafe-inline' anywhere; the
- * jsdelivr <script src> tag is allowed by host instead, since a CSP nonce
- * only needs to cover script content the policy can't otherwise name. */
+ * this one inline bootstrap script without 'unsafe-inline' anywhere. */
 export function renderPlayerPage(
   movie: MovieRow,
   episode: EpisodeRecord,
@@ -23,19 +20,27 @@ export function renderPlayerPage(
 ): string {
   const canonical = `${SITE_ORIGIN}/xem/${movie.slug}/${episode.epSlug}`;
   const title = escapeHtml(`${movie.title} - ${episode.epName}`);
-  const m3u8 = episode.linkM3u8 ? escapeHtml(episode.linkM3u8) : '';
+  const m3u8 = episode.linkM3u8 ?? '';
 
   const episodeLinks = allEpisodes
     .map(
       (e) =>
-        `<li><a href="/xem/${escapeHtml(movie.slug)}/${escapeHtml(e.epSlug)}">${escapeHtml(e.server)} — ${escapeHtml(e.epName)}</a></li>`
+        `<li><a class="episode${e.epSlug === episode.epSlug ? ' episode--active' : ''}"
+          href="/xem/${escapeHtml(movie.slug)}/${escapeHtml(e.epSlug)}">${escapeHtml(e.epName)}</a></li>`
     )
     .join('');
 
-  const body = `<h1>${title}</h1>
-<video id="player" controls width="1280" height="720" playsinline></video>
-<ul>${episodeLinks}</ul>
-<a href="/phim/${escapeHtml(movie.slug)}">← Về trang phim</a>
+  const body = `<div class="player">
+  <h1 class="page-title">${title}</h1>
+  <div class="player__stage">
+    <video id="player" controls playsinline preload="metadata"></video>
+  </div>
+  <p class="player__back"><a href="/phim/${escapeHtml(movie.slug)}">← Về trang phim</a></p>
+  <section class="section">
+    <h2 class="section__title">Danh sách tập</h2>
+    <ul class="episodes">${episodeLinks}</ul>
+  </section>
+</div>
 <script src="${HLS_JS_CDN}"></script>
 <script nonce="${escapeHtml(nonce)}">
 (function () {
@@ -52,8 +57,5 @@ export function renderPlayerPage(
 })();
 </script>`;
 
-  return renderPage(
-    { title, description: title, canonical, noindex: true },
-    body
-  );
+  return renderPage({ title, description: title, canonical, noindex: true }, body);
 }
