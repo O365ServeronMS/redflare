@@ -49,6 +49,15 @@ export interface NormalizedMovie {
   episodes: EpisodeRecord[];
   /** target (tmdbId, tmdbType) pairs, in rank order -- resolved to slugs in Phase 4. */
   recommendationTargets: { tmdbId: number; tmdbType: TmdbType }[];
+  /** MovieDetail.js renders this (docs/contract-legacy-api.md §4) -- KKPhim
+   * detail already has it, just wasn't captured before Phase F3. */
+  actors: string[];
+  /** TMDB's own popularity score, captured for hero/trending ranking
+   * (plan-restore-spa-frontend.md F4) -- never written into hashMovie
+   * (services/sync/hash.ts): it drifts daily on TMDB's side independent of
+   * anything else about the title, and hashing it would force a rewrite of
+   * every synced movie on every tick. */
+  popularity: number | null;
 }
 
 export interface MovieRow {
@@ -79,4 +88,6 @@ export interface MovieRow {
   tier: string;
   source_hash: string;
   last_synced: number;
+  actor_json: string;
+  popularity: number | null;
 }

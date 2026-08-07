@@ -15,6 +15,7 @@ export interface TmdbDetail {
   first_air_date?: string;
   vote_average?: number;
   vote_count?: number;
+  popularity?: number;
   videos?: { results?: { site: string; type: string; official: boolean; key: string }[] };
 }
 

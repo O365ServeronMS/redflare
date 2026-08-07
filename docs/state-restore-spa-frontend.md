@@ -5,11 +5,10 @@ File tracking cho [plan-restore-spa-frontend.md](plan-restore-spa-frontend.md).
 không phải git log.
 
 **Bắt đầu:** 2026-08-07
-**Trạng thái tổng:** 🟡 **F1 + F2 xong; plan F3–F8 vừa sửa lớn, chưa thi công.** `/api/*` (6
-endpoint + alias) đã sống trên production, đọc D1 thật, verify khớp `contract-legacy-api.md`.
-SSR page cũ (**giao diện đang hỏng**) vẫn phục vụ song song. User đã chốt 4 quyết định
-(plan §0.4) và yêu cầu **không thi công tiếp cho tới khi plan đảm bảo giống được giao diện cũ** —
-plan đã cập nhật xong, sẵn sàng chạy F3. **F6 là điểm không quay lại.**
+**Trạng thái tổng:** 🟡 **F1–F3 xong.** `/api/*` (6 endpoint + alias) sống trên production, đọc
+D1 thật, `actor_json`/`popularity` đã capture được dữ liệu thật. **Vẫn chưa đụng một dòng giao
+diện nào** — SSR page cũ (giao diện hỏng) còn phục vụ song song. **F6 là điểm không quay lại**;
+**F7 (verify bằng mắt) mới là lúc trả lời được câu "đã giống giao diện cũ chưa".**
 
 ---
 
@@ -19,7 +18,7 @@ plan đã cập nhật xong, sẵn sàng chạy F3. **F6 là điểm không quay
 |---|---|---|---|---|
 | **F1** | Chốt contract legacy API (`docs/contract-legacy-api.md`) | 🟢 **Xong** | 2026-08-07 | Đọc hết `Grid.js`/`SearchOverlay.js`/`Player.js`/`HeroSlider.js`/`PosterCard.js`/`Carousel.js`. **Sửa 1 chỗ so với plan gốc:** `director` không được FE render ở đâu — bỏ khỏi scope F4 |
 | **F2** | `/api/*` JSON trên D1 (6 endpoint + alias) | 🟢 **Xong, verify thật trên production** | 2026-08-07 | Deploy qua `wrangler deploy` tay (Git integration vẫn đứt) |
-| **F3** | Migration 0009: `actor_json` + `popularity` + sync capture | ⚪ Chưa bắt đầu | — | Gộp 2 cột 1 migration. `actor` vào hash (ép resync toàn catalog), `popularity` **không** vào hash (vào là thổi bay quota ghi D1) |
+| **F3** | Migration 0009: `actor_json` + `popularity` + sync capture | 🟢 **Xong, verify thật trên D1 production** | 2026-08-07 | Bắt được + sửa 1 bug thật có sẵn từ Phase 5 (`cache.purge()` ném lỗi đồng bộ) — xem log |
 | **F4** | `/api/home-data` (dùng `popularity`) | ⚪ Chưa bắt đầu | — | Chặn bởi F3 — hero/trending xếp theo `popularity` |
 | **F5** | Self-host Inter, bỏ Google Fonts | ⚪ Chưa bắt đầu | — | Quyết định #2 của user. Không đụng dòng CSS design nào |
 | **F6** | **Cutover**: `[assets]`→`dist` + `run_worker_first`, CSP mới, xoá SSR render | ⚪ Chưa bắt đầu | — | **Điểm không quay lại.** Bẫy lớn nhất: thiếu `run_worker_first` → SPA fallback **nuốt sạch `/api/*`** |
@@ -43,6 +42,44 @@ Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặ
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase F3: migration `actor_json` + `popularity`, bắt được bug thật của Phase 5
+
+**Thuần backend, chưa đụng giao diện** — nhắc lại rõ với user trước khi làm (câu hỏi "đã đảm
+bảo giống giao diện cũ chưa" nhận được từ user lúc bắt đầu phase này).
+
+Xác nhận `popularity` là field thật trong TMDB Movie/TV Details response (kiểu `number`) qua
+tài liệu TMDB chính thức trước khi code — đúng luật của plan "kiểm tra thật, không tin trí nhớ".
+
+**Migration `0009_actor_popularity.sql`** gộp 2 cột cùng lúc (tránh 2 lần resync toàn catalog):
+`actor_json`, `popularity`. Cập nhật dây chuyền: `kkphimClient.ts` (`KkphimMovie.actor?`),
+`tmdbClient.ts` (`TmdbDetail.popularity?`), `types/movie.ts` (`NormalizedMovie.actors`/
+`popularity`, `MovieRow.actor_json`/`popularity`), `normalize.ts` (capture ở cả
+`normalizeMovie` và `normalizeStubMovie`), `hash.ts` (**`actors` vào hash** để ép resync 1 lần;
+**`popularity` cố ý KHÔNG vào hash** — float TMDB trôi mỗi ngày, đưa vào hash sẽ ghi lại toàn bộ
+catalog mỗi tick, thổi bay quota 100k row/ngày), `movieRepository.ts`
+(`MOVIE_COLUMNS` 27→29, đã tính lại: 29×3=87 ≤ 100 ✅), `legacyItem.ts` (`actor: JSON.parse(...)`
+thay `[]` cứng).
+
+**Bắt được 1 bug thật có sẵn từ Phase 5, không liên quan F3, chặn hẳn việc verify:** lần sync
+thử đầu tiên báo `errors:1` dù dữ liệu D1 thực ra **đã ghi đúng** — dùng `console.error` tạm
+thời (`syncMovie.ts`) + `wrangler dev --remote` để bắt exception thật:
+`TypeError: cache.purge is not a function`. Nguyên nhân: `cache.purge({...}).catch(() => {})`
+chỉ bắt được **promise reject**, nhưng lỗi này ném **đồng bộ** ngay lúc gọi hàm (API purge
+không được giả lập đầy đủ trong môi trường `wrangler dev --remote`) — exception thoát ra trước
+khi `.catch()` kịp gắn vào. Sửa: bọc `try { await cache.purge(...) } catch {}` thay vì chỉ
+`.catch()` trên promise. Xác nhận **production thật không hề bị ảnh hưởng** — cron đã sync
+thành công liên tục (movie count tăng dần 91→104→118→132 qua các lần kiểm tra trước đó trong
+session), vì cron chạy trên worker đã deploy thật, không qua tunnel dev preview.
+
+**Verify thật trên D1 production** (sau khi sửa bug purge): sync `bach-ho-diep` (có tmdb_id
+1176229) → `actor_json` có tên diễn viên thật, `popularity: 2.4264` — số thật từ TMDB.
+`/api/movie/bach-ho-diep` trả `actor` đúng, không còn `[]`. Phim không có `tmdb_id` →
+`popularity: null` đúng như thiết kế (không gọi TMDB khi không có id để tra) — không phải bug.
+
+Migration đã áp lên D1 production (`redflare-db`). Code sẽ deploy cùng đợt.
+
+---
 
 ### 2026-08-07 — Sửa lớn plan sau khi user chốt 4 quyết định (dừng F3 giữa chừng)
 

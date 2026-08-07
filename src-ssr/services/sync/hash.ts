@@ -40,6 +40,13 @@ export function hashMovie(m: NormalizedMovie): string {
     m.tier,
     m.episodes.map((e) => `${e.server}:${e.epSlug}:${e.linkM3u8 ?? ''}:${e.linkEmbed ?? ''}`).join('|'),
     m.recommendationTargets.map((t) => `${t.tmdbType}:${t.tmdbId}`).join(','),
+    m.actors.join(','),
+    // popularity is deliberately NOT hashed (plan-restore-spa-frontend.md
+    // F3) -- it's a TMDB float that drifts daily independent of anything
+    // else about the title. Hashing it would force a rewrite of the whole
+    // catalog on every sync tick and blow the D1 write quota (ADR-0002
+    // Finding 2); it "rides along" on whatever change actually triggers a
+    // rewrite instead.
   ];
   return fnv1a(parts.join(''));
 }

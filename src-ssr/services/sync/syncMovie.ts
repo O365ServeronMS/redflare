@@ -76,7 +76,22 @@ export async function syncOneMovie(
     // there's no bounded way to know every listing a movie could appear on
     // without querying them, so those rely on their own 60s max-age to
     // pick up the change instead of exact invalidation.
-    await cache.purge({ tags: [`movie:${slug}`] }).catch(() => {});
+    //
+    // Wrapped in try/catch, not just `.catch()` on the promise -- found
+    // 2026-08-07 (Phase F3 verification) that cache.purge() throws
+    // SYNCHRONOUSLY ("cache.purge is not a function") under
+    // `wrangler dev --remote`, before it ever returns a promise for
+    // `.catch()` to attach to. That crashed every single sync attempted
+    // through dev preview, even though real deployed production has been
+    // writing successfully the whole time (movie count climbing steadily
+    // across this session) -- Workers Caching's purge API isn't fully
+    // simulated in the preview tunnel. A purge failing should never cost a
+    // real write that already succeeded.
+    try {
+      await cache.purge({ tags: [`movie:${slug}`] });
+    } catch {
+      /* best-effort -- see note above */
+    }
 
     return { slug, outcome: 'written', rowsWritten };
   } catch {

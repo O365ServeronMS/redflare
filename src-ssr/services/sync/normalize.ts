@@ -103,6 +103,8 @@ export function normalizeMovie(
       tmdbType && tmdbId
         ? recommendationTmdbIds.map((id) => ({ tmdbId: id, tmdbType: tmdbType as TmdbType }))
         : [],
+    actors: m.actor ?? [],
+    popularity: tmdb?.popularity ?? null,
   };
 }
 
@@ -156,5 +158,7 @@ export function normalizeStubMovie(slug: string, tmdb: TmdbDetail, tmdbId: numbe
     tier: 'stub',
     episodes: [],
     recommendationTargets: [],
+    actors: [], // no KKPhim record exists for a stub -- nothing to source cast from
+    popularity: tmdb.popularity ?? null,
   };
 }

@@ -75,10 +75,7 @@ export function toLegacyDetail(row: MovieRow): LegacyDetail {
     ...toLegacyItem(row),
     content: row.overview ?? '',
     trailer_url: row.youtube_trailer_key ? `https://www.youtube.com/watch?v=${row.youtube_trailer_key}` : '',
-    // actor_json doesn't exist on MovieRow yet -- Phase F4 adds the column
-    // and this becomes a real JSON.parse. MovieDetail.js guards with
-    // Array.isArray(...) && length > 0, so [] is a safe, correct default.
-    actor: [],
+    actor: JSON.parse(row.actor_json || '[]'),
   };
 }
 

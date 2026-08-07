@@ -8,9 +8,9 @@ export interface Page<T> {
 }
 
 // Columns bound per row in the upsert below. At D1's 100-param cap that's
-// 3 rows/statement (27 cols x 3 = 81, x4 would be 108 -- over) -- see
-// db/chunk.ts.
-const MOVIE_COLUMNS = 27;
+// still 3 rows/statement (29 cols x 3 = 87, x4 would be 116 -- over) -- see
+// db/chunk.ts. Re-check this arithmetic before adding another column.
+const MOVIE_COLUMNS = 29;
 
 function toRow(m: NormalizedMovie, hash: string, now: number) {
   return [
@@ -41,6 +41,8 @@ function toRow(m: NormalizedMovie, hash: string, now: number) {
     m.tier,
     hash,
     now,
+    JSON.stringify(m.actors),
+    m.popularity,
   ] as const;
 }
 
@@ -50,7 +52,7 @@ INSERT INTO movie (
   poster_path, thumb_path, poster_host, release_year, runtime, vote_average,
   vote_count, status, episode_current, quality, lang, type, genres_json,
   countries_json, has_stream, stream_count, youtube_trailer_key, tier,
-  source_hash, last_synced
+  source_hash, last_synced, actor_json, popularity
 ) VALUES ${'(' + Array(MOVIE_COLUMNS).fill('?').join(',') + ')'}
 ON CONFLICT(slug) DO UPDATE SET
   tmdb_id = excluded.tmdb_id,
@@ -78,7 +80,9 @@ ON CONFLICT(slug) DO UPDATE SET
   youtube_trailer_key = excluded.youtube_trailer_key,
   tier = excluded.tier,
   source_hash = excluded.source_hash,
-  last_synced = excluded.last_synced
+  last_synced = excluded.last_synced,
+  actor_json = excluded.actor_json,
+  popularity = excluded.popularity
 `;
 
 export class MovieRepository {

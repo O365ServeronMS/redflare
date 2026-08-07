@@ -41,6 +41,7 @@ export interface KkphimMovie {
   year: number;
   category: KkphimTaxonomy[];
   country: KkphimTaxonomy[];
+  actor?: string[];
 }
 
 export interface KkphimDetailResponse {
