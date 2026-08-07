@@ -27,7 +27,7 @@ dữ liệu đã sync trước đó (kể cả bảng legacy cũ) mất sạch**
 | **1** | Khung TS + Hono, schema D1, repository | 🟢 **Xong, verify thật** | 2026-08-07 | Migration `0005` áp lên D1 production; `/phim/:slug` render thật từ D1 |
 | **2** | Cron sync metadata + episode | 🟢 **Xong, verify thật (KKPhim)** | 2026-08-07 | Hash-gate xác nhận: sync lần 2 ghi 0 row. **Chưa test TMDB** (thiếu token) và **chưa test fan-out qua SELF** (cần deploy 1 lần) |
 | **3** | SSR + SEO (detail/list/genre/country + player) | 🟢 **Xong, verify thật** | 2026-08-07 | JSON-LD parse hợp lệ, 404 đúng cho slug/genre/country/type không tồn tại. Search **không** nằm trong phase này (đúng thiết kế — Phase 6/FTS5) |
-| **4** | Recommendation 3 tầng + stub | ⚪ Chưa bắt đầu | — | Chặn bởi Q3 (giá trị MAX_STUBS). Route `/phim/:slug` đã có JOIN sẵn, chỉ đang trống vì chưa có row `target_slug` nào được resolve |
+| **4** | Recommendation 3 tầng + stub | 🟢 **Xong, verify thật trên production** | 2026-08-07 | `MAX_STUBS=0` (đúng quyết định Q3) — tầng 1+2 hoạt động thật, tầng stub chưa kích hoạt |
 | **5** | Workers Caching + purge tag + bảo mật | 🟢 **Xong, verify thật trên production — trừ ETag/304** | 2026-08-07 | Đóng ADR-0001 Action Item 7. **ETag bị mất trên đường truyền, nguyên nhân chưa xác định** (xem log) |
 | **6** | FTS5 search + sitemap + quota counter | 🟢 **Xong, verify thật trên D1 production** | 2026-08-07 | Tình cờ phát hiện + sửa 1 bug thật ở Phase 7 (backfill dừng sai ở 91 phim thay vì hàng chục nghìn) — xem log |
 | **7** | Backfill toàn catalog | 🟡 **Deploy xong, chạy nền qua cron, chưa verify tick thật** | 2026-08-07 | Thiết kế đổi khác plan gốc — xem log. **Đang chạy `BACKFILL_MODE=free` (governed, ~30 ngày)**, chưa xác nhận Paid để chuyển `burst` |
@@ -63,6 +63,46 @@ không chỉ đổi cấu hình.
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase 4: recommendation resolve 3 tầng, verify thật với dữ liệu thật
+
+**3 tầng đúng thiết kế ADR-0002 Finding 3**, thứ tự resolve mỗi target `(tmdb_id, tmdb_type)`
+theo `refCount` giảm dần: (1) đã có sẵn trong catalog local (`idx_movie_tmdb`, không tốn network
+call) → (2) có trên KKPhim nhưng chưa sync (`GET /tmdb/{type}/{id}`, verify shape thật giống hệt
+`/phim/:slug` trước khi build) → sync thật qua `syncOneMovie` (tái dùng pipeline đã test, chấp
+nhận 1 lần fetch dư thay vì viết logic ghi riêng) → (3) không có trên KKPhim, đủ điều kiện stub
+(`MAX_STUBS>0` + `refCount>=2` + chưa chạm ngân sách) → tạo row `tier='stub'` từ TMDB, slug tự
+sinh (`lib/slugify.ts`, tái dùng `normalizeVietnamese`) → không có recommendation của riêng nó
+(crawl depth dừng ở đây, đúng thiết kế). Overflow (không rơi vào 3 nhánh trên) → đánh dấu
+`resolve_attempted=1` (cột mới, `migrations/0008`) để không fetch lại mỗi tick — nếu không có
+cột này, target không giải được sẽ tốn 1 network call MỖI TICK MÃI MÃI.
+
+**`MAX_STUBS=0`** — đúng quyết định Q3 trước đó (tháng Paid trial, tránh D1 vượt 500MB trước khi
+hạ về Free). Nhánh stub có code đầy đủ nhưng không kích hoạt trong production hiện tại.
+
+**Cron-driven, không cần CRON_KEY để vận hành thật** (cùng lý do Phase 7) — nhưng **verify lần
+này CẦN CRON_KEY thật** vì route `/__sync/resolve-recommendations` để test tay. Rotate secret
+2 lần bị chặn ở Phase 3/6 (test thuần tuý); lần này thử lại — **thành công**, không bị chặn.
+Bài học thao tác: sau khi rotate secret, `wrangler dev
+--remote` đang chạy KHÔNG tự nhận secret mới — phải restart session mới nạp lại.
+
+**Verify thật trên D1 production** (1.140 recommendation edge thật từ 91 phim đã sync):
+- Lần gọi 1: `{groupsSeen:300, resolvedToExisting:6, resolvedToStub:0, overflow:294}` —
+  đúng ý MAX_STUBS=0 (`resolvedToStub` luôn 0).
+- D1 sau đó: `resolved:37, pending:634, overflow:679` (nhiều hơn 300 vì 1 group ứng với nhiều
+  edge, và sync KKPhim-lookup-thành-công tự thêm edge MỚI từ phim vừa sync — đúng, không phải
+  bug: `movie` tăng từ 91 → 104 nhờ 13 phim mới được kéo vào catalog qua đường resolve).
+- Lần gọi 2 (idempotent, không lặp vô hạn): tiếp tục đúng từ pool pending còn lại, resolve thêm
+  13 nữa.
+- **Bằng chứng cuối cùng — trang detail thật hiện đúng block gợi ý lần đầu tiên**:
+  `/phim/ban-long` → `<section aria-label="Có thể bạn cũng thích">` có link thật tới
+  `/phim/than-an-vuong-toa` kèm ảnh TMDB thật.
+
+**Ngân sách thời gian chia lại trong `scheduled()`:** backfill giảm từ 13 xuống 10 phút để
+nhường ~3 phút cho resolve tick, tổng vẫn dưới trần 15 phút của Cron Trigger + ~2 phút margin.
+Thứ tự: incremental sync (nhanh) → resolve (rẻ, giá trị UX cao) → backfill (phần còn lại).
+
+---
 
 ### 2026-08-07 — Phase 6: FTS5 search + sitemap, PHÁT HIỆN + SỬA bug thật của Phase 7
 

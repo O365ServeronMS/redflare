@@ -83,6 +83,19 @@ export class KkphimClient {
     return data?.status && data.movie ? data : null;
   }
 
+  /** Exact TMDB-id lookup (plan-kkphim-migration.md §0.2, verified
+   * 2026-08-07 against the real endpoint -- same response shape as
+   * getDetail). Used by the recommendation resolver (Phase 4) to check
+   * whether a TMDB recommendation target exists on KKPhim at all, without
+   * guessing via keyword search. */
+  async getByTmdbRef(type: 'movie' | 'tv', tmdbId: number): Promise<KkphimDetailResponse | null> {
+    await this.limiter.wait();
+    const res = await fetchWithTimeout(`${KKPHIM_BASE}/tmdb/${type}/${tmdbId}`);
+    if (!res) return null;
+    const data = await res.json<KkphimDetailResponse>().catch(() => null);
+    return data?.status && data.movie ? data : null;
+  }
+
   /** One page of the "recently updated" feed, used by the incremental sync
    * cursor (plan §2.1). */
   async getRecentPage(page: number): Promise<KkphimListItem[]> {

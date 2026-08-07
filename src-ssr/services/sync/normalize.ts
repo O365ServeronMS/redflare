@@ -109,3 +109,52 @@ export function normalizeMovie(
 function stripHtml(html: string | undefined): string {
   return (html ?? '').replace(/<[^>]+>/g, '').trim();
 }
+
+/** Stub tier (ADR-0002 Finding 3, plan §4) -- a TMDB-only title that isn't
+ * on KKPhim at all, materialized only because >=2 catalog movies
+ * recommend it, so it gets a real (if trailer-only) detail page instead of
+ * the recommendation block silently dropping it. No KKPhim record exists
+ * to own taxonomy/episodes/etc, so almost everything here is TMDB or
+ * empty -- has_stream is always false, there are never episodes, and (by
+ * design, services/sync/resolveRecommendations.ts) a stub never gets
+ * recommendations of its own, so recommendationTargets is always []. */
+export function normalizeStubMovie(slug: string, tmdb: TmdbDetail, tmdbId: number, tmdbType: TmdbType): NormalizedMovie {
+  const title = readableTitle(tmdb.title || tmdb.name);
+  const originalTitle = readableTitle(tmdb.original_title || tmdb.original_name);
+  const date = tmdb.release_date || tmdb.first_air_date || '';
+  const trailer = tmdb.videos?.results?.find(
+    (v) => v.site === 'YouTube' && v.type === 'Trailer' && v.official
+  ) ?? tmdb.videos?.results?.find((v) => v.site === 'YouTube' && v.type === 'Trailer');
+  const posterPath = tmdb.backdrop_path ? `${TMDB_IMG}/${BACKDROP_SIZE}${tmdb.backdrop_path}` : '';
+  const thumbPath = tmdb.poster_path ? `${TMDB_IMG}/${POSTER_SIZE}${tmdb.poster_path}` : null;
+
+  return {
+    slug,
+    tmdbId,
+    tmdbType,
+    tmdbSeason: null,
+    title: first(title, originalTitle),
+    originalTitle,
+    overview: tmdb.overview ?? '',
+    posterPath,
+    thumbPath,
+    posterHost: 'tmdb',
+    releaseYear: date ? Number(date.slice(0, 4)) : null,
+    runtime: '',
+    voteAverage: tmdb.vote_average ?? null,
+    voteCount: tmdb.vote_count ?? null,
+    status: '',
+    episodeCurrent: '',
+    quality: '',
+    lang: '',
+    type: tmdbType === 'tv' ? 'tvshows' : 'single',
+    genres: [],
+    countries: [],
+    hasStream: false,
+    streamCount: 0,
+    youtubeTrailerKey: trailer?.key || null,
+    tier: 'stub',
+    episodes: [],
+    recommendationTargets: [],
+  };
+}

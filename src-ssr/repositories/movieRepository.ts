@@ -106,6 +106,17 @@ export class MovieRepository {
     return rows[0] ?? null;
   }
 
+  /** Phase 4's cheapest resolve step -- check the local catalog before
+   * ever calling KKPhim's /tmdb/ lookup. Uses idx_movie_tmdb
+   * (migrations/0005_ssr_schema.sql), the same index that exists
+   * specifically because tmdb_id isn't unique (ADR-0002 Finding 1). */
+  async getByTmdbRef(tmdbType: 'movie' | 'tv', tmdbId: number): Promise<MovieRow | null> {
+    return this.db
+      .prepare('SELECT * FROM movie WHERE tmdb_type = ? AND tmdb_id = ? LIMIT 1')
+      .bind(tmdbType, tmdbId)
+      .first<MovieRow>();
+  }
+
   /** Only rows whose source_hash differs get written -- callers should
    * already have filtered via existing hashes (see services/sync/syncMovie.ts),
    * this just performs the batched write. Returns rows actually written. */

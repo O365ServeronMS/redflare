@@ -8,6 +8,9 @@ import { SyncStateRepository } from '../../repositories/syncStateRepository';
 import { KkphimClient } from './kkphimClient';
 import { TmdbClient } from './tmdbClient';
 import { syncOneMovie, type SyncOneResult } from './syncMovie';
+import { normalizeStubMovie } from './normalize';
+import { hashMovie } from './hash';
+import { slugifyStub } from '../../lib/slugify';
 import { RateLimiter, PHIMAPI_AGGREGATE_RPS, TMDB_AGGREGATE_RPS } from './throttle';
 
 // Free-plan-only governor (ADR-0002 Finding 2 / plan §2.2). 85,000, not
@@ -191,11 +194,12 @@ export async function runBackfillPage(
 // linked. Not hoat-hinh-first or any particular priority; plan §7 doesn't
 // call for ranking, just full coverage.
 const BACKFILL_TYPES = ['phim-le', 'phim-bo', 'hoat-hinh', 'tv-shows'];
-// Leaves ~2 min of the Cron Trigger's 15-min wall-time ceiling
-// (developers.cloudflare.com/workers/platform/limits, verified 2026-08-07)
-// as margin -- a tick that ran right up to the limit would get killed
-// mid-write instead of persisting its cursor cleanly.
-const BACKFILL_TICK_BUDGET_MS = 13 * 60 * 1000;
+// Budget split across the one scheduled() invocation (index.ts), which has
+// a 15-min Cron Trigger wall-time ceiling total: incremental sync (usually
+// fast, unbounded here) + this + RESOLVE_TICK_BUDGET_MS (below) + ~2 min
+// margin so a tick that ran right up to the limit gets killed AFTER
+// persisting its cursor, not mid-write.
+const BACKFILL_TICK_BUDGET_MS = 10 * 60 * 1000;
 // Guards against an unbounded loop if a taxonomy listing somehow never
 // returns an empty page (shouldn't happen, but the cost of being wrong here
 // is a stuck cron forever, not a slow one).
@@ -280,4 +284,94 @@ export async function runBackfillTick(env: Env): Promise<{ ticked: boolean; page
   if (done) await repos.syncState.set('backfill:done', '1');
 
   return { ticked: true, pagesProcessed, done };
+}
+
+// See BACKFILL_TICK_BUDGET_MS above for how this fits in the same 15-min
+// cron invocation.
+const RESOLVE_TICK_BUDGET_MS = 3 * 60 * 1000;
+// Groups considered per tick, upper bound -- the wall-time budget above is
+// what actually cuts a tick short in practice.
+const RESOLVE_BATCH_SIZE = 300;
+// ADR-0002 Finding 3: only materialize a stub for a target enough catalog
+// movies actually point at to be worth a whole extra D1 row + TMDB fetch.
+const STUB_MIN_REFCOUNT = 2;
+
+export interface ResolveTickResult {
+  groupsSeen: number;
+  resolvedToExisting: number;
+  resolvedToStub: number;
+  overflow: number;
+}
+
+/** Phase 4 (plan §4, ADR-0002 Finding 3) -- the three-tier recommendation
+ * resolve. Cron-driven for the same reason backfill is (services/sync/
+ * orchestrator.ts runBackfillTick doc comment): no CRON_KEY needed to
+ * operate it. For each (target_tmdb_id, target_type) still unresolved,
+ * most-referenced first:
+ *   1. Already in the local catalog (idx_movie_tmdb)? -> resolve directly,
+ *      no network call.
+ *   2. On KKPhim but not synced yet (/tmdb/{type}/{id} lookup)? -> sync it
+ *      for real via syncOneMovie (a second fetch of the same detail this
+ *      lookup already has, but reuses the fully-tested sync pipeline
+ *      instead of duplicating its write logic) and resolve to that slug.
+ *   3. Not on KKPhim at all -- stub-eligible (env.MAX_STUBS > 0, refCount
+ *      >= STUB_MIN_REFCOUNT, under the stub budget)? -> materialize a
+ *      TMDB-only stub row (tier='stub', no episodes, no recommendations of
+ *      its own -- crawl depth stops here on purpose) and resolve to it.
+ *   4. Otherwise -- overflow. markAttempted so it isn't re-fetched every
+ *      tick; the edge stays in the table, unrendered, not deleted. */
+export async function runRecommendationResolveTick(env: Env): Promise<ResolveTickResult> {
+  const repos = buildRepos(env);
+  const clients = buildClients(env, 1);
+  const maxStubs = Number(env.MAX_STUBS ?? '0');
+
+  const groups = await repos.recommendation.getUnresolvedGroupedByTarget(RESOLVE_BATCH_SIZE);
+  const deadline = Date.now() + RESOLVE_TICK_BUDGET_MS;
+
+  let stubCount = maxStubs > 0 ? await repos.movie.countByTier('stub') : 0;
+  let resolvedToExisting = 0;
+  let resolvedToStub = 0;
+  let overflow = 0;
+  let groupsSeen = 0;
+
+  for (const { targetTmdbId, targetType, refCount } of groups) {
+    if (Date.now() >= deadline) break;
+    groupsSeen++;
+
+    const local = await repos.movie.getByTmdbRef(targetType, targetTmdbId);
+    if (local) {
+      await repos.recommendation.markResolved(targetTmdbId, targetType, local.slug);
+      resolvedToExisting++;
+      continue;
+    }
+
+    const onKkphim = await clients.kkphim.getByTmdbRef(targetType, targetTmdbId);
+    if (onKkphim) {
+      await syncOneMovie(env, onKkphim.movie.slug, clients, repos);
+      await repos.recommendation.markResolved(targetTmdbId, targetType, onKkphim.movie.slug);
+      resolvedToExisting++;
+      continue;
+    }
+
+    if (maxStubs > 0 && refCount >= STUB_MIN_REFCOUNT && stubCount < maxStubs) {
+      const tmdbDetail = await clients.tmdb.getDetail(targetType, targetTmdbId);
+      const rawTitle = tmdbDetail?.title || tmdbDetail?.name;
+      if (tmdbDetail && rawTitle) {
+        const slug = slugifyStub(rawTitle, targetType, targetTmdbId);
+        const stub = normalizeStubMovie(slug, tmdbDetail, targetTmdbId, targetType);
+        const hash = hashMovie(stub);
+        await repos.movie.upsertMany([{ movie: stub, hash }]);
+        await repos.search.indexMovie(slug, stub.title, stub.originalTitle);
+        await repos.recommendation.markResolved(targetTmdbId, targetType, slug);
+        stubCount++;
+        resolvedToStub++;
+        continue;
+      }
+    }
+
+    await repos.recommendation.markAttempted(targetTmdbId, targetType);
+    overflow++;
+  }
+
+  return { groupsSeen, resolvedToExisting, resolvedToStub, overflow };
 }

@@ -11,7 +11,7 @@ import { syncRoute } from './routes/sync';
 import { securityHeaders } from './middleware/securityHeaders';
 import { requestSampler } from './middleware/requestSampler';
 import { apply404Cache } from './cache/control';
-import { runIncrementalSync, runBackfillTick } from './services/sync/orchestrator';
+import { runIncrementalSync, runBackfillTick, runRecommendationResolveTick } from './services/sync/orchestrator';
 
 const app = new Hono<{ Bindings: Env; Variables: { nonce: string } }>();
 
@@ -46,16 +46,18 @@ app.notFound((c) => {
 export default {
   fetch: app.fetch,
 
-  // */30, same cadence for both jobs. Incremental sync runs first (small,
-  // bounded, keeps recent titles fresh); backfill (Phase 7) gets the rest
-  // of this invocation's 15-min wall-time budget and resumes from its own
-  // D1 cursor next tick -- see services/sync/orchestrator.ts
-  // runBackfillTick for why this replaced the "curl a CRON_KEY route
-  // repeatedly" design the plan originally sketched.
+  // */30, three jobs sharing one 15-min Cron Trigger wall-time budget:
+  // incremental sync (small, bounded, keeps recent titles fresh) ->
+  // recommendation resolve (Phase 4, ~3 min budget -- cheap, high UX
+  // value per minute, so it runs before backfill) -> backfill (Phase 7,
+  // ~10 min budget, resumes from its own D1 cursor next tick). All three
+  // are cron-driven rather than CRON_KEY-HTTP-driven for the same reason
+  // (see runBackfillTick's doc comment in services/sync/orchestrator.ts).
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(
       (async () => {
         await runIncrementalSync(env);
+        await runRecommendationResolveTick(env);
         await runBackfillTick(env);
       })()
     );

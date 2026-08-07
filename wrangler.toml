@@ -73,8 +73,14 @@ database_id = "40c364b3-10a8-4d03-bd51-60debe94610a"
 # "burst" and redeploy once Paid is confirmed active; nothing else about the
 # backfill changes (services/sync/orchestrator.ts runBackfillTick reads this
 # same var either way, plan §7's "same code, only the governor differs").
+# MAX_STUBS: 0 (ADR-0002 Finding 3 / plan §0.2b) -- kept at zero while on
+# the Workers Paid trial. Stub-tier movies are the one thing in this schema
+# that could push D1 storage past the 500MB Free-plan ceiling before the
+# planned downgrade back to Free; raise this only after measuring real
+# database size against that threshold.
 [vars]
 BACKFILL_MODE = "free"
+MAX_STUBS = "0"
 
 # Single cron: drives BOTH incremental sync (plan §2.1) and, since
 # 2026-08-07, the Phase 7 backfill walk (services/sync/orchestrator.ts

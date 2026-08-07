@@ -1,9 +1,15 @@
 import { Hono } from 'hono';
 import type { Env } from '../types/env';
 import { requireCronKey } from '../middleware/cronKey';
-import { syncSlugBatch, runIncrementalSync, runBackfillPage } from '../services/sync/orchestrator';
+import {
+  syncSlugBatch,
+  runIncrementalSync,
+  runBackfillPage,
+  runRecommendationResolveTick,
+} from '../services/sync/orchestrator';
 import { SyncStateRepository } from '../repositories/syncStateRepository';
 import { MovieRepository } from '../repositories/movieRepository';
+import { RecommendationRepository } from '../repositories/recommendationRepository';
 import { applyNoStore } from '../cache/control';
 import { SAMPLE_RATE } from '../middleware/requestSampler';
 
@@ -51,18 +57,37 @@ syncRoute.get('/__sync/backfill-page', async (c) => {
   return c.json(result);
 });
 
+// Manual trigger for one recommendation-resolve tick (Phase 4). Cron calls
+// this same path every */30 tick (index.ts scheduled handler).
+syncRoute.get('/__sync/resolve-recommendations', async (c) => {
+  const result = await runRecommendationResolveTick(c.env);
+  return c.json(result);
+});
+
 syncRoute.get('/__sync/status', async (c) => {
   const syncState = new SyncStateRepository(c.env.DB);
-  const [cursor, rowsToday, catalogCount, backfillDone, backfillTypeIndex, backfillPage, sampledRequests] =
-    await Promise.all([
-      syncState.get('cursor:recent'),
-      syncState.getRowsWrittenToday(),
-      new MovieRepository(c.env.DB).countByTier('catalog'),
-      syncState.get('backfill:done'),
-      syncState.get('backfill:type_index'),
-      syncState.get('backfill:page'),
-      syncState.getSampledRequestsToday(),
-    ]);
+  const movieRepo = new MovieRepository(c.env.DB);
+  const [
+    cursor,
+    rowsToday,
+    catalogCount,
+    stubCount,
+    backfillDone,
+    backfillTypeIndex,
+    backfillPage,
+    sampledRequests,
+    recommendationStats,
+  ] = await Promise.all([
+    syncState.get('cursor:recent'),
+    syncState.getRowsWrittenToday(),
+    movieRepo.countByTier('catalog'),
+    movieRepo.countByTier('stub'),
+    syncState.get('backfill:done'),
+    syncState.get('backfill:type_index'),
+    syncState.get('backfill:page'),
+    syncState.getSampledRequestsToday(),
+    new RecommendationRepository(c.env.DB).getResolveStats(),
+  ]);
 
   // ADR-0002 Finding 7: an estimate, not an exact count -- see
   // middleware/requestSampler.ts for why it's sampled instead of counted
@@ -74,6 +99,9 @@ syncRoute.get('/__sync/status', async (c) => {
     rowsWrittenToday: rowsToday,
     backfillMode: c.env.BACKFILL_MODE ?? 'free',
     catalogMovieCount: catalogCount,
+    stubMovieCount: stubCount,
+    maxStubs: Number(c.env.MAX_STUBS ?? '0'),
+    recommendation: recommendationStats,
     backfill: {
       done: backfillDone === '1',
       typeIndex: backfillTypeIndex ? Number(backfillTypeIndex) : 0,
