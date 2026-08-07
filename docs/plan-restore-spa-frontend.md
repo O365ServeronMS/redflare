@@ -179,10 +179,17 @@ phải object); `heroMovies[0].poster_url` chứa `/t/p/w1280/`; không phần t
 3. **Ngoại lệ #2:** `index.html` xoá 3 thẻ Google Fonts (`preconnect` ×2 + `<link href=...css2>`).
    **Giữ nguyên** khối `<style>` chống FOUC (CSP ở F6 sẽ cho phép nó).
 
-`variables.css` khai báo `--font-netflix-sans: 'Netflix Sans', ui-sans-serif, ...` — chuỗi
-fallback **không có "Inter"**. Kiểm tra xem `global.css`/`components.css` áp font ở đâu; nếu Inter
-chỉ được nạp mà không được tham chiếu tên, self-host xong chữ vẫn ra font hệ thống. **Nếu cần
-tham chiếu `Inter`, đó là lúc phải hỏi lại user** (vì đụng CSS = phá ràng buộc 0.3.2).
+**✅ Đã kiểm tra 2026-08-07 — không còn rủi ro ở đây, không cần hỏi user.** Lo ngại ban đầu
+("`--font-netflix-sans` không chứa Inter") hoá ra **không liên quan**: token đó khai báo trong
+`variables.css:15` nhưng **không được dùng ở bất kỳ đâu** (dead token). Font thật được áp trực
+tiếp bằng tên:
+
+- `src/styles/global.css:53` → `font-family: 'Inter', sans-serif;`
+- `src/styles/components.css:1387` và `:1812` → cùng vậy
+
+Nghĩa là self-host Inter **hoạt động ngay, không cần sửa một dòng CSS nào** — đúng ràng buộc
+0.3.2. Chỉ cần đảm bảo `@font-face` khai báo `font-family: 'Inter'` (đúng những gì
+`@fontsource/inter` làm).
 
 **Verify:** `npm run build` → `ls dist/assets/*.woff2` có file; `grep -c "fonts.googleapis" dist/index.html` = 0.
 
@@ -269,8 +276,9 @@ lại**), MODULES.md (Axis C → `src-ssr/api/`).
 6. **`img-src` quá hẹp = ảnh vỡ** — query D1 xác nhận host trước.
 7. **`MOVIE_COLUMNS` 27→29**: 29×3=87 ✅, nhưng 29×4=116 ✗ — thêm cột nữa phải tính lại.
 8. **Xoá `render/seo.ts` làm gãy `routes/sitemap.ts`** — trích `SITE_ORIGIN` ra trước.
-9. **Font nạp nhưng không được tham chiếu** — kiểm CSS xem `Inter` có trong font stack không;
-   nếu không thì phải hỏi user (đụng CSS = phá ràng buộc).
+9. ~~**Font nạp nhưng không được tham chiếu**~~ — **đã kiểm tra, không phải vấn đề**:
+   `global.css:53` + `components.css:1387,1812` đã áp `font-family: 'Inter'` trực tiếp.
+   `--font-netflix-sans` là dead token, không dùng ở đâu.
 10. **Deploy phải `npx wrangler deploy` tay** — push xong production KHÔNG đổi.
 11. **`movie.content` vào `innerHTML`** — chỉ trả plain text (D1 đã strip sẵn, đừng phá bảo đảm đó).
 12. **`trailer_url` phải là URL đầy đủ**, không phải key.

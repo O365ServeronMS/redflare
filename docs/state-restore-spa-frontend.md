@@ -4,6 +4,9 @@ File tracking cho [plan-restore-spa-frontend.md](plan-restore-spa-frontend.md).
 **Cập nhật file này mỗi khi một phase đổi trạng thái** — nguồn sự thật về tiến độ,
 không phải git log.
 
+> 🔀 **Session mới bắt đầu từ đây:** [HANDOFF.md](HANDOFF.md) — bàn giao 2026-08-07, gồm cả
+> các bẫy vận hành (deploy tay, CRON_KEY, `wrangler dev` hot-reload) không nằm trong plan.
+
 **Bắt đầu:** 2026-08-07
 **Trạng thái tổng:** 🟡 **F1–F4 xong.** Toàn bộ `/api/*` mà SPA cũ cần (7 endpoint kể cả
 home-data + alias) đã sống trên production, đọc D1 thật. **Vẫn chưa đụng một dòng giao diện
