@@ -5,12 +5,15 @@ File tracking cho [plan-ssr-rearchitecture.md](plan-ssr-rearchitecture.md) và
 trạng thái** — nó là nguồn sự thật về tiến độ, không phải git log.
 
 **Bắt đầu:** 2026-08-07
-**Trạng thái tổng:** 🟡 **Production đã cutover thẳng sang SSR (Phase 8 làm sớm, ngoài thứ tự
-plan), Phase 3 vừa xong.** Không còn worker cũ, KV, R2 — production giờ CHỈ có 1 binding D1.
-`phim.bluesia.net` đang phục vụ `/phim/:slug`, `/danh-sach/:type`, `/the-loai/:slug`,
-`/quoc-gia/:slug`, `/xem/:slug/:ep` với SEO đầy đủ (JSON-LD, OG, canonical). **Chưa có:** trang
-chủ, search, recommendation thật (Phase 4 chưa chạy nên block gợi ý trống), sitemap, cache/
-security header (Phase 5/6), và **D1 hiện chỉ có 1 phim thật** — chưa backfill.
+**Trạng thái tổng:** ⏸️ **Plan này DỪNG MỞ RỘNG — pivot 2026-08-07 cuối ngày.** Mọi phase
+backend (0–7) đã xong và **giữ nguyên giá trị** (D1, sync/backfill/resolve, FTS5, sitemap,
+Workers Caching), nhưng phần giao diện SSR tự chế (`src-ssr/render/`, `public-ssr/`) làm hỏng
+nặng frontend so với SPA cũ → user quyết định dùng lại giao diện cũ. **Kế hoạch kế nhiệm:**
+[plan-restore-spa-frontend.md](plan-restore-spa-frontend.md) (tracking:
+[state-restore-spa-frontend.md](state-restore-spa-frontend.md)) — giữ toàn bộ data-layer của
+plan này, thay lớp render bằng SPA `src/` cũ + `/api/*` JSON đọc từ D1. Nguyên tắc "runtime
+không gọi API ngoài" giữ nguyên; nguyên tắc "No SPA" của handoff bị đảo (amendment ADR-0002
+ở phase F7 của plan mới).
 
 ⚠️ **Sự cố đã xảy ra và đã khôi phục 2026-08-07**, xem nhật ký bên dưới: user tự xoá D1 + R2
 trực tiếp trên dashboard giữa lúc tôi đang dọn KV/D1 theo yêu cầu → production 500 vài phút →
