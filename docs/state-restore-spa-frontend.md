@@ -5,9 +5,11 @@ File tracking cho [plan-restore-spa-frontend.md](plan-restore-spa-frontend.md).
 không phải git log.
 
 **Bắt đầu:** 2026-08-07
-**Trạng thái tổng:** 🟡 **F1 + F2 xong.** `/api/*` (6 endpoint + alias) đã sống trên production,
-đọc D1 thật, verify từng field khớp `contract-legacy-api.md`. SSR page cũ (giao diện hỏng) vẫn
-đang phục vụ song song — F2 không đụng gì tới giao diện. F5 là điểm cutover thật.
+**Trạng thái tổng:** 🟡 **F1 + F2 xong; plan F3–F8 vừa sửa lớn, chưa thi công.** `/api/*` (6
+endpoint + alias) đã sống trên production, đọc D1 thật, verify khớp `contract-legacy-api.md`.
+SSR page cũ (**giao diện đang hỏng**) vẫn phục vụ song song. User đã chốt 4 quyết định
+(plan §0.4) và yêu cầu **không thi công tiếp cho tới khi plan đảm bảo giống được giao diện cũ** —
+plan đã cập nhật xong, sẵn sàng chạy F3. **F6 là điểm không quay lại.**
 
 ---
 
@@ -17,11 +19,12 @@ không phải git log.
 |---|---|---|---|---|
 | **F1** | Chốt contract legacy API (`docs/contract-legacy-api.md`) | 🟢 **Xong** | 2026-08-07 | Đọc hết `Grid.js`/`SearchOverlay.js`/`Player.js`/`HeroSlider.js`/`PosterCard.js`/`Carousel.js`. **Sửa 1 chỗ so với plan gốc:** `director` không được FE render ở đâu — bỏ khỏi scope F4 |
 | **F2** | `/api/*` JSON trên D1 (6 endpoint + alias) | 🟢 **Xong, verify thật trên production** | 2026-08-07 | Deploy qua `wrangler deploy` tay (Git integration vẫn đứt) |
-| **F3** | `/api/home-data` từ D1 | ⚪ Chưa bắt đầu | — | Chặn bởi F2 |
-| **F4** | Cột `actor_json`/`director_json` + sync capture | ⚪ Chưa bắt đầu | — | Hash đổi → toàn catalog tự resync một vòng (chủ ý) |
-| **F5** | Cutover: `dist/` + SPA fallback, CSP mới, xoá SSR render | ⚪ Chưa bắt đầu | — | **Điểm không quay lại.** 2 ngoại lệ sửa `src/` được phép: preconnect `index.html`, inline onclick `main.js` |
-| **F6** | E2E browser thật + hardening | ⚪ Chưa bắt đầu | — | Cần user xác nhận bằng mắt — bài học "curl pass ≠ giao diện đúng" |
-| **F7** | Đồng bộ tài liệu (ADR-0002 amendment, README, CLAUDE.md, MODULES.md) | ⚪ Chưa bắt đầu | — | |
+| **F3** | Migration 0009: `actor_json` + `popularity` + sync capture | ⚪ Chưa bắt đầu | — | Gộp 2 cột 1 migration. `actor` vào hash (ép resync toàn catalog), `popularity` **không** vào hash (vào là thổi bay quota ghi D1) |
+| **F4** | `/api/home-data` (dùng `popularity`) | ⚪ Chưa bắt đầu | — | Chặn bởi F3 — hero/trending xếp theo `popularity` |
+| **F5** | Self-host Inter, bỏ Google Fonts | ⚪ Chưa bắt đầu | — | Quyết định #2 của user. Không đụng dòng CSS design nào |
+| **F6** | **Cutover**: `[assets]`→`dist` + `run_worker_first`, CSP mới, xoá SSR render | ⚪ Chưa bắt đầu | — | **Điểm không quay lại.** Bẫy lớn nhất: thiếu `run_worker_first` → SPA fallback **nuốt sạch `/api/*`** |
+| **F7** | **Verify bằng mắt** — ảnh chụp thật, user duyệt | ⚪ Chưa bắt đầu | — | Ràng buộc cứng của user: chưa đảm bảo giống giao diện cũ thì chưa coi là xong |
+| **F8** | Đồng bộ tài liệu (ADR-0002 amendment, README, CLAUDE.md, MODULES.md) | ⚪ Chưa bắt đầu | — | |
 
 Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặn/sự cố · ⚫ bỏ
 
@@ -29,7 +32,10 @@ Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặ
 
 ## Ràng buộc thi công (nhắc lại từ plan §0.3, vi phạm là làm lại)
 
-1. **Không sửa `src/`** ngoài 2 ngoại lệ F5.
+0. **Không sửa `src/styles/*.css`** — kể cả trong ngoại lệ. 2.485 dòng CSS đó *chính là* giao
+   diện cũ (quyết định #1 của user: giống hệt 100%).
+1. **Không sửa `src/`** ngoài 4 ngoại lệ tường minh ở F5/F6 (import font ×2, preconnect, inline
+   onclick) — không cái nào đụng CSS.
 2. Contract-first — mâu thuẫn thì code FE thắng, sửa contract doc.
 3. Deploy = **`npx wrangler deploy` tay** (Git integration đứt).
 4. Verify bằng dữ liệu thật + curl, claim nào cũng kèm bằng chứng.
@@ -37,6 +43,42 @@ Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặ
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Sửa lớn plan sau khi user chốt 4 quyết định (dừng F3 giữa chừng)
+
+User dừng việc thi công, yêu cầu lập plan riêng cho phần migrate giao diện và **không làm gì cho
+tới khi đảm bảo giống giao diện cũ**. Khảo sát lại `/public` + `/src` thật, rồi hỏi 4 câu.
+
+**Bốn quyết định (đều chọn phương án tôi khuyến nghị):**
+
+| # | Quyết định | Hệ quả lên plan |
+|---|---|---|
+| 1 | Giống hệt 100%, **không động vào CSS** | Thêm ràng buộc 0.3.2 cứng: cấm sửa `src/styles/*`. Bỏ mọi ý định "tinh chỉnh theo DESIGN.md" |
+| 2 | **Self-host Inter** vào `/public` | Thêm phase F5 riêng. Xoá luôn 2 trong 7 chỗ CSP sẽ vỡ |
+| 3 | Lưu **`popularity`** từ TMDB lúc sync | Gộp vào migration 0009 cùng `actor_json`; F4 (home-data) chuyển xuống sau F3 vì phụ thuộc cột này |
+| 4 | **Cutover ngay** với 132 phim | Không chờ backfill. Không bật burst |
+
+**Khảo sát mới — 7 chỗ CSP hiện tại sẽ phá giao diện cũ** (đo thật từ `index.html`, `Player.js`,
+`node_modules/artplayer/dist`): khối `<style>` chống FOUC, CSS Google Fonts, file font gstatic,
+ArtPlayer `createElement('style')`, hls.js blob worker, fetch m3u8/ts từ domain kkphimplayer động,
+iframe `player.phimapi.com`. Plan gốc chỉ lường được 4/7. Quyết định #2 xoá 2 chỗ; 5 chỗ còn lại
+xử ở F6.
+
+**Phát hiện nguy hiểm nhất — tra docs Cloudflare, không suy đoán:**
+`not_found_handling = "single-page-application"` khiến assets layer trả `index.html` cho **mọi**
+path không khớp file — kể cả `/api/*`. Docs khuyến nghị **bắt buộc** đi kèm `run_worker_first`.
+`wrangler.toml` trước cutover SSR có đúng setting này mà **không** có `run_worker_first` → nếu bê
+nguyên lại, **toàn bộ `/api/*` vừa xây ở F2 sẽ bị nuốt sạch**, cùng với sitemap và `/__sync/*`.
+Đã ghi thành §3 riêng trong plan với cấu hình đúng. `run_worker_first` cần wrangler ≥4.20 — đang
+dùng 4.116 ✅.
+
+**Cũng ghi vào plan:** cách verify "giống giao diện cũ" khi site cũ không còn chạy ở đâu để so —
+build local, chụp 5 màn (desktop + mobile), gửi user duyệt **trước** khi coi F7 là xong.
+
+**Phase F3 (cũ) chưa bắt đầu** — không có code nào bị bỏ dở. Đánh số lại: F3 migration →
+F4 home-data → F5 font → F6 cutover → F7 verify mắt → F8 docs.
+
+---
 
 ### 2026-08-07 — Phase F2: `/api/*` JSON trên D1, verify thật với dữ liệu thật
 
