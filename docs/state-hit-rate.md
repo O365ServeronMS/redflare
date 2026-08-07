@@ -4,9 +4,9 @@ File tracking cho [plan-hit-rate.md](plan-hit-rate.md). **Cập nhật file này
 khi một phase đổi trạng thái** — nó là nguồn sự thật về tiến độ, không phải git log.
 
 **Bắt đầu:** 2026-08-06
-**Trạng thái tổng:** 🟢 Phase 0–5 và Phase 8 xong, đã deploy. Còn lại: Phase 6
-(đo lường, cần quyền Analytics), Phase 7 (Cache Reserve — quyết định thương
-mại).
+**Trạng thái tổng:** 🟢 Phase 0–6 và Phase 8 xong, đã deploy (Phase 6 còn nửa
+GraphQL Analytics chặn quyền, xem O6). **Phase 7 — user quyết định bỏ qua**
+(tốn tiền, không triển khai).
 
 ---
 
@@ -15,13 +15,13 @@ mại).
 | Phase | Nội dung | Trạng thái | Ngày | Ghi chú |
 |---|---|---|---|---|
 | **0** | Khôi phục background refresh (cron chết) | 🟢 **Đóng — không phải sự cố** | 2026-08-06 | Chẩn đoán ban đầu sai, xem nhật ký bên dưới |
-| **1** | Bỏ `s-maxage`, bật `stale-while-revalidate` | 🟢 **Deploy xong, verify production OK** | 2026-08-06 | Còn 1 phần chặn O1 (Browser TTL override) |
+| **1** | Bỏ `s-maxage`, bật `stale-while-revalidate` | 🟢 **Deploy xong, verify production OK** | 2026-08-06 | Browser TTL override (O1) đã đóng — user tự xử lý |
 | **2** | Bật Tiered Cache (Smart Topology) | 🟢 **Xong** | 2026-08-06 | User đã bật trên dashboard |
 | **3** | Shard mirror drain + dọn ~1.200 ảnh tồn | 🟢 **Deploy xong** | 2026-08-06 | 5x throughput (100/tick thay vì 20/tick); backlog tự dọn dần |
 | **4** | Warm set theo popularity (LRU) | 🟢 **Deploy xong** | 2026-08-06 | Bootstrap qua seed list cũ, chưa có dữ liệu popularity thật |
 | **5** | Edge warming | 🟢 **Xong, chạy 100% trên CF** (giá trị `/api/*` thấp hơn dự kiến — chỉ nóng 1 colo, xem §6.5.2) | 2026-08-06 | Đã bỏ GitHub Actions + secret + O5 nhờ `global_fetch_strictly_public` |
-| **6** | Đo lường tách theo class | ⚪ Chưa bắt đầu | — | Cần quyền Analytics |
-| **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚪ Chưa quyết | — | Quyết sau Phase 6 |
+| **6** | Đo lường tách theo class | 🟢 **Chỉ số B xong (code)**; A/C vẫn chặn O6 | 2026-08-06 | `/api/health` có `cache_stats` (origin-build rate); GraphQL Analytics cần quyền |
+| **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚫ **Bỏ qua** — user quyết định | 2026-08-06 | Không triển khai |
 | **8** | Dọn nợ khảo sát lộ ra | 🟢 **Xong** | 2026-08-06 | 90 KV key rác đã xoá, `stale` D1 có eviction, ADR-0001 đã đính chính |
 
 Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặn/sự cố · ⚫ bỏ
@@ -62,6 +62,47 @@ npx wrangler d1 execute redflare-db --remote --command "SELECT (SELECT COUNT(*) 
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-06 — Phase 6: origin-build rate đo được bằng code; Phase 7 bỏ qua
+
+**User quyết định bỏ qua Phase 7 (Cache Reserve)** — tốn tiền, không cần bàn
+thêm. Đóng O4.
+
+**Phase 6 tách làm hai nửa rõ ràng, chỉ một nửa làm được:**
+
+- ❌ **Chỉ số A/C (zone-wide HIT%, tách theo hostname `img.`/`phim.`)** —
+  vẫn cần GraphQL Analytics API, vẫn không có quyền Zone Analytics trong
+  suốt phiên này (đặt tên **O6**, khác O1 gốc — O1 là Zone Settings, đã
+  đóng). Không giả được bằng cách nào khác vì đây là số liệu **CDN edge**
+  giữ, Worker không nhìn thấy được (đúng như phát hiện ở Phase 5 §6.5.2:
+  Worker không phải nơi đứng để đo cache HIT của chính zone).
+- ✅ **Chỉ số B (origin-build rate)** — đo được **hoàn toàn bằng code**,
+  không cần quyền gì thêm. Đây mới là chỉ số plan thật sự cam kết (§4:
+  "≤0,1%"), khác A ở chỗ B là *Worker tự biết* — mỗi response đã tự gắn
+  `x-catalog-cache`, chỉ cần đếm lại chính giá trị đó.
+
+**Thiết kế bộ đếm — 1 điểm gọi, không đụng logic có sẵn:** thay vì chèn
+tracking vào từng nhánh return của `handleApi`/`handleHomeData`/
+`handleRecommendation` (nhiều điểm, dễ sót), đọc `x-catalog-cache` từ chính
+`Response` đã trả về, tại **một chỗ duy nhất** trong `fetch()` — bọc quanh
+lệnh gọi `handleApi`. Bảng D1 mới `cache_stats(bucket_hour, status, count)`
+— **1 dòng mỗi (giờ, status)**, không phải 1 dòng/request, nên số dòng gần
+như hằng số bất kể traffic (~7 status khả dĩ × 24h ≈ 168 dòng/ngày). Lấy
+mẫu 1-trong-10 giống `trackPopularity` (Phase 4) — cùng logic: tỉ lệ vẫn
+đúng dù ghi ít hơn.
+
+`/api/health` giờ trả thêm `cache_stats`: `{window_hours: 24, sampled_total,
+by_status: {...}, origin_build_rate}`. `origin_build_rate` tính từ tập
+status KHÔNG cần build (`hit`, `warm`, `d1-recs`) so với tổng — mọi status
+còn lại (`miss`, `miss-fallback`, `stale-vps-down`, response lỗi không có
+header) đều thật sự chạm KKPhim/TMDB nên tính là "build".
+
+**Trạng thái: migration `0004_cache_stats.sql` đã apply, code đã deploy,
+`node --check` pass.** Bảng mới tạo — cần vài giờ tích luỹ mẫu (lấy mẫu
+1-trong-10) mới đọc được `origin_build_rate` có ý nghĩa thống kê; đọc ngay
+sau deploy sẽ cho `sampled_total` thấp/`null`.
+
+---
 
 ### 2026-08-06 — Phase 8: dọn nợ
 
@@ -617,4 +658,5 @@ mặt thiết kế nhưng biến traffic ảnh đang free thành Worker request 
 | ~~O5~~ | ~~WAF Custom Rule cho IP GitHub Actions~~ | — | **Không còn cần** — đã bỏ caller ngoài bằng `global_fetch_strictly_public` |
 | ~~O2~~ | ~~Cron có fire không~~ | — | **Đã đóng** — cron chạy đúng |
 | ~~O3~~ | ~~Giữ tầng `caches.default` không~~ | — | **Đã trả lời** — giữ nguyên |
-| O4 | Quyết: có trả phí Cache Reserve không, nếu Phase 6 xác nhận trần Free ~95% | chủ repo | Phase 7 |
+| ~~O4~~ | ~~Trả phí Cache Reserve?~~ | — | **User quyết định bỏ qua** (2026-08-06) |
+| **O6** | Cấp token Cloudflare scope Zone Analytics (hoặc xác thực MCP `cloudflare-api`/`cloudflare-observability`) để đo GraphQL Analytics — tách HIT% theo hostname/path (chỉ số A/C của plan). Chỉ số B (origin-build rate) đã đo được không cần quyền này (Phase 6, `/api/health` `cache_stats`) | chủ repo | Phase 6 (nửa A/C) |

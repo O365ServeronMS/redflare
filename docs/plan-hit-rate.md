@@ -306,7 +306,8 @@ không phải một round-trip KKPhim/TMDB.
 
 Việc còn lại thật sự cần Cache Rule (không tránh được bằng code): **Browser
 Cache TTL override** quan sát được ở ADR-0001 — production hiện trả
-`max-age=1800` trên response `HIT` dù Worker gửi `max-age=60`. Vẫn chặn bởi O1.
+`max-age=1800` trên response `HIT` dù Worker gửi `max-age=60`. Vẫn chặn bởi O1
+lúc viết đoạn này — **đã đóng**, xem cập nhật cuối phần Phase 1 bên dưới.
 
 ---
 
@@ -365,7 +366,9 @@ Việc còn lại **thật sự cần Cache Rule** (không tránh được bằn
 Browser Cache TTL override quan sát được ở ADR-0001 — production hiện trả
 `cache-control: public, max-age=1800, s-maxage=1800` trên các response `HIT`
 dù Worker gửi `max-age=60`, nghĩa là zone có một override buộc browser giữ
-1800s. Việc này **vẫn chặn bởi O1** (cần quyền Zone Settings).
+1800s. Việc này **vẫn chặn bởi O1** (cần quyền Zone Settings) lúc viết đoạn
+này — **đã đóng cùng ngày**, user tự chuyển dashboard sang "respect existing
+headers".
 
 **Verify (đã chạy `node --check`, cần deploy để verify hết):**
 - `worker/index.js` cú pháp hợp lệ.
@@ -374,8 +377,8 @@ dù Worker gửi `max-age=60`, nghĩa là zone có một override buộc browser
   (trừ nhánh lỗi tổng/4xx).
 - Sau khi entry hết TTL (`max-age=60`), request kế tiếp trả `cf-cache-status:
   UPDATING` (không phải `EXPIRED`) — cần đợi >60s để test được.
-- **Chưa verify được:** liệu Browser Cache TTL override 1800s ở zone có còn
-  ghi đè `max-age=60` hay không (cần O1).
+- **Đã verify:** Browser Cache TTL override 1800s — user xác nhận đã tắt
+  trên dashboard (chuyển "respect existing headers") cùng ngày.
 
 **Rollback:** revert `worker/index.js` về commit trước, redeploy.
 
@@ -571,14 +574,38 @@ Không cần đụng gì tới dữ liệu — `runEdgeWarm` không ghi ở đâ
 Lưu ý gỡ flag sẽ làm `warmHeroImages` (phần ảnh) quay lại hành vi same-zone
 mặc định.
 
-### Phase 6 — Đo lường tách theo class
+### Phase 6 — Đo lường tách theo class *(nửa code xong; nửa GraphQL vẫn chặn O6)*
 
 Không thể lái một con số gộp. Cần tách A/B/C của §0.
 
-- Dùng Cloudflare GraphQL Analytics API, tách theo hostname
-  (`img.` vs `phim.`) và theo path prefix.
-- Dựng baseline trước Phase 1 để mọi phase sau đo được delta.
-- Bổ sung `/api/health`: đếm `miss` vs `hit` vs `warm` theo cửa sổ trượt.
+- ❌ **GraphQL Analytics API, tách theo hostname (`img.` vs `phim.`) và path
+  prefix — vẫn chặn (O6).** Cần token Cloudflare scope Zone Analytics, tôi
+  không có — khác quyền với O1 gốc (Zone Settings, đã đóng) và O5 (WAF,
+  không còn cần); Analytics chưa từng được cấp trong toàn bộ phiên này. Đo A
+  (zone-wide HIT%) và tách theo host vẫn phải làm thủ công qua dashboard
+  hoặc chờ cấp quyền.
+- ✅ **`/api/health`: đếm `hit`/`miss`/`warm`/`d1-recs`/`stale-vps-down`/
+  `miss-fallback` theo cửa sổ trượt 24h** — thứ **CÓ** làm được thuần bằng
+  code, và đúng chỉ số B (`origin-build rate`) mà §4 thật sự cam kết, không
+  phải A. Bảng D1 mới `cache_stats` (migration `0004_cache_stats.sql`), 1
+  dòng mỗi (giờ, status) — không phải 1 dòng/request, nên số dòng gần như
+  hằng số bất kể traffic (~7 status × 24h ≈ 168 dòng/ngày, tự dọn >7 ngày).
+  Lấy mẫu 1-trong-10 giống `trackPopularity` (Phase 4) — giữ đúng tỉ lệ mà
+  giảm khối lượng ghi. Đọc từ header `x-catalog-cache` của chính response
+  trả về, tại **một điểm gọi duy nhất** trong `fetch()` — không cần chèn
+  tracking vào từng nhánh của `handleApi`/`handleHomeData`/
+  `handleRecommendation`.
+- **Chưa làm** (không cần thiết cho mục tiêu B, chỉ cần cho A/C): "dựng
+  baseline trước Phase 1" — đã lỡ, các phase đã deploy xong rồi mới có Phase
+  6. Baseline thật vẫn là con số §1 đo bằng curl thủ công, không phải một
+  hệ thống tracking dựng sẵn.
+
+**Verify:** `node --check` pass; migration `0004_cache_stats.sql` đã apply
+lên D1 production. Kết quả đo thật ghi ở [state-hit-rate.md](state-hit-rate.md)
+— `cache_stats` mới tạo, cần vài giờ tích luỹ mẫu mới đọc được số có ý nghĩa.
+**Rollback:** revert `worker/index.js` (bỏ `trackCacheStat`/
+`getCacheStatsWindow`/`cleanupCacheStats` + điểm gọi trong `fetch()` và
+`handleHealth`). Bảng D1 `cache_stats` có thể để nguyên không dùng.
 
 ### Phase 7 — *(tuỳ chọn, tốn tiền)* Cache Reserve
 
@@ -658,14 +685,14 @@ là ảo tưởng. Nên chốt mục tiêu Free ở 93–95% và đưa 99% vào 
 
 | # | Câu hỏi | Chặn phase |
 |---|---|---|
-| ~~O1~~ | ~~Browser Cache TTL override~~ | — | **User đã tự xử lý** trên dashboard (chuyển "respect existing headers") |
+| ~~O1~~ | ~~Browser Cache TTL override~~ — **User đã tự xử lý** trên dashboard (chuyển "respect existing headers"). | — |
 | ~~O2~~ | ~~Cron có thật sự fire không?~~ **Đã đóng ở Phase 0** — cron chạy đúng, xem [state-hit-rate.md](state-hit-rate.md). | — |
 | ~~O3~~ | ~~Tầng `caches.default` có còn đáng giữ không?~~ **Đã trả lời** — giữ nguyên, không đổi gì; chỉ đổi header trả về client. Xem §6 Phase 1. | — |
-| **O4** | Có sẵn sàng trả phí cho Cache Reserve nếu Phase 6 chứng minh trần Free là ~95%? | 7 |
+| ~~O4~~ | ~~Có trả phí Cache Reserve không?~~ **User quyết định bỏ qua** (2026-08-06) — Phase 7 không triển khai. | — |
 | ~~O5~~ | ~~WAF Custom Rule cho IP GitHub Actions~~ — **không còn cần**. Đã bỏ hẳn caller ngoài bằng `global_fetch_strictly_public` (§6.5.1), không còn request nào từ IP GitHub để bị bot-challenge. | — |
+| **O6** | Quyền Cloudflare GraphQL Analytics API (tách HIT% theo hostname/path — chỉ số A/C của §0) vẫn chưa có. Chỉ số B (origin-build rate) đã đo được thuần bằng code (Phase 6, `/api/health` `cache_stats`), không cần quyền này. | 6 (nửa A/C) |
 
-> Về O4/O5: cần quyền Zone dashboard (Security → WAF cho O5, quyết định
-> thương mại cho O4) — cần cấp thêm token Cloudflare scope Zone, hoặc xác
+> Về O6: cần cấp thêm token Cloudflare scope Zone Analytics, hoặc xác
 > thực MCP `cloudflare-api`/`cloudflare-observability` trong một phiên
 > interactive (`claude mcp` / `/mcp`). Phiên hiện tại không chạy được OAuth
 > flow.

@@ -629,6 +629,18 @@ async function handleHealth(env) {
     problems.push(`warm check failed: ${e.message}`);
   }
 
+  // plan-hit-rate.md Phase 6: the plan's committed metric (origin-build
+  // rate ≤0,1%) rather than zone-wide HIT% (blocked on Analytics API
+  // credentials this session doesn't have — see plan-hit-rate.md §9 O1).
+  // Not a `problems` source on its own — a high build rate means the
+  // caching pipeline needs attention, but it's a trend to watch, not an
+  // uptime signal the way a stalled cron is.
+  try {
+    out.cache_stats = await getCacheStatsWindow(env);
+  } catch (e) {
+    out.cache_stats = { error: e.message };
+  }
+
   out.ok = problems.length === 0;
   out.problems = problems;
   return new Response(JSON.stringify(out), {
@@ -637,18 +649,15 @@ async function handleHealth(env) {
   });
 }
 
-// Read side of Phase 5 edge-warming (plan-hit-rate.md). A Worker can warm
-// img.bluesia.net's edge cache itself (home.js's runHomeRefresh does — see
-// its module comment), but NOT this Worker's own /api/* edge cache: a
-// fetch() to phim.bluesia.net from inside this Worker 522s (documented
-// Cloudflare behavior, see wrangler.toml's [[services]] comment), and the
-// SELF service binding routes directly to the Worker's own handler,
-// bypassing the zone CDN entirely — neither can populate the CDN's edge
-// cache. So an EXTERNAL caller (.github/workflows/edge-warm.yml) has to make
-// the real HTTP requests instead; this endpoint tells it what to request.
-// Deliberately ungated (like /api/health) — it exposes only which pages are
-// currently warm, no secrets, and ungating means the GitHub Actions workflow
-// doesn't need a CRON_KEY secret at all.
+// Originally the read side an external GitHub Actions workflow polled to
+// know which /api/* URLs to re-request, back when edge-warming needed a
+// caller outside Cloudflare (a same-zone fetch() 522s by default). Retired
+// once the global_fetch_strictly_public compatibility flag let runEdgeWarm
+// (worker/lib/warm.js) do this from inside the Worker itself — see
+// wrangler.toml's comment on that flag. Kept as a small standalone
+// diagnostic: still ungated (like /api/health, exposes only which pages are
+// currently warm, no secrets), useful for confirming what the next edge-warm
+// cycle will target without waiting for it to run.
 async function handleWarmTargets(env, url) {
   let targets = [];
   try {
@@ -801,6 +810,78 @@ async function trackPopularity(env, pathname, cacheKey) {
   } catch (err) {
     console.error('[popularity]', cacheKey, err.message);
   }
+}
+
+// --- Origin-build-rate counter (plan-hit-rate.md Phase 6) -------------------
+// The plan's committed metric is B, "/api/* origin-build rate ≤0,1%" — not
+// zone-wide HIT% (that needs the GraphQL Analytics API, which this session
+// has no Zone-scoped credentials for; see plan-hit-rate.md §9 O1). This is
+// the code-only substitute: a hit/miss/warm/etc counter the Worker keeps on
+// itself, queried by /api/health. Sampled at the same rate as
+// trackPopularity for the same reason (proportions stay accurate at lower
+// write volume; D1's 100k-writes/day budget is generous but sampling is the
+// established habit in this file, not a hard requirement here).
+//
+// One row per (hour, status), not per request — UPSERT-ing a fixed small key
+// set keeps row count near-constant regardless of traffic (~7 statuses ×
+// 24h = ~168 rows/day before cleanupCacheStats trims it, see the hourly
+// cron). Read from the RETURNED Response's x-catalog-cache header at the
+// single call site in fetch() below, rather than threading a tracking call
+// through every branch of handleApi/handleHomeData/handleRecommendation —
+// far less invasive for the same coverage.
+const CACHE_STAT_SAMPLE_RATE = 10;
+const CACHE_STAT_WINDOW_HOURS = 24;
+const CACHE_STAT_RETENTION_HOURS = 7 * 24;
+
+function cacheStatHourBucket(ts) {
+  return Math.floor(ts / 3600000);
+}
+
+async function trackCacheStat(env, status) {
+  if (Math.floor(Math.random() * CACHE_STAT_SAMPLE_RATE) !== 0) return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO cache_stats (bucket_hour, status, count) VALUES (?1, ?2, 1)
+       ON CONFLICT(bucket_hour, status) DO UPDATE SET count = count + 1`
+    )
+      .bind(cacheStatHourBucket(Date.now()), status || 'error')
+      .run();
+  } catch (err) {
+    console.error('[cache stat]', status, err.message);
+  }
+}
+
+// hit/warm never rebuild from KKPhim/TMDB; d1-recs reads D1 instead of TMDB.
+// Everything else (miss, miss-fallback, stale-vps-down, error) hit the
+// origin path this metric exists to track.
+const CACHE_STAT_NO_BUILD = new Set(['hit', 'warm', 'd1-recs']);
+
+async function getCacheStatsWindow(env) {
+  const since = cacheStatHourBucket(Date.now()) - CACHE_STAT_WINDOW_HOURS;
+  const { results } = await env.DB.prepare(
+    'SELECT status, SUM(count) AS n FROM cache_stats WHERE bucket_hour >= ?1 GROUP BY status'
+  )
+    .bind(since)
+    .all();
+  const byStatus = {};
+  let total = 0;
+  let builds = 0;
+  for (const r of results || []) {
+    byStatus[r.status] = r.n;
+    total += r.n;
+    if (!CACHE_STAT_NO_BUILD.has(r.status)) builds += r.n;
+  }
+  return {
+    window_hours: CACHE_STAT_WINDOW_HOURS,
+    sampled_total: total,
+    by_status: byStatus,
+    origin_build_rate: total > 0 ? Math.round((builds / total) * 10000) / 100 : null,
+  };
+}
+
+async function cleanupCacheStats(env) {
+  const cutoff = cacheStatHourBucket(Date.now()) - CACHE_STAT_RETENTION_HOURS;
+  await env.DB.prepare('DELETE FROM cache_stats WHERE bucket_hour < ?1').bind(cutoff).run();
 }
 
 async function warmKvLookup(env, ctx, cache, cacheReq, cacheKey, pathname, ttl, method) {
@@ -1036,7 +1117,9 @@ export default {
       return handleWarmTargets(env, url);
     }
     if (url.pathname.startsWith('/api/')) {
-      return handleApi(request, env, ctx, url);
+      const res = await handleApi(request, env, ctx, url);
+      ctx.waitUntil(trackCacheStat(env, res.headers.get('x-catalog-cache')));
+      return res;
     }
     return env.ASSETS.fetch(request);
   },
@@ -1051,6 +1134,9 @@ export default {
       ctx.waitUntil(cleanupRecTables(env).catch((e) => console.error('[rec cleanup]', e.message)));
       // Sweep stale rows (>90d) — plan-hit-rate.md Phase 8 / ADR-0001 Action Item 8.
       ctx.waitUntil(cleanupStaleTable(env).catch((e) => console.error('[stale cleanup]', e.message)));
+      // Trim cache_stats buckets (>7d) — plan-hit-rate.md Phase 6, only the
+      // trailing 24h is ever read.
+      ctx.waitUntil(cleanupCacheStats(env).catch((e) => console.error('[cache stats cleanup]', e.message)));
     }
     if (event.cron === '*/10 * * * *') {
       // Drain the R2 image-mirror queue, sharded (Phase 6, sharded further in
