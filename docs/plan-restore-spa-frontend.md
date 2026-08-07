@@ -167,7 +167,7 @@ Theo `normalizeListItem` FE:
 | **F1** | Chốt contract: verify §1 + đọc `Grid.js`/`SearchOverlay.js`/`Player.js`, viết `docs/contract-legacy-api.md` | File contract tồn tại, mọi shape có trích dẫn `file:line` từ FE | — |
 | **F2** | `/api/*` JSON trên D1: movie, list, genre, country, search, recommendation (+`/api/related` alias) | curl từng route qua `wrangler dev --remote` khớp contract từng field; search có kết quả thật từ FTS5 | F1 |
 | **F3** | `/api/home-data` từ D1 | curl trả đủ 5 key đúng shape; hero ≥1 item có `poster_url` TMDB backdrop, không có `hoathinh` | F2 |
-| **F4** | Migration 0009: `actor_json`, `director_json` + sync capture | Cột tồn tại; sync 1 phim thật → actor có dữ liệu; `/api/movie/:slug` trả `actor[]` thật | F2 |
+| **F4** | Migration 0009: `actor_json` + sync capture (F1 xác nhận `director` không được FE render ở đâu — bỏ khỏi scope) | Cột tồn tại; sync 1 phim thật → actor có dữ liệu; `/api/movie/:slug` trả `actor[]` thật | F2 |
 | **F5** | Cutover giao diện: build `dist/`, `[assets]`→dist + SPA fallback, nới CSP cho player, xoá SSR render/routes + `public-ssr/` | Production: `/` trả SPA shell, deep-link `/phim/:slug` reload được, `/api/*` + `/sitemap.xml` + `/__sync/*` không bị assets nuốt | F2, F3 |
 | **F6** | E2E verify + hardening | Checklist §5 pass hết trên production; user xác nhận bằng mắt trên browser thật | F5 |
 | **F7** | Đồng bộ tài liệu: amendment ADR-0002, viết lại phần backend README/CLAUDE.md, cập nhật MODULES.md Axis C, đóng state docs | Không tài liệu nào còn mô tả SSR-page hay Cache-API/KV/R2 như hiện trạng | F6 |
@@ -250,14 +250,15 @@ không item nào `type==='hoathinh'` trong hero; `python3 -m json.tool` pass.
 
 ### Phase F4 — actor/director
 
-- `migrations/0009_actor_director.sql`: `ALTER TABLE movie ADD COLUMN actor_json TEXT
-  NOT NULL DEFAULT '[]'; ADD COLUMN director_json ...`.
-- `normalize.ts`: KKPhim detail có sẵn `actor[]`/`director[]` — capture vào
-  `NormalizedMovie`; **thêm vào `hashMovie`** (chấp nhận: toàn bộ catalog sẽ resync một
-  vòng vì hash đổi — chính là cách backfill dữ liệu cột mới, không cần script riêng;
-  với governor free 85k rows/ngày vẫn an toàn, ghi rõ vào state doc).
-- `movieRepository` upsert thêm 2 cột (**chú ý `MOVIE_COLUMNS` 27→29 → chunk 3 rows
-  vẫn ≤100 params? 29×3=87 ✅**); `toLegacyItem` map `actor`/`director`.
+- `migrations/0009_actor.sql`: `ALTER TABLE movie ADD COLUMN actor_json TEXT NOT NULL
+  DEFAULT '[]'`. (F1 xác nhận `director` không được `MovieDetail.js` render ở đâu — grep
+  0 kết quả — nên **không thêm `director_json`**, tránh tốn ghi D1 cho field không ai đọc.)
+- `normalize.ts`: KKPhim detail có sẵn `actor[]` — capture vào `NormalizedMovie`;
+  **thêm vào `hashMovie`** (chấp nhận: toàn bộ catalog sẽ resync một vòng vì hash đổi —
+  chính là cách backfill dữ liệu cột mới, không cần script riêng; với governor free
+  85k rows/ngày vẫn an toàn, ghi rõ vào state doc).
+- `movieRepository` upsert thêm 1 cột (**`MOVIE_COLUMNS` 27→28 → chunk 3 rows vẫn
+  ≤100 params? 28×3=84 ✅**); `toLegacyItem` map `actor`.
 
 **Verify:** sau 1 tick sync, `SELECT actor_json FROM movie WHERE actor_json != '[]'
 LIMIT 1` có dữ liệu; `/api/movie/:slug` của phim đó trả `actor` không rỗng.

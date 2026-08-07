@@ -5,9 +5,9 @@ File tracking cho [plan-restore-spa-frontend.md](plan-restore-spa-frontend.md).
 không phải git log.
 
 **Bắt đầu:** 2026-08-07
-**Trạng thái tổng:** ⚪ **Plan đã lập (Fable 5), chưa thi công.** Người thực hiện dự
-kiến: Sonnet 5. Production hiện vẫn đang chạy SSR tự chế (giao diện hỏng) — mỗi phase
-F2–F4 deploy được mà không đụng giao diện; F5 là điểm cutover thật.
+**Trạng thái tổng:** 🟡 **F1 xong.** [`contract-legacy-api.md`](contract-legacy-api.md) đã
+chốt, trích thẳng `file:line` từ `src/`. Production hiện vẫn đang chạy SSR tự chế (giao diện
+hỏng) — F2–F4 deploy được mà không đụng giao diện; F5 là điểm cutover thật.
 
 ---
 
@@ -15,8 +15,8 @@ F2–F4 deploy được mà không đụng giao diện; F5 là điểm cutover t
 
 | Phase | Nội dung | Trạng thái | Ngày | Ghi chú |
 |---|---|---|---|---|
-| **F1** | Chốt contract legacy API (`docs/contract-legacy-api.md`) | ⚪ Chưa bắt đầu | — | §1 của plan đã trích sẵn ~90%; còn thiếu phần Grid/pagination |
-| **F2** | `/api/*` JSON trên D1 (6 endpoint + alias) | ⚪ Chưa bắt đầu | — | Chặn bởi F1 |
+| **F1** | Chốt contract legacy API (`docs/contract-legacy-api.md`) | 🟢 **Xong** | 2026-08-07 | Đọc hết `Grid.js`/`SearchOverlay.js`/`Player.js`/`HeroSlider.js`/`PosterCard.js`/`Carousel.js`. **Sửa 1 chỗ so với plan gốc:** `director` không được FE render ở đâu — bỏ khỏi scope F4 |
+| **F2** | `/api/*` JSON trên D1 (6 endpoint + alias) | ⚪ Chưa bắt đầu | — | Sẵn sàng bắt đầu — không còn gì chặn |
 | **F3** | `/api/home-data` từ D1 | ⚪ Chưa bắt đầu | — | Chặn bởi F2 |
 | **F4** | Cột `actor_json`/`director_json` + sync capture | ⚪ Chưa bắt đầu | — | Hash đổi → toàn catalog tự resync một vòng (chủ ý) |
 | **F5** | Cutover: `dist/` + SPA fallback, CSP mới, xoá SSR render | ⚪ Chưa bắt đầu | — | **Điểm không quay lại.** 2 ngoại lệ sửa `src/` được phép: preconnect `index.html`, inline onclick `main.js` |
@@ -37,6 +37,30 @@ Ký hiệu: ⚪ chưa bắt đầu · 🟡 đang làm · 🟢 xong · 🔴 chặ
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — Phase F1: chốt contract, sửa 1 sai sót của plan gốc
+
+Đọc hết 6 module còn lại chưa xem lúc lập plan: `Grid.js` (pagination — xác nhận
+`totalItems`/`totalItemsPerPage` được ưu tiên trước `totalPages`, đúng dự đoán ban đầu),
+`SearchOverlay.js` (thuần client — localStorage, debounce 400ms, AbortController; không
+phát sinh field mới), `Player.js` (xác nhận `artplayer` dist thật sự gọi
+`createElement('style')` — CSP `style-src 'unsafe-inline'` ở F5 không phải suy đoán, đã
+verify bằng grep vào `node_modules/artplayer/dist/artplayer.js`), `HeroSlider.js` +
+`PosterCard.js` + `Carousel.js` (không field mới ngoài legacy item chuẩn).
+
+**Phát hiện quan trọng, sửa scope F4:** `grep -n "director" src/components/MovieDetail.js`
+ra **0 kết quả** — `director` được CLAUDE.md liệt là field OPhim sở hữu nhưng **chưa từng
+được FE render**. Bỏ `director_json` khỏi migration 0009 — chỉ còn `actor_json`. Giảm 1
+cột nghĩa là `MOVIE_COLUMNS` chỉ tăng 27→28 (không phải 27→29), vẫn nằm gọn dưới trần
+100 tham số D1 ở batch 3 dòng (28×3=84).
+
+**Cũng xác nhận `_id`** (`grep -rn "\._id" src/`) chưa từng được đọc lại sau khi
+`normalizeListItem` gán nó — giá trị gì cũng được, dùng `slug` cho gọn.
+
+Kết quả: [`docs/contract-legacy-api.md`](contract-legacy-api.md), mọi field đều trích
+`file:line` thật, không đoán.
+
+---
 
 ### 2026-08-07 — Lập plan (Fable 5)
 
