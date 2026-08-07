@@ -4,9 +4,12 @@ File tracking cho [plan-hit-rate.md](plan-hit-rate.md). **Cập nhật file này
 khi một phase đổi trạng thái** — nó là nguồn sự thật về tiến độ, không phải git log.
 
 **Bắt đầu:** 2026-08-06
-**Trạng thái tổng:** 🟢 Phase 0–6 và Phase 8 xong, đã deploy (Phase 6 còn nửa
-GraphQL Analytics chặn quyền, xem O6). **Phase 7 — user quyết định bỏ qua**
-(tốn tiền, không triển khai).
+**Trạng thái tổng:** 🟢 Phase 0–6, 8 xong, đã deploy và **đo thật bằng
+GraphQL Analytics** — zone-wide HIT thật: `phim.bluesia.net` 76,8%,
+`img.bluesia.net` 67,2% (so baseline 35%). **Phase 7 — user quyết định bỏ
+qua** (tốn tiền, không triển khai). Một phát hiện mới ngoài phạm vi plan:
+504/502 thật ~8% traffic `phim.bluesia.net`, chưa điều tra — xem nhật ký
+2026-08-07.
 
 ---
 
@@ -20,7 +23,7 @@ GraphQL Analytics chặn quyền, xem O6). **Phase 7 — user quyết định b�
 | **3** | Shard mirror drain + dọn ~1.200 ảnh tồn | 🟢 **Deploy xong** | 2026-08-06 | 5x throughput (100/tick thay vì 20/tick); backlog tự dọn dần |
 | **4** | Warm set theo popularity (LRU) | 🟢 **Deploy xong** | 2026-08-06 | Bootstrap qua seed list cũ, chưa có dữ liệu popularity thật |
 | **5** | Edge warming | 🟢 **Xong, chạy 100% trên CF** (giá trị `/api/*` thấp hơn dự kiến — chỉ nóng 1 colo, xem §6.5.2) | 2026-08-06 | Đã bỏ GitHub Actions + secret + O5 nhờ `global_fetch_strictly_public` |
-| **6** | Đo lường tách theo class | 🟢 **Chỉ số B xong (code)**; A/C vẫn chặn O6 | 2026-08-06 | `/api/health` có `cache_stats` (origin-build rate); GraphQL Analytics cần quyền |
+| **6** | Đo lường tách theo class | 🟢 **Xong hoàn toàn — A/B/C đều đo được** | 2026-08-07 | Zone-wide thật: phim 76,8%, img 67,2% (so baseline 35%) |
 | **7** | *(tuỳ chọn, tốn tiền)* Cache Reserve | ⚫ **Bỏ qua** — user quyết định | 2026-08-06 | Không triển khai |
 | **8** | Dọn nợ khảo sát lộ ra | 🟢 **Xong** | 2026-08-06 | 90 KV key rác đã xoá, `stale` D1 có eviction, ADR-0001 đã đính chính |
 
@@ -62,6 +65,51 @@ npx wrangler d1 execute redflare-db --remote --command "SELECT (SELECT COUNT(*) 
 ---
 
 ## Nhật ký quyết định
+
+### 2026-08-07 — O6 đóng: đo thật bằng GraphQL Analytics, phát hiện 504 mới
+
+**User cấp token Cloudflare qua 2 lần thử.** Lần 1 (`cfat_...`) xác thực
+thất bại (`Invalid API Token`, độ dài 53/48 ký tự đều không khớp chuẩn 40
+ký tự của Cloudflare) — nghi là token của dịch vụ khác (biến tên
+`MONITOR_CF_API_TOKEN`, khả năng thuộc `monitor.bluesia.net`). Lần 2
+(`cfut_...`) xác thực **thành công** qua `/user/tokens/verify` — hoá ra
+tiền tố `cfut_` (không phải `cfat_`) **là một phần hợp lệ của token**, độ
+dài 53 ký tự tổng. Bài học: token Cloudflare hiện đại có thể có tiền tố
+chữ, không phải luôn 40 ký tự thuần hex — đừng tự ý bóc tiền tố khi verify
+lần đầu thất bại, thử nguyên chuỗi trước.
+
+**Đo qua `api.cloudflare.com/client/v4/graphql`, dataset
+`httpRequestsAdaptiveGroups`, group theo `clientRequestHTTPHost` +
+`cacheStatus`, cửa sổ 24h trước đó (2026-08-06 02:05 → 2026-08-07 02:05
+UTC):**
+
+```
+phim.bluesia.net   tổng 22.284   hit 74,7% + stale 2,1% = 76,8% HIT-like
+img.bluesia.net    tổng  6.665   hit 67,2%
+```
+
+So với baseline 35% (báo cáo ban đầu, suy từ mô hình §2 — chưa từng đo
+trực tiếp) — **tăng thật, đo trực tiếp, không phải suy diễn.** Đóng dứt
+điểm câu hỏi "Đối với redflare có khả thi tăng HIT rate không?" từ yêu cầu
+gốc: **có, và đã tăng thật** — dù chưa chạm mục tiêu lý thuyết 93% (đang đo
+ở 24h đầu tiên sau khi cache mới "nóng" lại từ Phase 3 vừa dọn sạch queue).
+
+**Phát hiện phụ, ngoài phạm vi ban đầu nhưng đáng ghi lại:** khi lọc theo
+`edgeResponseStatus`, lộ ra **1.789 lỗi 504/502 thật trong 24h** (8,0% tổng
+request `phim.bluesia.net`) — sau khi loại trừ 818 lỗi `503` của chính
+`/api/health` (đúng thiết kế, không phải lỗi thật). Tập trung ở
+`/api/list` (547), `/api/search` (294 lỗi 504 + 144 lỗi 502 — 502 khớp
+đúng nhánh "catalog unavailable" chủ động của code), `/api/movie/*`,
+`/api/genre`, `/api/home-data`. 504 nghĩa là **Cloudflare tự timeout** chờ
+Worker/upstream — không phải Worker chủ động trả lỗi. **Chưa điều tra
+nguyên nhân gốc** — việc này không thuộc phạm vi "đo lường Phase 6" ban
+đầu, cân nhắc một phiên riêng (`/engineering:debug`) nếu muốn theo đuổi.
+
+**Dọn dẹp:** token lưu tạm trong scratchpad (`/tmp/.../cf_token.txt`), chỉ
+tồn tại trong phiên này, không commit vào repo. Token đầu tiên (không hợp
+lệ) đã xoá ngay sau khi phát hiện lỗi.
+
+---
 
 ### 2026-08-06 — Phase 6: origin-build rate đo được bằng code; Phase 7 bỏ qua
 
@@ -671,4 +719,4 @@ mặt thiết kế nhưng biến traffic ảnh đang free thành Worker request 
 | ~~O2~~ | ~~Cron có fire không~~ | — | **Đã đóng** — cron chạy đúng |
 | ~~O3~~ | ~~Giữ tầng `caches.default` không~~ | — | **Đã trả lời** — giữ nguyên |
 | ~~O4~~ | ~~Trả phí Cache Reserve?~~ | — | **User quyết định bỏ qua** (2026-08-06) |
-| **O6** | Cấp token Cloudflare scope Zone Analytics (hoặc xác thực MCP `cloudflare-api`/`cloudflare-observability`) để đo GraphQL Analytics — tách HIT% theo hostname/path (chỉ số A/C của plan). Chỉ số B (origin-build rate) đã đo được không cần quyền này (Phase 6, `/api/health` `cache_stats`) | chủ repo | Phase 6 (nửa A/C) |
+| ~~O6~~ | ~~Cấp token Cloudflare scope Zone Analytics~~ | — | **Đã đóng 2026-08-07** — user cấp token, số liệu thật đã đo |

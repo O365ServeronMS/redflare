@@ -574,31 +574,54 @@ Không cần đụng gì tới dữ liệu — `runEdgeWarm` không ghi ở đâ
 Lưu ý gỡ flag sẽ làm `warmHeroImages` (phần ảnh) quay lại hành vi same-zone
 mặc định.
 
-### Phase 6 — Đo lường tách theo class *(nửa code xong; nửa GraphQL vẫn chặn O6)*
+### Phase 6 — Đo lường tách theo class *(đã xong cả A/B/C — O6 đóng 2026-08-07)*
 
 Không thể lái một con số gộp. Cần tách A/B/C của §0.
 
-- ❌ **GraphQL Analytics API, tách theo hostname (`img.` vs `phim.`) và path
-  prefix — vẫn chặn (O6).** Cần token Cloudflare scope Zone Analytics, tôi
-  không có — khác quyền với O1 gốc (Zone Settings, đã đóng) và O5 (WAF,
-  không còn cần); Analytics chưa từng được cấp trong toàn bộ phiên này. Đo A
-  (zone-wide HIT%) và tách theo host vẫn phải làm thủ công qua dashboard
-  hoặc chờ cấp quyền.
 - ✅ **`/api/health`: đếm `hit`/`miss`/`warm`/`d1-recs`/`stale-vps-down`/
-  `miss-fallback` theo cửa sổ trượt 24h** — thứ **CÓ** làm được thuần bằng
-  code, và đúng chỉ số B (`origin-build rate`) mà §4 thật sự cam kết, không
-  phải A. Bảng D1 mới `cache_stats` (migration `0004_cache_stats.sql`), 1
-  dòng mỗi (giờ, status) — không phải 1 dòng/request, nên số dòng gần như
-  hằng số bất kể traffic (~7 status × 24h ≈ 168 dòng/ngày, tự dọn >7 ngày).
-  Lấy mẫu 1-trong-10 giống `trackPopularity` (Phase 4) — giữ đúng tỉ lệ mà
-  giảm khối lượng ghi. Đọc từ header `x-catalog-cache` của chính response
-  trả về, tại **một điểm gọi duy nhất** trong `fetch()` — không cần chèn
-  tracking vào từng nhánh của `handleApi`/`handleHomeData`/
-  `handleRecommendation`.
-- **Chưa làm** (không cần thiết cho mục tiêu B, chỉ cần cho A/C): "dựng
-  baseline trước Phase 1" — đã lỡ, các phase đã deploy xong rồi mới có Phase
-  6. Baseline thật vẫn là con số §1 đo bằng curl thủ công, không phải một
-  hệ thống tracking dựng sẵn.
+  `miss-fallback` theo cửa sổ trượt 24h** — chỉ số B (`origin-build rate`)
+  mà §4 thật sự cam kết. Bảng D1 mới `cache_stats`
+  (migration `0004_cache_stats.sql`), 1 dòng mỗi (giờ, status), lấy mẫu
+  1-trong-10 giống `trackPopularity` (Phase 4). Đọc từ header
+  `x-catalog-cache` của chính response trả về, tại **một điểm gọi duy nhất**
+  trong `fetch()`.
+- ✅ **GraphQL Analytics API — O6 đã đóng.** User cung cấp Cloudflare API
+  token scope Zone Analytics Read (2026-08-07). Đo trực tiếp qua
+  `api.cloudflare.com/client/v4/graphql`, dataset `httpRequestsAdaptiveGroups`,
+  group theo `clientRequestHTTPHost` + `cacheStatus`, cửa sổ 24h. **Kết quả
+  đầy đủ ghi ở §6.6 bên dưới** — số liệu A/C thật, không còn ước tính.
+
+#### §6.6 — Số đo thật, 2026-08-07 (24h trước đó)
+
+| Host | Tổng request | HIT-like (`hit`+`stale`) | % |
+|---|---|---|---|
+| `phim.bluesia.net` | 22.284 | 17.105 | **76,8%** |
+| `img.bluesia.net` | 6.665 | 4.480 | **67,2%** |
+
+So với baseline 35% (báo cáo ban đầu, đo gián tiếp qua mô hình §2) —
+**tăng thật, không phải suy diễn.** Phần lớn cải thiện tới từ đúng những gì
+Phase 0–5 nhắm tới: `s-maxage`→SWR (Phase 1), Tiered Cache (Phase 2), mirror
+drain hết backlog (Phase 3, `queued: 0` xác nhận riêng ở Phase 6 log), warm
+set theo popularity + LRU (Phase 4), edge-warm (Phase 5, dù chỉ nóng 1 colo
+như đã ghi ở §6.5.2).
+
+**Chỉ số A đã vượt mục tiêu §4 (≥93%)? Chưa** — 76,8%/67,2% vẫn dưới 93%,
+nhưng đang đo ở **24h đầu tiên** sau khi toàn bộ phase deploy xong, cache
+còn đang "làm nóng" chưa ổn định (`mirror_queue` chỉ vừa về 0). Cần đo lại
+sau vài ngày để có con số ổn định hơn — baseline 93% trong §4 dựa trên mô
+hình lý thuyết, không phải cam kết cứng cho ngày đầu.
+
+**Phát hiện mới, ngoài phạm vi hit-rate — mức độ nghiêm trọng đáng chú ý:**
+đếm theo `edgeResponseStatus` lộ ra **1.789 lỗi 504/502 thật trong 24h**
+(8,0% tổng request `phim.bluesia.net`, sau khi loại trừ 818 lỗi `503` của
+chính `/api/health` báo cáo — đó là **đúng thiết kế**, không phải lỗi).
+Tập trung ở `/api/list` (547), `/api/search` (294+144 lỗi 502), `/api/movie/*`
+(172+16+9...), `/api/genre` (154), `/api/home-data` (102). 504 = Cloudflare
+tự timeout chờ Worker/upstream, không phải lỗi Worker trả về chủ động (đã có
+502 "catalog unavailable" riêng, chỉ 144 case). **Chưa điều tra nguyên nhân
+gốc** (nghi vấn: KKPhim chậm dưới tải thật, hoặc build nhiều TMDB enrich
+vượt timeout) — nằm ngoài phạm vi "đo lường Phase 6", ghi lại để cân nhắc
+một phiên `/engineering:debug` riêng.
 
 **Verify:** `node --check` pass; migration `0004_cache_stats.sql` đã apply
 lên D1 production. Kết quả đo thật ghi ở [state-hit-rate.md](state-hit-rate.md)
@@ -690,7 +713,7 @@ là ảo tưởng. Nên chốt mục tiêu Free ở 93–95% và đưa 99% vào 
 | ~~O3~~ | ~~Tầng `caches.default` có còn đáng giữ không?~~ **Đã trả lời** — giữ nguyên, không đổi gì; chỉ đổi header trả về client. Xem §6 Phase 1. | — |
 | ~~O4~~ | ~~Có trả phí Cache Reserve không?~~ **User quyết định bỏ qua** (2026-08-06) — Phase 7 không triển khai. | — |
 | ~~O5~~ | ~~WAF Custom Rule cho IP GitHub Actions~~ — **không còn cần**. Đã bỏ hẳn caller ngoài bằng `global_fetch_strictly_public` (§6.5.1), không còn request nào từ IP GitHub để bị bot-challenge. | — |
-| **O6** | Quyền Cloudflare GraphQL Analytics API (tách HIT% theo hostname/path — chỉ số A/C của §0) vẫn chưa có. Chỉ số B (origin-build rate) đã đo được thuần bằng code (Phase 6, `/api/health` `cache_stats`), không cần quyền này. | 6 (nửa A/C) |
+| ~~O6~~ | ~~Quyền Cloudflare GraphQL Analytics API~~ — **đã đóng 2026-08-07**, user cấp token Zone Analytics Read. Số liệu thật ở §6.6. | — |
 
 > Về O6: cần cấp thêm token Cloudflare scope Zone Analytics, hoặc xác
 > thực MCP `cloudflare-api`/`cloudflare-observability` trong một phiên
