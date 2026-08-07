@@ -7,14 +7,20 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "start": "wrangler dev --remote"
+    "start": "wrangler dev --remote",
+    "ssr:dev": "wrangler dev --config wrangler.ssr.toml --remote",
+    "ssr:typecheck": "tsc --project tsconfig.ssr.json --noEmit",
+    "ssr:migrate": "wrangler d1 migrations apply redflare-db --remote"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260804.1",
+    "typescript": "^7.0.2",
     "vite": "^8.1.0",
     "wrangler": "^4.116.0"
   },
   "dependencies": {
     "artplayer": "^5.4.0",
-    "hls.js": "^1.6.16"
+    "hls.js": "^1.6.16",
+    "hono": "^4.13.0"
   }
 }

@@ -1,0 +1,179 @@
+import type { Env } from '../../types/env';
+import { MovieRepository } from '../../repositories/movieRepository';
+import { EpisodeRepository } from '../../repositories/episodeRepository';
+import { RecommendationRepository } from '../../repositories/recommendationRepository';
+import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
+import { SyncStateRepository } from '../../repositories/syncStateRepository';
+import { KkphimClient } from './kkphimClient';
+import { TmdbClient } from './tmdbClient';
+import { syncOneMovie, type SyncOneResult } from './syncMovie';
+import { RateLimiter, PHIMAPI_AGGREGATE_RPS, TMDB_AGGREGATE_RPS } from './throttle';
+
+// Free-plan-only governor (ADR-0002 Finding 2 / plan §2.2). 85,000, not
+// 100,000: leaves ~15% headroom for FTS writes (Phase 6), the Phase 4
+// recommendation-resolve step, and estimate error -- discovered the hard
+// way once already in this project's history (D1's undocumented param cap;
+// this time the margin is deliberate, not a retrofit).
+const MAX_ROWS_PER_DAY = 85_000;
+
+// Matches the production worker's shard fan-out pattern (worker/lib/home.js,
+// worker/lib/mirror.js) rather than inventing a new one.
+const SHARD_COUNT = 5;
+const PER_SHARD_CONCURRENCY = 6; // Workers free/paid: 6 simultaneous outgoing connections/invocation
+const RECENT_PAGE_LIMIT = 20; // pages of /danh-sach/phim-moi-cap-nhat to scan before giving up on this tick
+
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const i = cursor++;
+      results[i] = await fn(items[i] as T);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+function buildRepos(env: Env) {
+  return {
+    movie: new MovieRepository(env.DB),
+    episode: new EpisodeRepository(env.DB),
+    recommendation: new RecommendationRepository(env.DB),
+    taxonomy: new TaxonomyRepository(env.DB),
+    syncState: new SyncStateRepository(env.DB),
+  };
+}
+
+function buildClients(env: Env) {
+  return {
+    kkphim: new KkphimClient(new RateLimiter(PHIMAPI_AGGREGATE_RPS / SHARD_COUNT)),
+    tmdb: new TmdbClient(env.TMDB_API_TOKEN ?? '', new RateLimiter(TMDB_AGGREGATE_RPS / SHARD_COUNT)),
+  };
+}
+
+export interface ShardResult {
+  processed: number;
+  written: number;
+  unchanged: number;
+  errors: number;
+  rowsWritten: number;
+  governed: boolean;
+}
+
+/** Syncs one shard's worth of slugs. Called both directly (single-shard
+ * dev/test) and via the /__sync/batch/:n route reached through env.SELF
+ * from runIncrementalSync's fan-out. */
+export async function syncSlugBatch(env: Env, slugs: readonly string[]): Promise<ShardResult> {
+  const repos = buildRepos(env);
+  const clients = buildClients(env);
+
+  const governed = env.BACKFILL_MODE !== 'burst';
+  if (governed) {
+    const rowsToday = await repos.syncState.getRowsWrittenToday();
+    if (rowsToday >= MAX_ROWS_PER_DAY) {
+      return { processed: 0, written: 0, unchanged: 0, errors: 0, rowsWritten: 0, governed: true };
+    }
+  }
+
+  const outcomes = await mapLimit(slugs, PER_SHARD_CONCURRENCY, (slug) =>
+    syncOneMovie(env, slug, clients, repos)
+  );
+
+  const summary = outcomes.reduce(
+    (acc, r: SyncOneResult) => {
+      acc.processed++;
+      acc.rowsWritten += r.rowsWritten;
+      if (r.outcome === 'written') acc.written++;
+      else if (r.outcome === 'unchanged') acc.unchanged++;
+      else acc.errors++;
+      return acc;
+    },
+    { processed: 0, written: 0, unchanged: 0, errors: 0, rowsWritten: 0 }
+  );
+
+  if (summary.rowsWritten > 0) await repos.syncState.addRowsWrittenToday(summary.rowsWritten);
+
+  return { ...summary, governed: false };
+}
+
+function chunkInto<T>(items: readonly T[], parts: number): T[][] {
+  const out: T[][] = Array.from({ length: parts }, () => []);
+  items.forEach((item, i) => out[(i % parts) as number]!.push(item));
+  return out.filter((c) => c.length > 0);
+}
+
+/** Incremental sync (plan §2.1): scan /danh-sach/phim-moi-cap-nhat pages
+ * newest-first until we cross the last-seen cursor, fan the collected slugs
+ * out across shards via the SELF service binding (same reasoning as
+ * worker/lib/home.js: a Worker fetch()-ing its own Custom Domain 522s; a
+ * service binding does not touch the public network at all), then advance
+ * the cursor only if the whole pass completed cleanly -- a partial failure
+ * re-scans the same window next tick rather than silently skipping items. */
+export async function runIncrementalSync(env: Env): Promise<{ slugsFound: number; shards: ShardResult[] }> {
+  const repos = buildRepos(env);
+  const clients = buildClients(env);
+  const cursor = await repos.syncState.get('cursor:recent');
+  const cursorTime = cursor ? new Date(cursor).getTime() : 0;
+
+  const slugs: string[] = [];
+  let newest = cursor ?? '';
+  for (let page = 1; page <= RECENT_PAGE_LIMIT; page++) {
+    const items = await clients.kkphim.getRecentPage(page);
+    if (items.length === 0) break;
+    let crossedCursor = false;
+    for (const item of items) {
+      const t = item.modified?.time;
+      if (t && new Date(t).getTime() <= cursorTime) {
+        crossedCursor = true;
+        break;
+      }
+      slugs.push(item.slug);
+      if (!newest || (t && t > newest)) newest = t;
+    }
+    if (crossedCursor) break;
+  }
+
+  if (slugs.length === 0) return { slugsFound: 0, shards: [] };
+
+  const batches = chunkInto(slugs, SHARD_COUNT);
+  const shardResults = await Promise.all(
+    batches.map((batch, n) =>
+      // Hostname here is cosmetic -- a service binding routes directly to
+      // this Worker regardless of what URL is given (same pattern as
+      // worker/lib/home.js's SELF usage). Kept as the real prod hostname
+      // for consistency with that file, not because it's reachable.
+      env.SELF.fetch(`https://phim.bluesia.net/__sync/batch/${n}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-cron-key': env.CRON_KEY ?? '' },
+        body: JSON.stringify({ slugs: batch }),
+      })
+        .then((r) => r.json<ShardResult>())
+        .catch(
+          (): ShardResult => ({ processed: 0, written: 0, unchanged: 0, errors: batch.length, rowsWritten: 0, governed: false })
+        )
+    )
+  );
+
+  const anyGoverned = shardResults.some((r) => r.governed);
+  if (!anyGoverned && newest) await repos.syncState.set('cursor:recent', newest);
+
+  return { slugsFound: slugs.length, shards: shardResults };
+}
+
+/** Backfill (Phase 7): walks every taxonomy listing page by page, feeding
+ * the same syncSlugBatch path incremental sync uses. `mode` selects the
+ * governor behavior (plan §7 table) -- same code either way, only the
+ * throttle/governor posture differs. */
+export async function runBackfillPage(
+  env: Env,
+  type: string,
+  page: number
+): Promise<{ slugsFound: number; result: ShardResult }> {
+  const clients = buildClients(env);
+  const items = await clients.kkphim.getListingPage(type, page);
+  const slugs = items.map((i) => i.slug);
+  if (slugs.length === 0) return { slugsFound: 0, result: { processed: 0, written: 0, unchanged: 0, errors: 0, rowsWritten: 0, governed: false } };
+  const result = await syncSlugBatch(env, slugs);
+  return { slugsFound: slugs.length, result };
+}

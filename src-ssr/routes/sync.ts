@@ -1,0 +1,54 @@
+import { Hono } from 'hono';
+import type { Env } from '../types/env';
+import { requireCronKey } from '../middleware/cronKey';
+import { syncSlugBatch, runIncrementalSync, runBackfillPage } from '../services/sync/orchestrator';
+import { SyncStateRepository } from '../repositories/syncStateRepository';
+import { MovieRepository } from '../repositories/movieRepository';
+
+export const syncRoute = new Hono<{ Bindings: Env }>();
+syncRoute.use('/__sync/*', requireCronKey);
+
+// Reached via env.SELF from runIncrementalSync's fan-out -- see
+// services/sync/orchestrator.ts. Not meant to be called directly except for
+// manual verification (e.g. `curl -X POST .../__sync/batch/0 -d
+// '{"slugs":["..."]}'` with the cron key header).
+syncRoute.post('/__sync/batch/:n', async (c) => {
+  const body = await c.req.json<{ slugs?: string[] }>().catch(() => ({ slugs: [] }));
+  const result = await syncSlugBatch(c.env, body.slugs ?? []);
+  return c.json(result);
+});
+
+// Manual trigger for the incremental sync pass (plan §2.1). Cron calls this
+// same path on the */30 schedule (index.ts scheduled handler).
+syncRoute.get('/__sync/run', async (c) => {
+  const result = await runIncrementalSync(c.env);
+  return c.json(result);
+});
+
+// One page of one taxonomy listing, for backfill (Phase 7). Driving the
+// full crawl (paging through every type until exhausted, both free-mode
+// governed and Paid-mode burst) is orchestrated externally by repeated
+// calls to this route -- kept that way deliberately so a stuck/slow page
+// can't wedge an entire invocation's wall-time budget.
+syncRoute.get('/__sync/backfill-page', async (c) => {
+  const type = c.req.query('type');
+  const page = Number(c.req.query('page') ?? '1');
+  if (!type || !Number.isInteger(page) || page < 1) return c.json({ error: 'type and page required' }, 400);
+  const result = await runBackfillPage(c.env, type, page);
+  return c.json(result);
+});
+
+syncRoute.get('/__sync/status', async (c) => {
+  const syncState = new SyncStateRepository(c.env.DB);
+  const [cursor, rowsToday, catalogCount] = await Promise.all([
+    syncState.get('cursor:recent'),
+    syncState.getRowsWrittenToday(),
+    new MovieRepository(c.env.DB).countByTier('catalog'),
+  ]);
+  return c.json({
+    cursorRecent: cursor,
+    rowsWrittenToday: rowsToday,
+    backfillMode: c.env.BACKFILL_MODE ?? 'free',
+    catalogMovieCount: catalogCount,
+  });
+});

@@ -3,31 +3,13 @@ compatibility_date = "2026-08-01"
 workers_dev = false
 preview_urls = false
 
-# global_fetch_strictly_public (plan-hit-rate.md Phase 5): makes a global
-# fetch() to this Worker's OWN zone loop back to Cloudflare's "front door" and
-# be treated like a request from the Internet, instead of the default
-# behaviour where a fetch to the Worker's own Custom Domain returns 522
-# (documented under Error 522 / Error 1042). That loop-back through the front
-# door is exactly what edge-warming needs: the request traverses the real CDN
-# path, so it POPULATES the zone edge cache (and, with Tiered Cache on, the
-# shared upper tier) the way an external visitor's request would.
-#
-# Blast radius, checked before enabling:
-#   - Fetches to EXTERNAL hosts (phimapi.com, api.themoviedb.org, wsrv.nl):
-#     unaffected — "strictly public" is already how those resolve.
-#   - Fetches to img.bluesia.net (same zone, R2 custom domain): now
-#     guaranteed to go through the front door, which is what worker/lib/home.js
-#     warmHeroImages() wants; without the flag a same-zone fetch does not
-#     reliably traverse the CDN cache.
-#   - env.SELF service-binding calls (the home/warm/mirror shard fan-out):
-#     UNAFFECTED. Service bindings are a separate mechanism that never goes
-#     through a publicly-accessible URL, and this flag governs *global*
-#     fetch() only. This is the property that makes the flag safe here — all
-#     the cron sharding keeps working exactly as before.
-#   - Loop depth: the only self-fetches this Worker makes are to /api/* paths,
-#     and those handlers make no self-fetches of their own, so a warm request
-#     is depth-1, not a cycle.
-compatibility_flags = ["global_fetch_strictly_public"]
+# nodejs_compat: the SSR rearchitecture (docs/plan-ssr-rearchitecture.md,
+# docs/adr/0002-no-vps-ssr-architecture.md) replaces the SPA + JSON-API
+# worker (worker/index.js, removed) with a server-rendering Hono app
+# (src-ssr/index.ts). global_fetch_strictly_public is gone with it -- that
+# flag only existed for the old edge-warming cron (worker/lib/warm.js
+# runEdgeWarm), which has no equivalent here.
+compatibility_flags = ["nodejs_compat"]
 
 # Pin the custom domain in config so each deploy re-attaches it — avoids the site
 # going down when the Git integration is disconnected/reconnected.
@@ -35,91 +17,55 @@ routes = [
   { pattern = "phim.bluesia.net", custom_domain = true },
 ]
 
-# worker/index.js builds and serves /api/* entirely on the Worker (OPhim +
-# TMDB fetched directly, D1 for the reverse index/recommendation cache, R2
-# for image mirroring). The VPS backend (bluefilm-backend, img.bluesia.net)
-# was retired 2026-08-01 -- see bluesiaOM/context/state-redflare-cf-worker.md
-# for the full migration history. Everything that isn't /api/* and isn't a
-# literal file in dist/ falls through to the assets layer, which applies
-# not_found_handling below (SPA fallback for client routes).
-main = "worker/index.js"
+# src-ssr/index.ts: reads D1 directly and renders HTML server-side, no
+# runtime calls to KKPhim/TMDB (ADR-0002 Principle 3). Cutover landed
+# 2026-08-07 before Phase 3-6 of the plan were built -- see
+# docs/state-ssr-rearchitecture.md for what that means is NOT yet served
+# (list/genre/country/search pages, recommendations, sitemap, cache/security
+# headers, static assets). Only /phim/:slug and /__sync/* are live.
+main = "src-ssr/index.ts"
 
-[assets]
-directory = "dist"
-binding = "ASSETS"
-not_found_handling = "single-page-application"
+# No [assets] block: the old dist/ (Vite SPA build) is retired along with
+# worker/index.js. Keeping [assets] here would let Cloudflare's asset layer
+# intercept requests with the OLD dist/index.html (SPA-fallback) BEFORE this
+# Worker ever runs, which would silently resurrect dead /api/* calls instead
+# of the new SSR routes. Static asset serving returns in a later phase, once
+# there's something real to serve.
 
-# CATALOG_KV: durable last-known-good copy of /api/home-data only (single key).
-# Hot-tier caching for every /api/* path is the Cache API (caches.default),
-# not KV — keeps per-day KV writes bounded regardless of query cardinality
-# (e.g. /api/search keywords). See worker/index.js.
-[[kv_namespaces]]
-binding = "CATALOG_KV"
-id = "a4a69489a7da49d3895c9ed2389b7055"
-
-# DB: reverse index (idx) + recommendation cache (recs) + R2-mirror
-# bookkeeping (mirrored, mirror_queue), plus a durable last-known-good copy
-# for list/genre/country/movie/recommendation (table `stale`). All 5 tables
-# are live and read/written by the Worker (migrations/0001_stale.sql,
-# 0002_recs_idx_mirror.sql).
+# DB: same redflare-db as before. Legacy tables from the SPA-era worker
+# (stale, idx, recs, mirrored, mirror_queue, popularity, cache_stats) were
+# dropped by migrations/0006_drop_legacy_tables.sql at cutover; the SSR
+# schema (movie, episode, recommendation, genre, country, genre_movie,
+# country_movie, sync_state) is migrations/0005_ssr_schema.sql.
 [[d1_databases]]
 binding = "DB"
 database_name = "redflare-db"
 database_id = "6eaf211c-0fcb-4404-9cff-718048e7c0c7"
 
-# BUCKET: R2 bucket serving artwork at img.bluesia.net (2026-08 domain
-# migration off redflarer2.bluesia.net -- that hostname was retired once
-# every reader/cache moved to img.bluesia.net; img.bluesia.net itself is a
-# reused hostname, not the old VPS -- the VPS that used to live there was
-# retired 2026-08-01 and has no relation to this bucket). The Worker both
-# reads (image URL mapping) and writes it (worker/lib/mirror.js
-# drainMirrorQueue, streamed PUT, no local hashing). Binding name
-# deliberately differs from the "Redflare-R2" name briefly added via the
-# dashboard on 2026-07-31 (and silently dropped by the next git-push deploy,
-# since dashboard-only bindings aren't in this file) — binding name only
-# affects code, not the bucket itself.
+# BUCKET: R2 bucket that used to serve mirrored artwork at img.bluesia.net.
+# Out of scope for this cutover (only worker/KV/D1 were touched) -- the SSR
+# code does not read or write it. Left bound rather than removed so a
+# decision about img.bluesia.net (DNS, existing cached URLs) isn't made as a
+# side effect of this change; revisit explicitly per ADR-0002 Finding 8.
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "redflare-r2"
 
-# Three cron schedules, dispatched by event.cron in scheduled():
-#   "0 * * * *"    hourly — home-data refresh (worker/lib/home.js
-#                  runHomeRefresh) + idx/recs sweep (cleanupRecTables).
-#                  60-min cadence confirmed acceptable by the VPS owner
-#                  2026-08-01; keeps KV writes well under 1,000/day.
-#   "*/10 * * * *" every 10 min — drain the R2 image-mirror queue
-#                  (worker/lib/mirror.js drainMirrorQueue), <=20 images/run.
-#   "*/30 * * * *" every 30 min — refresh the page:v1:* warm set
-#                  (worker/lib/warm.js runWarmRefresh, ADR-0001 Phase 4),
-#                  12 keys with a write-if-changed guard. Sized against the
-#                  KV 1,000-writes/day free-plan cap — see docs/adr/0001-
-#                  caching-topology.md "Trade-off analysis" for the
-#                  arithmetic (~708/day worst case across all three crons,
-#                  ~71% of quota). Only 3 of the free plan's 5 max triggers
-#                  are in use, so there's headroom if the warm set grows.
-# All three can also be triggered on demand (header x-cron-key: <CRON_KEY>):
-#   GET /__cron/refresh-home, /__cron/mirror, and /__cron/warm.
+# Single cron: incremental sync (plan §2.1), matches src-ssr's scheduled()
+# handler. The old worker's hourly home-refresh and */10 mirror-drain crons
+# have no equivalent in the new architecture (no KV home cache, no R2
+# mirroring) and are gone with worker/lib/home.js and worker/lib/mirror.js.
 [triggers]
-crons = ["0 * * * *", "*/10 * * * *", "*/30 * * * *"]
+crons = ["*/30 * * * *"]
 
-# SELF: service binding to this same Worker, used by runHomeRefresh
-# (worker/lib/home.js) to call the /__cron/shard/:n routes. A plain fetch()
-# to https://phim.bluesia.net/... from WITHIN this Worker returns a
-# documented Cloudflare 522 -- "performing a fetch to its own hostname"
-# on a Custom Domain always fails that way (confirmed reproducing it
-# 2026-08-01). A service binding routes directly to this Worker's own fetch
-# handler without touching the public network at all, sidestepping the
-# issue entirely.
+# SELF: service binding used by services/sync/orchestrator.ts to fan out
+# /__sync/batch/:n shards without a same-zone fetch() 522ing (same reasoning
+# as the retired worker/lib/home.js SELF usage). Points at this same worker
+# ("redflare") since the SSR code now runs directly on this Worker script,
+# not a separate one.
 [[services]]
 binding = "SELF"
 service = "redflare"
 
-# Ships Worker logs to the dashboard (Workers Logs). Must be the LAST section
-# in this file — TOML has no block-end marker, so any top-level key=value
-# written after a [table] header (even routes/main above) gets silently
-# absorbed into that table instead of staying top-level. Learned this the
-# hard way: an earlier edit placed [observability] before `routes`/`main`
-# and wrangler warned "Unexpected fields found in observability field:
-# routes, main" — both had been swallowed.
 [observability]
 enabled = true
