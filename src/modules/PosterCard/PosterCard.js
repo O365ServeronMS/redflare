@@ -4,6 +4,7 @@
 import { thumbUrl, posterUrl, upstreamFallback } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
 import { applyImagePolicy, toTmdbW185 } from '../../lib/image.js';
+import { getDisplayMovieTitle, getSeasonLabel } from '../../lib/movieTitle.js';
 
 function getImdbScore(movie) {
   const rawScore =
@@ -43,13 +44,14 @@ export function renderPosterCard(container, movie, rank = null, priority = false
   const card = document.createElement('div');
   card.className = 'movie-card';
   card.addEventListener('click', () => navigate(`/phim/${movie.slug}`));
+  const displayTitle = getDisplayMovieTitle(movie);
 
   // ── Poster image ──
   const img = document.createElement('img');
   img.className = 'movie-card__poster';
   const thumb = thumbUrl(movie.thumb_url);
   img.src = toTmdbW185(thumb);
-  img.alt = movie.name;
+  img.alt = displayTitle;
   applyImagePolicy(img, { priority });
 
   // Fallback on error: retry the upstream origin if the R2 copy is not there
@@ -100,13 +102,21 @@ export function renderPosterCard(container, movie, rank = null, priority = false
     card.appendChild(badge);
   }
 
+  const seasonLabel = getSeasonLabel(movie);
+  if (seasonLabel) {
+    const season = document.createElement('div');
+    season.className = 'movie-card__season';
+    season.textContent = seasonLabel;
+    card.appendChild(season);
+  }
+
   // ── Hover overlay ──
   const overlay = document.createElement('div');
   overlay.className = 'movie-card__overlay';
 
   const overlayName = document.createElement('span');
   overlayName.className = 'movie-card__title';
-  overlayName.textContent = movie.name;
+  overlayName.textContent = displayTitle;
   overlay.appendChild(overlayName);
 
   const overlayMeta = document.createElement('div');

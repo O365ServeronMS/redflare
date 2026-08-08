@@ -47,8 +47,8 @@ phim.bluesia.net  (Cloudflare Worker "redflare", 1 binding duy nhất: D1)
 
 **Không còn:** KV, R2, worker cũ (`worker/`), VPS. Chỉ còn **D1**.
 
-**Cron `*/30`** chạy 3 việc trong 1 invocation: incremental sync → recommendation resolve →
-backfill tick. Đang ở `BACKFILL_MODE=free` (governed, chậm).
+**Cron `*/15`** chạy 3 việc trong 1 invocation: incremental sync → recommendation resolve →
+backfill tick. Đang ở `BACKFILL_MODE=burst` (Workers Paid, không áp dụng D1 free-write governor).
 
 ---
 
@@ -183,3 +183,16 @@ Không có `--remote`, `wrangler d1/kv/r2` đọc bản mô phỏng local **rỗ
 
 > "Đã đọc handoff. F1–F7 đã xong; user đã duyệt frontend và Console CSP sạch trên production.
 > Tiếp tục F8 để đồng bộ ADR/README/CLAUDE.md/MODULES.md chứ?"
+
+---
+
+## 10. Backfill mode policy — user chốt 2026-08-08
+
+- `BACKFILL_MODE=free`: áp dụng D1 write governor và giới hạn dung lượng của Workers Free.
+- `BACKFILL_MODE=burst`: chỉ dùng khi tài khoản đang ở Workers Paid; bỏ qua D1 daily-write governor.
+- Burst không có nghĩa hammer upstream: luôn giữ aggregate limiter KKPhim 25 RPS và TMDB 40 RPS.
+- Backfill chạy một invocation nên dùng toàn bộ aggregate allowance (`shardDivisor=1`), không chia 5 như incremental sync.
+- Cron burst là `*/15` để tận dụng gần hết cửa sổ 15 phút mà tránh cố ý chạy chồng job.
+- `MAX_STUBS=0` trong lúc backfill: ưu tiên catalog KKPhim thật, chưa materialize TMDB-only stubs.
+- Khi chuyển lại `free`, đổi `BACKFILL_MODE` và cron về cadence phù hợp rồi redeploy; không cần đổi schema.
+- Dù Paid cho phép D1 lớn hơn Free, vẫn phải theo dõi database size và upstream 429/5xx trong observability.

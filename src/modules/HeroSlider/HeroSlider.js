@@ -5,6 +5,7 @@
 import { posterUrl, thumbUrl, upstreamFallback, attachImageFallback } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
 import { applyImagePolicy } from '../../lib/image.js';
+import { getDisplayMovieTitle, getSeasonLabel } from '../../lib/movieTitle.js';
 
 const ROTATE_INTERVAL = 8000;
 const MAX_SLIDES = 20;
@@ -118,6 +119,7 @@ export function renderHeroSlider(container, movies) {
   const railButtons = [];
 
   slides.forEach((movie, index) => {
+    const displayTitle = getDisplayMovieTitle(movie);
     const backdrop = document.createElement('div');
     backdrop.className = 'hero__backdrop';
     if (index === 0) backdrop.classList.add('hero__backdrop--active');
@@ -134,7 +136,7 @@ export function renderHeroSlider(container, movies) {
 
     const title = document.createElement('h1');
     title.className = 'hero__title';
-    title.textContent = movie.name;
+    title.textContent = displayTitle;
     content.appendChild(title);
 
     const meta = document.createElement('div');
@@ -152,6 +154,14 @@ export function renderHeroSlider(container, movies) {
       year.className = 'hero__year';
       year.textContent = movie.year;
       meta.appendChild(year);
+    }
+
+    const seasonLabel = getSeasonLabel(movie);
+    if (seasonLabel) {
+      const season = document.createElement('span');
+      season.className = 'hero__badge hero__badge--season';
+      season.textContent = seasonLabel;
+      meta.appendChild(season);
     }
 
     const score = getTmdbScore(movie);
@@ -224,6 +234,7 @@ export function renderHeroSlider(container, movies) {
   rail.appendChild(railHeader);
 
   slides.forEach((movie, index) => {
+    const displayTitle = getDisplayMovieTitle(movie);
     const item = document.createElement('button');
     item.className = 'hero__rail-item';
     if (index === 0) item.classList.add('hero__rail-item--active');
@@ -232,13 +243,14 @@ export function renderHeroSlider(container, movies) {
     item.innerHTML = `
       <span class="hero__rail-rank">${index + 1}</span>
       <span class="hero__rail-poster">
-        <img src="${getRailThumbUrl(movie)}" alt="${movie.name}" loading="lazy">
+        <img src="${getRailThumbUrl(movie)}" alt="${displayTitle}" loading="lazy">
       </span>
       <span class="hero__rail-copy">
-        <span class="hero__rail-title">${movie.name}</span>
+        <span class="hero__rail-title">${displayTitle}</span>
         ${score ? `<span class="hero__rail-score"><span>TMDB</span> ${score}</span>` : ''}
       </span>
     `;
+    item.setAttribute('aria-label', displayTitle);
     item.addEventListener('click', () => {
       goToSlide(index);
       resetAutoRotate();

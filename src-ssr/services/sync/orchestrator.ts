@@ -69,9 +69,13 @@ export interface ShardResult {
 /** Syncs one shard's worth of slugs. Called both directly (single-shard
  * dev/test) and via the /__sync/batch/:n route reached through env.SELF
  * from runIncrementalSync's fan-out. */
-export async function syncSlugBatch(env: Env, slugs: readonly string[]): Promise<ShardResult> {
+export async function syncSlugBatch(
+  env: Env,
+  slugs: readonly string[],
+  shardDivisor = SHARD_COUNT
+): Promise<ShardResult> {
   const repos = buildRepos(env);
-  const clients = buildClients(env);
+  const clients = buildClients(env, shardDivisor);
 
   const governed = env.BACKFILL_MODE !== 'burst';
   if (governed) {
@@ -185,7 +189,10 @@ export async function runBackfillPage(
       result: { processed: 0, written: 0, unchanged: 0, errors: 0, rowsWritten: 0, governed: false },
     };
   }
-  const result = await syncSlugBatch(env, slugs);
+  // Backfill runs in this one scheduled invocation rather than across the
+  // five incremental-sync shards, so it can safely use the full aggregate
+  // KKPhim/TMDB allowance. The shared limiter still caps KKPhim at 25 RPS.
+  const result = await syncSlugBatch(env, slugs, 1);
   return { slugsFound: slugs.length, totalPages, result };
 }
 

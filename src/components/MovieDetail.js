@@ -9,6 +9,7 @@ import { renderPlayer } from '../modules/Player/Player.js';
 import { renderRecommendation } from '../modules/Recommendation/Recommendation.js';
 import { applyImagePolicy } from '../lib/image.js';
 import { mountWhenVisible } from '../lib/lazyMount.js';
+import { getDisplayMovieTitle, getSeasonLabel } from '../lib/movieTitle.js';
 
 function getEpisodeRank(ep) {
   const name = String(ep?.name || '').trim().toLowerCase();
@@ -113,6 +114,7 @@ export async function renderMovieDetail(container, slug) {
 
   const detail = document.createElement('article');
   detail.className = 'detail';
+  const displayTitle = getDisplayMovieTitle(movie);
 
   // ==== Hero-style Banner ====
   const banner = document.createElement('section');
@@ -139,7 +141,7 @@ export async function renderMovieDetail(container, slug) {
     const thumb = document.createElement('img');
     thumb.className = 'detail__thumb';
     thumb.src = thumbUrl(movie.thumb_url);
-    thumb.alt = movie.name || '';
+    thumb.alt = displayTitle;
     // Above-the-fold on the detail page — this is the LCP candidate here.
     applyImagePolicy(thumb, { priority: true });
     attachImageFallback(thumb);
@@ -155,7 +157,7 @@ export async function renderMovieDetail(container, slug) {
   // Title
   const title = document.createElement('h1');
   title.className = 'hero__title';
-  title.textContent = movie.name || '';
+  title.textContent = displayTitle;
   content.appendChild(title);
 
   // Meta row
@@ -174,6 +176,14 @@ export async function renderMovieDetail(container, slug) {
     year.className = 'hero__year';
     year.textContent = movie.year;
     meta.appendChild(year);
+  }
+
+  const seasonLabel = getSeasonLabel(movie);
+  if (seasonLabel) {
+    const season = document.createElement('span');
+    season.className = 'hero__badge hero__badge--season';
+    season.textContent = seasonLabel;
+    meta.appendChild(season);
   }
 
   if (movie.vote_average) {
@@ -375,7 +385,7 @@ export async function renderMovieDetail(container, slug) {
         serverName: server.server_name || `Server ${sIdx + 1}`,
         episodeName: ep.name || 'Full',
         backdropUrl: posterUrl(movie.poster_url),
-        movieName: movie.name,
+        movieName: displayTitle,
         posterUrl: movie.thumb_url ? thumbUrl(movie.thumb_url) : ''
       });
 
