@@ -55,6 +55,11 @@ export interface KkphimListItem {
   modified: { time: string };
 }
 
+export type KkphimTmdbLookupResult =
+  | { kind: 'found'; data: KkphimDetailResponse }
+  | { kind: 'not_found' }
+  | { kind: 'retryable_error'; status?: number };
+
 // Cron egress, not a user request -- a short timeout with no retry is the
 // right trade here. The previous architecture's 8s x 2-attempt timeout in
 // the request path produced a measured ~11.4% 504 rate
@@ -74,7 +79,11 @@ async function fetchWithTimeout(url: string, ms = 5000): Promise<Response | null
 }
 
 export class KkphimClient {
-  constructor(private readonly limiter: RateLimiter) {}
+  private readonly limiter: RateLimiter;
+
+  constructor(limiter: RateLimiter) {
+    this.limiter = limiter;
+  }
 
   async getDetail(slug: string): Promise<KkphimDetailResponse | null> {
     await this.limiter.wait();
@@ -95,6 +104,30 @@ export class KkphimClient {
     if (!res) return null;
     const data = await res.json<KkphimDetailResponse>().catch(() => null);
     return data?.status && data.movie ? data : null;
+  }
+
+  /** Hero-only exact lookup. Unlike the older nullable method above, this
+   * preserves the difference between a confirmed absence and an upstream
+   * failure so a transient KKPhim outage cannot replace the last-good Hero
+   * snapshot with a partial list. */
+  async getMovieByTmdbId(tmdbId: number): Promise<KkphimTmdbLookupResult> {
+    await this.limiter.wait();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const res = await fetch(`${KKPHIM_BASE}/tmdb/movie/${tmdbId}`, { signal: ctrl.signal });
+      if (res.status === 404) return { kind: 'not_found' };
+      if (!res.ok) return { kind: 'retryable_error', status: res.status };
+
+      const data: unknown = await res.json().catch(() => null);
+      if (isConfirmedNotFound(data)) return { kind: 'not_found' };
+      if (!isDetailResponse(data)) return { kind: 'retryable_error', status: res.status };
+      return { kind: 'found', data };
+    } catch {
+      return { kind: 'retryable_error' };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** One page of the "recently updated" feed, used by the incremental sync
@@ -132,4 +165,14 @@ export class KkphimClient {
       totalPages: data.data?.params?.pagination?.totalPages ?? null,
     };
   }
+}
+
+function isConfirmedNotFound(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && (value as Record<string, unknown>).status === false;
+}
+
+function isDetailResponse(value: unknown): value is KkphimDetailResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const response = value as Record<string, unknown>;
+  return response.status === true && typeof response.movie === 'object' && response.movie !== null && Array.isArray(response.episodes);
 }

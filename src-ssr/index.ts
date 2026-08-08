@@ -6,6 +6,7 @@ import { syncRoute } from './routes/sync';
 import { securityHeaders } from './middleware/securityHeaders';
 import { requestSampler } from './middleware/requestSampler';
 import { runIncrementalSync, runBackfillTick, runRecommendationResolveTick } from './services/sync/orchestrator';
+import { refreshHeroSnapshot } from './services/sync/heroSnapshot';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -48,17 +49,25 @@ app.notFound(async (c) => {
 export default {
   fetch: app.fetch,
 
-  // */30, three jobs sharing one 15-min Cron Trigger wall-time budget:
+  // */15, four jobs sharing one Cron Trigger wall-time budget:
   // incremental sync (small, bounded, keeps recent titles fresh) ->
+  // Hero snapshot refresh (30-minute success gate, so it normally skips) ->
   // recommendation resolve (Phase 4, ~3 min budget -- cheap, high UX
   // value per minute, so it runs before backfill) -> backfill (Phase 7,
-  // ~10 min budget, resumes from its own D1 cursor next tick). All three
+  // ~10 min budget, resumes from its own D1 cursor next tick). All four
   // are cron-driven rather than CRON_KEY-HTTP-driven for the same reason
   // (see runBackfillTick's doc comment in services/sync/orchestrator.ts).
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(
       (async () => {
         await runIncrementalSync(env);
+        try {
+          const hero = await refreshHeroSnapshot(env);
+          console.info('hero_snapshot_refresh', hero);
+        } catch (error) {
+          // Do not let an unexpected Hero failure starve later cron jobs.
+          console.error('hero_snapshot_refresh_failed', error);
+        }
         await runRecommendationResolveTick(env);
         await runBackfillTick(env);
       })()

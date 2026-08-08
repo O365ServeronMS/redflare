@@ -23,6 +23,22 @@ export interface TmdbRecommendation {
   id: number;
 }
 
+export interface TmdbTrendingMovie {
+  /** Original index in TMDB's first page. Gaps are intentional after
+   * rejecting a malformed/non-movie result. */
+  rank: number;
+  id: number;
+  mediaType: 'movie';
+}
+
+export interface TmdbTrendingMoviesResult {
+  /** Number of raw entries inspected from TMDB's first page, capped at 20. */
+  fetchedCount: number;
+  /** Entries explicitly rejected because they are not TMDB movies. */
+  rejectedTypeCount: number;
+  movies: TmdbTrendingMovie[];
+}
+
 async function fetchWithTimeout(url: string, token: string, ms = 5000): Promise<Response | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
@@ -40,7 +56,13 @@ async function fetchWithTimeout(url: string, token: string, ms = 5000): Promise<
 }
 
 export class TmdbClient {
-  constructor(private readonly token: string, private readonly limiter: RateLimiter) {}
+  private readonly token: string;
+  private readonly limiter: RateLimiter;
+
+  constructor(token: string, limiter: RateLimiter) {
+    this.token = token;
+    this.limiter = limiter;
+  }
 
   async getDetail(type: TmdbType, id: number): Promise<TmdbDetail | null> {
     if (!this.token) return null;
@@ -64,4 +86,39 @@ export class TmdbClient {
     const data = await res.json<{ results?: TmdbRecommendation[] }>().catch(() => null);
     return (data?.results ?? []).slice(0, limit).map((r) => r.id);
   }
+
+  /** TMDB's weekly movie window is the sole Hero candidate source. Keep the
+   * original first-page rank: callers must not backfill a rejected item from
+   * page 2 or outside these first 20 results. `null` means an operational or
+   * payload-shape failure, distinct from a valid empty result list. */
+  async getTrendingMovies(period: 'week'): Promise<TmdbTrendingMoviesResult | null> {
+    if (!this.token) return null;
+    await this.limiter.wait();
+    const res = await fetchWithTimeout(`${TMDB_API}/trending/movie/${period}?language=vi-VN`, this.token);
+    if (!res) return null;
+    const data = await res.json<{ results?: unknown }>().catch(() => null);
+    if (!data || !Array.isArray(data.results)) return null;
+
+    const firstTwenty = data.results.slice(0, 20);
+    const movies: TmdbTrendingMovie[] = [];
+    let rejectedTypeCount = 0;
+    for (const [index, raw] of firstTwenty.entries()) {
+      if (!isTrendingMovie(raw)) {
+        rejectedTypeCount++;
+        continue;
+      }
+      movies.push({ rank: index + 1, id: raw.id, mediaType: 'movie' });
+    }
+    return { fetchedCount: firstTwenty.length, rejectedTypeCount, movies };
+  }
+}
+
+function isTrendingMovie(value: unknown): value is { id: number; media_type?: 'movie' } {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  // `/trending/movie/week` is already the movie-specific endpoint. TMDB
+  // may omit media_type on that response, but an explicitly mismatched
+  // value is malformed and must never become a Hero candidate.
+  return Number.isInteger(candidate.id) && (candidate.id as number) > 0
+    && (candidate.media_type === undefined || candidate.media_type === 'movie');
 }

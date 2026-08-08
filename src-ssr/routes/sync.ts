@@ -10,8 +10,10 @@ import {
 import { SyncStateRepository } from '../repositories/syncStateRepository';
 import { MovieRepository } from '../repositories/movieRepository';
 import { RecommendationRepository } from '../repositories/recommendationRepository';
+import { HeroSnapshotRepository } from '../repositories/heroSnapshotRepository';
 import { applyNoStore } from '../cache/control';
 import { SAMPLE_RATE } from '../middleware/requestSampler';
+import { refreshHeroSnapshot } from '../services/sync/heroSnapshot';
 
 const FREE_PLAN_DAILY_REQUEST_LIMIT = 100_000;
 
@@ -38,7 +40,7 @@ syncRoute.post('/__sync/batch/:n', async (c) => {
 });
 
 // Manual trigger for the incremental sync pass (plan §2.1). Cron calls this
-// same path on the */30 schedule (index.ts scheduled handler).
+// same path on the */15 schedule (index.ts scheduled handler).
 syncRoute.get('/__sync/run', async (c) => {
   const result = await runIncrementalSync(c.env);
   return c.json(result);
@@ -58,15 +60,24 @@ syncRoute.get('/__sync/backfill-page', async (c) => {
 });
 
 // Manual trigger for one recommendation-resolve tick (Phase 4). Cron calls
-// this same path every */30 tick (index.ts scheduled handler).
+// this same path every */15 tick (index.ts scheduled handler).
 syncRoute.get('/__sync/resolve-recommendations', async (c) => {
   const result = await runRecommendationResolveTick(c.env);
+  return c.json(result);
+});
+
+// Manual, authenticated seed/retry for the Hero snapshot. The regular cron
+// does not need CRON_KEY; `force=true` only bypasses the 30-minute success
+// gate here so operations can seed Deploy A before the home API cutover.
+syncRoute.post('/__sync/refresh-hero', async (c) => {
+  const result = await refreshHeroSnapshot(c.env, { force: c.req.query('force') === 'true' });
   return c.json(result);
 });
 
 syncRoute.get('/__sync/status', async (c) => {
   const syncState = new SyncStateRepository(c.env.DB);
   const movieRepo = new MovieRepository(c.env.DB);
+  const heroSnapshot = new HeroSnapshotRepository(c.env.DB);
   const [
     cursor,
     rowsToday,
@@ -77,6 +88,7 @@ syncRoute.get('/__sync/status', async (c) => {
     backfillPage,
     sampledRequests,
     recommendationStats,
+    heroRefresh,
   ] = await Promise.all([
     syncState.get('cursor:recent'),
     syncState.getRowsWrittenToday(),
@@ -87,6 +99,7 @@ syncRoute.get('/__sync/status', async (c) => {
     syncState.get('backfill:page'),
     syncState.getSampledRequestsToday(),
     new RecommendationRepository(c.env.DB).getResolveStats(),
+    heroSnapshot.getRefreshState(),
   ]);
 
   // ADR-0002 Finding 7: an estimate, not an exact count -- see
@@ -102,6 +115,15 @@ syncRoute.get('/__sync/status', async (c) => {
     stubMovieCount: stubCount,
     maxStubs: Number(c.env.MAX_STUBS ?? '0'),
     recommendation: recommendationStats,
+    hero: {
+      lastSuccessAt: heroRefresh.lastSuccessAt,
+      lastAttemptAt: heroRefresh.lastAttemptAt,
+      matchedCount: heroRefresh.lastResult?.matchedCount ?? null,
+      readSource: 'snapshot',
+      snapshotAgeSeconds: heroRefresh.lastSuccessAt === null
+        ? null
+        : Math.max(0, Math.floor(Date.now() / 1000) - heroRefresh.lastSuccessAt),
+    },
     backfill: {
       done: backfillDone === '1',
       typeIndex: backfillTypeIndex ? Number(backfillTypeIndex) : 0,
