@@ -196,3 +196,10 @@ Không có `--remote`, `wrangler d1/kv/r2` đọc bản mô phỏng local **rỗ
 - `MAX_STUBS=0` trong lúc backfill: ưu tiên catalog KKPhim thật, chưa materialize TMDB-only stubs.
 - Khi chuyển lại `free`, đổi `BACKFILL_MODE` và cron về cadence phù hợp rồi redeploy; không cần đổi schema.
 - Dù Paid cho phép D1 lớn hơn Free, vẫn phải theo dõi database size và upstream 429/5xx trong observability.
+
+## 11. Season label decision — user chốt 2026-08-08
+
+- **Phase 1 là đủ và đã hoàn tất:** UI đọc `tmdb.season` hiện có và hiển thị `Phần N`.
+- **Phase 2 season persistence không triển khai:** không đổi `movie.title`, không thêm suffix vào `original_title`, không re-index FTS chỉ để lưu nhãn season.
+- Không chạy re-sync/backfill lại chỉ vì mục tiêu hiển thị season; các season mới vẫn được thêm bình thường khi upstream cung cấp slug mới.
+- Chỉ xem xét Phase 2 riêng nếu sau này có yêu cầu mới về search theo `Phần N`, API title chuẩn hóa, hoặc SEO server-side.
