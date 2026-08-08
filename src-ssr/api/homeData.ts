@@ -1,10 +1,10 @@
 import { MovieRepository } from '../repositories/movieRepository';
+import { HeroSnapshotRepository } from '../repositories/heroSnapshotRepository';
 import { toLegacyItems, type LegacyItem } from './legacyItem';
 
 const NEW_MOVIES_COUNT = 24;
 const RAIL_COUNT = 12;
 const TRENDING_COUNT = 12;
-const HERO_COUNT = 20;
 
 // docs/contract-legacy-api.md §1. Shape is INTENTIONALLY asymmetric:
 // heroMovies is a bare array, the four rails are {items}. main.js's
@@ -26,12 +26,13 @@ export interface HomeData {
  * Caching (max-age=60) absorb the load. Five small indexed reads. */
 export async function buildHomeData(db: D1Database): Promise<HomeData> {
   const repo = new MovieRepository(db);
+  const heroSnapshot = new HeroSnapshotRepository(db);
   const [newMovies, phimLe, phimBo, trending, hero] = await Promise.all([
     repo.getRecentMovies(NEW_MOVIES_COUNT),
     repo.getPageByTypeOffset('single', 1, RAIL_COUNT),
     repo.getPageByTypeOffset('series', 1, RAIL_COUNT),
     repo.getTrending(TRENDING_COUNT),
-    repo.getHeroPool(HERO_COUNT),
+    heroSnapshot.getRankedMovies(),
   ]);
 
   return {

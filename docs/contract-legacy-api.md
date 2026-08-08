@@ -40,6 +40,15 @@ Nguồn: [main.js:134-206](../src/main.js#L134) `renderHomePage`.
   có `poster_url`** không rỗng để LCP preload có tác dụng.
 - Hero tối đa 20 slide ([HeroSlider.js:14](../src/modules/HeroSlider/HeroSlider.js#L14)
   `MAX_SLIDES = 20`) — server trả nhiều hơn cũng không sao, client tự cắt.
+- Sau khi rollout Hero hoàn tất, nguồn của `heroMovies` là bảng `hero_snapshot`, không phải
+  `movie.popularity`. Snapshot giữ nguyên `rank` gốc trong 20 kết quả đầu của TMDB
+  `/trending/movie/week`, chỉ chứa phim `movie` + `single` + `has_stream=1` có bản KKPhim
+  và backdrop hợp lệ. Rank có thể có khoảng trống, số slide có thể từ 0 đến 20 và không được
+  bù bằng phim ngoài top 20. `tmdb_id` là duy nhất trong snapshot; JSON response vẫn là
+  **mảng trần** gồm các legacy item với shape không đổi.
+- Snapshot và ba key `sync_state` (`hero:last_success_at`, `hero:last_attempt_at`,
+  `hero:last_result`) được replace trong cùng một D1 `batch()`. Cloudflare xác nhận batched
+  statements là [SQL transaction rollback toàn bộ sequence khi một statement lỗi](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch).
 - `getScore()`/`getImdbScore()` đọc `movie.imdb.*` nhưng **không được gọi ở bất kỳ đâu**
   trong luồng render thật (chỉ định nghĩa, dead code) — field `imdb` không ảnh hưởng hiển thị,
   giữ `{}` là đủ.
