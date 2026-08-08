@@ -1,8 +1,8 @@
 # State: HeroSlider TMDB Weekly + KKPhim
 
-> F3 status (2026-08-08): **Deploy B ready to publish**. Deploy A (`26cec11`)
-> is active, migration `0010` is applied, and the production snapshot contains
-> 14 valid Hero movies. Deploy B is the remaining rollout action.
+> F3 status (2026-08-08): **Complete**. Deploy A (`26cec11`) and Deploy B
+> (`4b3d541`) are pushed to `origin/main`; production version
+> `cef2a496-d364-43bf-bfcb-570b655ba157` serves the verified snapshot.
 
 ## Current F3 board (overrides legacy blocked/pending rows below)
 
@@ -14,7 +14,7 @@
 | Local D1/API simulation, tests, build, typecheck, dry-run | Complete locally |
 | Deploy A checkpoint | Pushed to `origin/main` as `26cec11` |
 | Remote migration, seed and D1 query | Complete: 14 rows, 14 unique IDs, 0 invalid rows |
-| Deploy B, production API verification and rollback version evidence | Ready to push |
+| Deploy B, production API verification and rollback version evidence | Complete: `4b3d541`, API 200, 14 single movies |
 
 The current snapshot-reading worktree is the Deploy B artifact. Deploy A must
 be built from a separate pre-cutover checkpoint where `buildHomeData()` still
@@ -229,6 +229,14 @@ Handoff tối đa 1.500 token. Không copy plan, không paste log dài; lưu log
 - Re-ran all local feature suites: home-data 2/2, refresh 7/7, and repository 2/2; Worker typecheck and Vite build pass.
 - Wrangler `deploy --dry-run` passes using project-local `XDG_CONFIG_HOME` and `XDG_CACHE_HOME`; no remote write occurred.
 - Confirmed the Deploy B worktree reads only `hero_snapshot`, and the Deploy A requirement remains an explicit pre-cutover build before migration/seed.
+
+### 2026-08-08 — Production rollout evidence
+
+- Deploy A: `26cec11` pushed to `origin/main`; migration `0010` applied remotely.
+- Cron seed: 14 snapshot rows, 14 unique TMDB IDs, sparse source ranks 2–20, and 0 invalid catalog/movie/single/stream rows.
+- Deploy B: `4b3d541` pushed to `origin/main`; Worker version `cef2a496-d364-43bf-bfcb-570b655ba157` is active.
+- Production smoke: `/api/home-data` returned HTTP 200 with `heroMovies` as an array of 14 unique `single` entries.
+- Next exact action: F4 browser QA.
 
 ## 6. Token accounting
 
