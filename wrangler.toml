@@ -82,11 +82,11 @@ database_id = "40c364b3-10a8-4d03-bd51-60debe94610a"
 # explicit Workers Paid mode and bypasses that governor. Burst remains bound
 # by the project's aggregate upstream limit (KKPhim 25 RPS, TMDB 40 RPS),
 # Cron wall time, and D1's Paid-plan 10GB per-database platform limit.
-# MAX_STUBS stays at 0: filling the real KKPhim catalog has priority over
-# materializing optional TMDB-only recommendation pages.
+# F2 pilot: materialize only highly shared TMDB targets, bounded at 1,000
+# total stub rows while cron health and D1 growth are observed.
 [vars]
 BACKFILL_MODE = "burst"
-MAX_STUBS = "0"
+MAX_STUBS = "1000"
 
 # Single cron: drives BOTH incremental sync (plan §2.1) and, since
 # 2026-08-07, the Phase 7 backfill walk (services/sync/orchestrator.ts
