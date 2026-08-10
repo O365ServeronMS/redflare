@@ -4,7 +4,12 @@
  */
 import { posterUrl, thumbUrl, upstreamFallback, attachImageFallback } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
-import { applyImagePolicy } from '../../lib/image.js';
+import {
+  RESPONSIVE_IMAGE_VARIANTS,
+  applyImagePolicy,
+  createResponsivePicture,
+  getResponsiveTmdbSources,
+} from '../../lib/image.js';
 import { getDisplayMovieTitle, getSeasonLabel } from '../../lib/movieTitle.js';
 
 const ROTATE_INTERVAL = 8000;
@@ -22,24 +27,13 @@ export function getBackdropUrl(movie) {
     : thumbUrl(movie.thumb_url || movie.poster_url);
 }
 
-// Rail slot renders at 42px wide (30px mobile, see .hero__rail-poster in
-// components.css) but thumb_url is a w500 TMDB poster — ~99KB average
-// (see state.md audit) for a 42px box. w154 covers up to DPR 3 at that size
-// and is mirrored alongside every w500 poster (worker/lib/images.js
-// addW154Sibling), so rewrite to it here rather than loading w500 and
-// discarding 90% of the pixels. Only matches this exact TMDB path shape —
-// OPhim R2 keys look like `ophim/w500/...` (worker/lib/images.js
-// objectKeyFor), which this regex doesn't match, so they pass through
-// untouched (no w154 sibling exists for OPhim; not in scope here).
-const TMDB_W500_RE = /\/t\/p\/w500\//;
-function toRailSize(url) {
-  return TMDB_W500_RE.test(url) ? url.replace(TMDB_W500_RE, '/t/p/w154/') : url;
-}
-
 // Rail slot is portrait (aspect-ratio 2/3) — use the /m thumb_url, not the
 // landscape poster_url.
-function getRailThumbUrl(movie) {
-  return toRailSize(thumbUrl(movie.thumb_url || movie.poster_url));
+function getRailThumbSources(movie) {
+  return getResponsiveTmdbSources(
+    thumbUrl(movie.thumb_url || movie.poster_url),
+    RESPONSIVE_IMAGE_VARIANTS.heroRail
+  );
 }
 
 // A background-image has no error event, so probe the URL and swap to the
@@ -240,10 +234,10 @@ export function renderHeroSlider(container, movies) {
     if (index === 0) item.classList.add('hero__rail-item--active');
     item.setAttribute('aria-label', `Chọn phim thứ ${index + 1}: ${movie.name}`);
     const score = getTmdbScore(movie);
+    const railSources = getRailThumbSources(movie);
     item.innerHTML = `
       <span class="hero__rail-rank">${index + 1}</span>
       <span class="hero__rail-poster">
-        <img src="${getRailThumbUrl(movie)}" alt="${displayTitle}" loading="lazy">
       </span>
       <span class="hero__rail-copy">
         <span class="hero__rail-title">${displayTitle}</span>
@@ -255,9 +249,13 @@ export function renderHeroSlider(container, movies) {
       goToSlide(index);
       resetAutoRotate();
     });
-    const railImg = item.querySelector('img');
+    const railImg = document.createElement('img');
+    railImg.src = railSources.mobileSrc;
+    railImg.alt = displayTitle;
     applyImagePolicy(railImg, { priority: index === 0 });
     attachImageFallback(railImg);
+    const railPoster = item.querySelector('.hero__rail-poster');
+    railPoster.appendChild(createResponsivePicture(railImg, railSources));
     rail.appendChild(item);
     railButtons.push(item);
   });

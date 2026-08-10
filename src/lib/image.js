@@ -10,9 +10,44 @@ export function applyImagePolicy(img, { priority = false } = {}) {
   img.fetchPriority = priority ? 'high' : 'auto';
 }
 
-const TMDB_W500_URL_RE = /^(https:\/\/image\.tmdb\.org\/t\/p\/)w500\//;
+export const DESKTOP_IMAGE_MEDIA = '(min-width: 769px)';
 
-/** Use TMDB's smaller poster variant for movie cards. */
-export function toTmdbW185(url) {
-  return (url || '').replace(TMDB_W500_URL_RE, '$1w185/');
+export const RESPONSIVE_IMAGE_VARIANTS = Object.freeze({
+  heroRail: Object.freeze({ mobile: 'w154', desktop: 'w185' }),
+  posterCard: Object.freeze({ mobile: 'w185', desktop: 'w500' }),
+});
+
+// Poster variants are interchangeable. Do not include w1280: that is the
+// landscape backdrop contract and must remain untouched by card/rail policy.
+const TMDB_POSTER_VARIANT_RE = /^(https:\/\/image\.tmdb\.org\/t\/p\/)w(?:154|185|500)\//;
+
+/** Returns a TMDB poster URL at the requested width; other image hosts pass through. */
+export function toTmdbImageSize(url, size) {
+  return (url || '').replace(TMDB_POSTER_VARIANT_RE, `$1${size}/`);
+}
+
+/**
+ * Source contract for a responsive <picture>. Phase 2 owns rendering this
+ * object; keeping selection here makes the mobile/desktop policy testable
+ * without changing the current UI yet.
+ */
+export function getResponsiveTmdbSources(url, variants) {
+  return {
+    mobileSrc: toTmdbImageSize(url, variants.mobile),
+    desktopSrc: toTmdbImageSize(url, variants.desktop),
+    desktopMedia: DESKTOP_IMAGE_MEDIA,
+  };
+}
+
+/** Wraps an image in <picture> only when desktop needs a distinct source. */
+export function createResponsivePicture(img, sources) {
+  const picture = document.createElement('picture');
+  if (sources.desktopSrc !== sources.mobileSrc) {
+    const desktopSource = document.createElement('source');
+    desktopSource.media = sources.desktopMedia;
+    desktopSource.srcset = sources.desktopSrc;
+    picture.appendChild(desktopSource);
+  }
+  picture.appendChild(img);
+  return picture;
 }

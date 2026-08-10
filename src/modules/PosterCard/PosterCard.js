@@ -3,7 +3,12 @@
  */
 import { thumbUrl, posterUrl, upstreamFallback } from '../../api/ophim.js';
 import { navigate } from '../../router.js';
-import { applyImagePolicy, toTmdbW185 } from '../../lib/image.js';
+import {
+  RESPONSIVE_IMAGE_VARIANTS,
+  applyImagePolicy,
+  createResponsivePicture,
+  getResponsiveTmdbSources,
+} from '../../lib/image.js';
 import { getDisplayMovieTitle, getSeasonLabel } from '../../lib/movieTitle.js';
 
 function getImdbScore(movie) {
@@ -50,14 +55,19 @@ export function renderPosterCard(container, movie, rank = null, priority = false
   const img = document.createElement('img');
   img.className = 'movie-card__poster';
   const thumb = thumbUrl(movie.thumb_url);
-  img.src = toTmdbW185(thumb);
+  const sources = getResponsiveTmdbSources(thumb, RESPONSIVE_IMAGE_VARIANTS.posterCard);
+  img.src = sources.mobileSrc;
   img.alt = displayTitle;
   applyImagePolicy(img, { priority });
+
+  const picture = createResponsivePicture(img, sources);
 
   // Fallback on error: retry the upstream origin if the R2 copy is not there
   // yet, then fall back to the wide artwork.
   img.addEventListener('error', () => {
-    const upstream = upstreamFallback(img.src);
+    const failedSrc = img.currentSrc || img.src;
+    picture.querySelector('source')?.remove();
+    const upstream = upstreamFallback(failedSrc);
     if (upstream) {
       img.src = upstream;
       return;
@@ -68,7 +78,7 @@ export function renderPosterCard(container, movie, rank = null, priority = false
     }
   });
 
-  card.appendChild(img);
+  card.appendChild(picture);
 
   // ── Status/Quality Badge ──
   let badgeText = '';

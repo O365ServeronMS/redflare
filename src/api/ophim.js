@@ -206,7 +206,9 @@ export function upstreamFallback(url) {
 // Point an <img> at its upstream origin if the R2 copy is not there yet.
 export function attachImageFallback(img) {
   img.addEventListener('error', () => {
-    const upstream = upstreamFallback(img.src);
+    const failedSrc = img.currentSrc || img.src;
+    img.closest('picture')?.querySelector('source')?.remove();
+    const upstream = upstreamFallback(failedSrc);
     if (upstream) img.src = upstream;
   });
 }
