@@ -6,6 +6,7 @@ import { TmdbClient } from '../src-ssr/services/sync/tmdbClient.ts';
 import { RateLimiter } from '../src-ssr/services/sync/throttle.ts';
 import { syncOneMovie } from '../src-ssr/services/sync/syncMovie.ts';
 import { runRecommendationResolveTick } from '../src-ssr/services/sync/orchestrator.ts';
+import { RecommendationRepository } from '../src-ssr/repositories/recommendationRepository.ts';
 
 const originalFetch = globalThis.fetch;
 const instances = [];
@@ -66,10 +67,10 @@ test('classifies TMDB recommendation success, valid-empty, and retryable failure
   globalThis.fetch = async () => json({ message: 'busy' }, 429);
   assert.deepEqual(await client.getRecommendationIds('movie', 101, 15), { kind: 'retryable_error' });
 
-  globalThis.fetch = async () => {
   globalThis.fetch = async () => json({ message: 'upstream unavailable' }, 500);
   assert.deepEqual(await client.getRecommendationIds('movie', 101, 15), { kind: 'retryable_error' });
 
+  globalThis.fetch = async () => {
     throw new Error('timeout');
   };
   assert.deepEqual(await client.getRecommendationIds('movie', 101, 15), { kind: 'retryable_error' });
@@ -156,6 +157,7 @@ async function setupResolver(maxStubs = '0') {
   const db = await mf.getD1Database('DB');
   await db.batch([
     db.prepare('CREATE TABLE movie (slug TEXT PRIMARY KEY, tmdb_id INTEGER, tmdb_type TEXT, tier TEXT)'),
+    db.prepare('CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)'),
     db.prepare(
       'CREATE TABLE recommendation (slug TEXT NOT NULL, target_slug TEXT, target_tmdb_id INTEGER NOT NULL, target_type TEXT NOT NULL, sort_order INTEGER NOT NULL, resolve_attempted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (slug, target_tmdb_id, target_type))'
     ),
@@ -170,12 +172,16 @@ async function resolveState(db) {
   return db.prepare('SELECT target_slug, resolve_attempted FROM recommendation WHERE slug = ?').bind('source').first();
 }
 
+function resolveSummary(result) {
+  const { groupsSeen, resolvedToExisting, resolvedToStub, overflow, retryable } = result;
+  return { groupsSeen, resolvedToExisting, resolvedToStub, overflow, retryable };
+}
 test('KKPhim retryable failure leaves a recommendation target pending', async () => {
   const { db, env } = await setupResolver();
   globalThis.fetch = async () => json({ message: 'busy' }, 503);
 
   const result = await runRecommendationResolveTick(env);
-  assert.deepEqual(result, {
+  assert.deepEqual(resolveSummary(result), {
     groupsSeen: 1, resolvedToExisting: 0, resolvedToStub: 0, overflow: 0, retryable: 1,
   });
   assert.deepEqual(await resolveState(db), { target_slug: null, resolve_attempted: 0 });
@@ -186,7 +192,7 @@ test('KKPhim confirmed not-found is eligible for overflow when stubs are disable
   globalThis.fetch = async () => json({ status: false }, 404);
 
   const result = await runRecommendationResolveTick(env);
-  assert.deepEqual(result, {
+  assert.deepEqual(resolveSummary(result), {
     groupsSeen: 1, resolvedToExisting: 0, resolvedToStub: 0, overflow: 1, retryable: 0,
   });
   assert.deepEqual(await resolveState(db), { target_slug: null, resolve_attempted: 1 });
@@ -202,7 +208,7 @@ test('a found KKPhim target is not resolved when its sync fails', async () => {
   };
 
   const result = await runRecommendationResolveTick(env);
-  assert.deepEqual(result, {
+  assert.deepEqual(resolveSummary(result), {
     groupsSeen: 1, resolvedToExisting: 0, resolvedToStub: 0, overflow: 0, retryable: 1,
   });
   assert.deepEqual(await resolveState(db), { target_slug: null, resolve_attempted: 0 });
@@ -221,9 +227,50 @@ test('TMDB retryable failure while building a stub leaves the target pending', a
   };
 
   const result = await runRecommendationResolveTick(env);
-  assert.deepEqual(result, {
+  assert.deepEqual(resolveSummary(result), {
     groupsSeen: 1, resolvedToExisting: 0, resolvedToStub: 0, overflow: 0, retryable: 1,
   });
   assert.deepEqual(await resolveState(db), { target_slug: null, resolve_attempted: 0 });
+});
+test('requeues overflow only when its target is now local, then resolves idempotently without upstream', async () => {
+  const { db, env } = await setupResolver();
+  await db.batch([
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES (?, ?, ?, ?)').bind('source', 101, 'movie', 'catalog'),
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES (?, ?, ?, ?)').bind('local-target', 42, 'movie', 'catalog'),
+    db.prepare('UPDATE recommendation SET resolve_attempted = 1 WHERE slug = ?').bind('source'),
+  ]);
+  globalThis.fetch = async () => {
+    throw new Error('local resolution must not fetch upstream');
+  };
+
+  const first = await runRecommendationResolveTick(env);
+  assert.equal(first.requeueCandidates, 1);
+  assert.equal(first.requeued, 1);
+  assert.equal(first.resolvedToExisting, 1);
+  assert.equal(first.resolvedToStub, 0);
+  assert.equal(first.overflow, 0);
+  assert.equal(first.cacheTagsPurged, 1);
+  assert.deepEqual(await resolveState(db), { target_slug: 'local-target', resolve_attempted: 0 });
+
+  const second = await runRecommendationResolveTick(env);
+  assert.equal(second.groupsSeen, 0);
+  assert.equal(second.requeued, 0);
+  assert.equal(second.resolvedToExisting, 0);
+});
+test('dry-run selects only overflow groups eligible under the bounded-stub policy', async () => {
+  const { db } = await setupResolver();
+  await db.batch([
+    db.prepare('INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order, resolve_attempted) VALUES (?, NULL, ?, ?, 0, 1)')
+      .bind('second-source', 42, 'movie'),
+    db.prepare('INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order, resolve_attempted) VALUES (?, NULL, ?, ?, 0, 1)')
+      .bind('single-source', 99, 'movie'),
+    db.prepare('UPDATE recommendation SET resolve_attempted = 1 WHERE slug = ?').bind('source'),
+  ]);
+  const repo = new RecommendationRepository(db);
+
+  assert.deepEqual(await repo.getOverflowGroupsForRequeue(10, 2, false, null), []);
+  assert.deepEqual(await repo.getOverflowGroupsForRequeue(10, 2, true, null), [{
+    targetTmdbId: 42, targetType: 'movie', refCount: 2, hasLocalTarget: false,
+  }]);
 });
 

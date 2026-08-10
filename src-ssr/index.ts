@@ -6,6 +6,7 @@ import { syncRoute } from './routes/sync';
 import { securityHeaders } from './middleware/securityHeaders';
 import { requestSampler } from './middleware/requestSampler';
 import { runIncrementalSync, runBackfillTick, runRecommendationResolveTick } from './services/sync/orchestrator';
+import { runRecommendationRefreshTick } from './services/sync/recommendationRefresh';
 import { refreshHeroSnapshot } from './services/sync/heroSnapshot';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -70,6 +71,8 @@ export default {
         }
         const recommendation = await runRecommendationResolveTick(env);
         console.info('recommendation_resolve', recommendation);
+        const recommendationRefresh = await runRecommendationRefreshTick(env);
+        console.info('recommendation_refresh', recommendationRefresh);
         await runBackfillTick(env);
       })()
     );
