@@ -1,3 +1,4 @@
+import { cache } from 'cloudflare:workers';
 import type { Env } from '../../types/env';
 import { MovieRepository } from '../../repositories/movieRepository';
 import { EpisodeRepository } from '../../repositories/episodeRepository';
@@ -299,16 +300,116 @@ const RESOLVE_TICK_BUDGET_MS = 3 * 60 * 1000;
 // Groups considered per tick, upper bound -- the wall-time budget above is
 // what actually cuts a tick short in practice.
 const RESOLVE_BATCH_SIZE = 300;
+// Overflow is reopened separately before the resolver reads pending work. A
+// smaller page keeps D1 writes and cache invalidation bounded per cron.
+const REQUEUE_BATCH_SIZE = 100;
+const REQUEUE_CURSOR_KEY = 'recommendation:requeue_cursor';
+const CACHE_PURGE_TAGS_PER_CALL = 100;
 // ADR-0002 Finding 3: only materialize a stub for a target enough catalog
 // movies actually point at to be worth a whole extra D1 row + TMDB fetch.
 const STUB_MIN_REFCOUNT = 2;
 
 export interface ResolveTickResult {
   groupsSeen: number;
+  requeueCandidates: number;
+  requeued: number;
   resolvedToExisting: number;
   resolvedToStub: number;
   overflow: number;
   retryable: number;
+  cacheTagsPurged: number;
+  stubCount: number;
+  maxStubs: number;
+  durationMs: number;
+}
+
+type Repositories = ReturnType<typeof buildRepos>;
+
+function parseRequeueCursor(value: string | null) {
+  if (!value) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      typeof parsed !== 'object' || parsed === null
+      || typeof (parsed as Record<string, unknown>).hasLocalTarget !== 'boolean'
+      || !Number.isInteger((parsed as Record<string, unknown>).refCount)
+      || !['movie', 'tv'].includes((parsed as Record<string, unknown>).targetType as string)
+      || !Number.isInteger((parsed as Record<string, unknown>).targetTmdbId)
+    ) return null;
+    return parsed as {
+      hasLocalTarget: boolean;
+      refCount: number;
+      targetType: 'movie' | 'tv';
+      targetTmdbId: number;
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function requeueOverflowGroups(repos: Repositories, maxStubs: number, stubCount: number) {
+  let cursor = parseRequeueCursor(await repos.syncState.get(REQUEUE_CURSOR_KEY));
+  const includeStubEligible = maxStubs > stubCount;
+  let candidates = await repos.recommendation.getOverflowGroupsForRequeue(
+    REQUEUE_BATCH_SIZE, STUB_MIN_REFCOUNT, includeStubEligible, cursor
+  );
+
+  // An old cursor can point beyond a changed aggregate ordering. Restart once
+  // in the same tick; this is still a scoped group query, never a blind reset.
+  if (candidates.length === 0 && cursor) {
+    cursor = null;
+    await repos.syncState.delete(REQUEUE_CURSOR_KEY);
+    candidates = await repos.recommendation.getOverflowGroupsForRequeue(
+      REQUEUE_BATCH_SIZE, STUB_MIN_REFCOUNT, includeStubEligible, null
+    );
+  }
+
+  let stubSlots = Math.max(0, maxStubs - stubCount);
+  const requeue = candidates.filter((group) => {
+    if (group.hasLocalTarget) return true;
+    if (stubSlots === 0) return false;
+    stubSlots--;
+    return true;
+  });
+  await repos.recommendation.requeueAttemptedGroups(requeue);
+
+  const last = candidates[candidates.length - 1];
+  if (last && candidates.length === REQUEUE_BATCH_SIZE) {
+    await repos.syncState.set(REQUEUE_CURSOR_KEY, JSON.stringify(last));
+  } else {
+    await repos.syncState.delete(REQUEUE_CURSOR_KEY);
+  }
+
+  return { candidates: candidates.length, requeued: requeue.length };
+}
+
+async function purgeRecommendationCache(repos: Repositories, targetTmdbId: number, targetType: 'movie' | 'tv') {
+  const tags = await repos.recommendation.getSourceCacheTagsForTarget(targetTmdbId, targetType);
+  let purged = 0;
+  for (let i = 0; i < tags.length; i += CACHE_PURGE_TAGS_PER_CALL) {
+    try {
+      const chunk = tags.slice(i, i + CACHE_PURGE_TAGS_PER_CALL);
+      await cache.purge({ tags: chunk });
+      purged += chunk.length;
+    } catch {
+      break; // edge commit is already durable; the normal 60s TTL is safe fallback
+    }
+  }
+  return purged;
+}
+
+async function resolveTarget(
+  repos: Repositories,
+  targetTmdbId: number,
+  targetType: 'movie' | 'tv',
+  slug: string
+): Promise<number> {
+  await repos.recommendation.markResolved(targetTmdbId, targetType, slug);
+  try {
+    return await purgeRecommendationCache(repos, targetTmdbId, targetType);
+  } catch {
+    return 0;
+  }
 }
 
 /** Phase 4 (plan §4, ADR-0002 Finding 3) -- the three-tier recommendation
@@ -329,18 +430,21 @@ export interface ResolveTickResult {
  *   4. Otherwise -- overflow. markAttempted so it isn't re-fetched every
  *      tick; the edge stays in the table, unrendered, not deleted. */
 export async function runRecommendationResolveTick(env: Env): Promise<ResolveTickResult> {
+  const startedAt = Date.now();
   const repos = buildRepos(env);
   const clients = buildClients(env, 1);
-  const maxStubs = Number(env.MAX_STUBS ?? '0');
-
+  const configuredMaxStubs = Number(env.MAX_STUBS ?? '0');
+  const maxStubs = Number.isFinite(configuredMaxStubs) ? Math.max(0, Math.floor(configuredMaxStubs)) : 0;
+  let stubCount = maxStubs > 0 ? await repos.movie.countByTier('stub') : 0;
+  const requeue = await requeueOverflowGroups(repos, maxStubs, stubCount);
   const groups = await repos.recommendation.getUnresolvedGroupedByTarget(RESOLVE_BATCH_SIZE);
   const deadline = Date.now() + RESOLVE_TICK_BUDGET_MS;
 
-  let stubCount = maxStubs > 0 ? await repos.movie.countByTier('stub') : 0;
   let resolvedToExisting = 0;
   let resolvedToStub = 0;
   let overflow = 0;
   let retryable = 0;
+  let cacheTagsPurged = 0;
   let groupsSeen = 0;
 
   for (const { targetTmdbId, targetType, refCount } of groups) {
@@ -349,7 +453,7 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
 
     const local = await repos.movie.getByTmdbRef(targetType, targetTmdbId);
     if (local) {
-      await repos.recommendation.markResolved(targetTmdbId, targetType, local.slug);
+      cacheTagsPurged += await resolveTarget(repos, targetTmdbId, targetType, local.slug);
       resolvedToExisting++;
       continue;
     }
@@ -370,7 +474,7 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
         retryable++;
         continue;
       }
-      await repos.recommendation.markResolved(targetTmdbId, targetType, target.slug);
+      cacheTagsPurged += await resolveTarget(repos, targetTmdbId, targetType, target.slug);
       resolvedToExisting++;
       continue;
     }
@@ -384,7 +488,7 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
         const hash = hashMovie(stub);
         await repos.movie.upsertMany([{ movie: stub, hash }]);
         await repos.search.indexMovie(slug, stub.title, stub.originalTitle);
-        await repos.recommendation.markResolved(targetTmdbId, targetType, slug);
+        cacheTagsPurged += await resolveTarget(repos, targetTmdbId, targetType, slug);
         stubCount++;
         resolvedToStub++;
         continue;
@@ -399,5 +503,17 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
     overflow++;
   }
 
-  return { groupsSeen, resolvedToExisting, resolvedToStub, overflow, retryable };
+  return {
+    groupsSeen,
+    requeueCandidates: requeue.candidates,
+    requeued: requeue.requeued,
+    resolvedToExisting,
+    resolvedToStub,
+    overflow,
+    retryable,
+    cacheTagsPurged,
+    stubCount,
+    maxStubs,
+    durationMs: Date.now() - startedAt,
+  };
 }

@@ -8,6 +8,19 @@ export interface RecommendationEdge {
   targetType: TmdbType;
   sortOrder: number;
 }
+export interface RecommendationTargetGroup {
+  targetTmdbId: number;
+  targetType: TmdbType;
+  refCount: number;
+  hasLocalTarget: boolean;
+}
+
+export interface RecommendationRequeueCursor {
+  hasLocalTarget: boolean;
+  refCount: number;
+  targetType: TmdbType;
+  targetTmdbId: number;
+}
 
 export class RecommendationRepository {
   constructor(private readonly db: D1Database) {}
@@ -26,6 +39,41 @@ export class RecommendationRepository {
         const stmt = this.db.prepare(insertSql);
         for (const edge of chunk) {
           statements.push(stmt.bind(slug, null, edge.targetTmdbId, edge.targetType, edge.sortOrder));
+        }
+      }
+    }
+    await this.db.batch(statements);
+  }
+
+  /** Source-only refresh preserves slugs TMDB still returns, so rank refresh
+   * does not temporarily turn an already-rendering rail into pending edges. */
+  async replaceTargetsPreservingResolvedForSlug(slug: string, edges: readonly RecommendationEdge[]): Promise<void> {
+    const current = await this.db.prepare(
+      'SELECT target_tmdb_id, target_type, target_slug FROM recommendation WHERE slug = ?'
+    ).bind(slug).all<{ target_tmdb_id: number; target_type: string; target_slug: string | null }>();
+    const resolved = new Map((current.results ?? []).map((row) => [
+      `${row.target_type}:${row.target_tmdb_id}`, row.target_slug,
+    ]));
+    if (edges.length > 0) {
+      const predicates = edges.map(() => '(tmdb_type = ? AND tmdb_id = ?)').join(' OR ');
+      const local = await this.db.prepare(
+        `SELECT tmdb_id, tmdb_type, slug FROM movie
+         WHERE ${predicates}
+         ORDER BY CASE tier WHEN 'catalog' THEN 0 ELSE 1 END, slug ASC`
+      ).bind(...edges.flatMap((edge) => [edge.targetType, edge.targetTmdbId]))
+        .all<{ tmdb_id: number; tmdb_type: string; slug: string }>();
+      for (const row of local.results ?? []) {
+        const key = `${row.tmdb_type}:${row.tmdb_id}`;
+        if (!resolved.get(key)) resolved.set(key, row.slug);
+      }
+    }
+    const statements: D1PreparedStatement[] = [this.db.prepare('DELETE FROM recommendation WHERE slug = ?').bind(slug)];
+    if (edges.length > 0) {
+      const sql = `INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order) VALUES ${'(' + Array(REC_COLUMNS).fill('?').join(',') + ')'}`;
+      for (const chunk of chunkByParams(edges, REC_COLUMNS)) {
+        const statement = this.db.prepare(sql);
+        for (const edge of chunk) {
+          statements.push(statement.bind(slug, resolved.get(`${edge.targetType}:${edge.targetTmdbId}`) ?? null, edge.targetTmdbId, edge.targetType, edge.sortOrder));
         }
       }
     }
@@ -63,29 +111,102 @@ export class RecommendationRepository {
     return res.results ?? [];
   }
 
-  /** Unresolved edges grouped by target, most-referenced first -- the order
-   * Phase 4's resolve step works through (ADR-0002 Finding 3: materialize
-   * stubs for the targets that pay off the most first). Excludes edges
-   * already marked resolve_attempted -- a target that resolved to nothing
-   * (not in the local catalog, not on KKPhim, not stub-eligible) would
-   * otherwise cost a fresh KKPhim/TMDB fetch on every single tick forever. */
-  async getUnresolvedGroupedByTarget(
-    limit: number
-  ): Promise<{ targetTmdbId: number; targetType: TmdbType; refCount: number }[]> {
+  /** Unresolved groups are processed local-first, then by fan-out. That
+   * keeps a title that has just reached the catalog off the upstream path. */
+  async getUnresolvedGroupedByTarget(limit: number): Promise<RecommendationTargetGroup[]> {
     const res = await this.db
       .prepare(
-        `SELECT target_tmdb_id, target_type, COUNT(*) as ref_count
-         FROM recommendation WHERE target_slug IS NULL AND resolve_attempted = 0
-         GROUP BY target_tmdb_id, target_type
-         ORDER BY ref_count DESC LIMIT ?`
+        `SELECT r.target_tmdb_id, r.target_type, COUNT(*) AS ref_count,
+                MAX(CASE WHEN m.slug IS NOT NULL THEN 1 ELSE 0 END) AS has_local_target
+         FROM recommendation r
+         LEFT JOIN movie m ON m.tmdb_id = r.target_tmdb_id AND m.tmdb_type = r.target_type
+         WHERE r.target_slug IS NULL AND r.resolve_attempted = 0
+         GROUP BY r.target_tmdb_id, r.target_type
+         ORDER BY has_local_target DESC, ref_count DESC, r.target_type ASC, r.target_tmdb_id ASC
+         LIMIT ?`
       )
       .bind(limit)
-      .all<{ target_tmdb_id: number; target_type: string; ref_count: number }>();
+      .all<{ target_tmdb_id: number; target_type: string; ref_count: number; has_local_target: number }>();
     return (res.results ?? []).map((r) => ({
       targetTmdbId: r.target_tmdb_id,
       targetType: r.target_type as TmdbType,
       refCount: r.ref_count,
+      hasLocalTarget: r.has_local_target === 1,
     }));
+  }
+
+  /** Pages only overflow groups that have become actionable. The cursor is
+   * over the aggregate priority order, avoiding a table-wide reset. */
+  async getOverflowGroupsForRequeue(
+    limit: number,
+    minStubRefCount: number,
+    includeStubEligible: boolean,
+    cursor: RecommendationRequeueCursor | null
+  ): Promise<RecommendationTargetGroup[]> {
+    const cursorClause = cursor
+      ? `AND (
+           has_local_target < ? OR
+           (has_local_target = ? AND ref_count < ?) OR
+           (has_local_target = ? AND ref_count = ? AND target_type > ?) OR
+           (has_local_target = ? AND ref_count = ? AND target_type = ? AND target_tmdb_id > ?)
+         )`
+      : '';
+    const binds: (number | string)[] = [includeStubEligible ? 1 : 0, minStubRefCount];
+    if (cursor) {
+      const local = cursor.hasLocalTarget ? 1 : 0;
+      binds.push(local, local, cursor.refCount, local, cursor.refCount, cursor.targetType, local, cursor.refCount, cursor.targetType, cursor.targetTmdbId);
+    }
+    binds.push(limit);
+    const res = await this.db
+      .prepare(
+        `WITH grouped AS (
+           SELECT r.target_tmdb_id, r.target_type, COUNT(*) AS ref_count,
+                  MAX(CASE WHEN m.slug IS NOT NULL THEN 1 ELSE 0 END) AS has_local_target
+           FROM recommendation r
+           LEFT JOIN movie m ON m.tmdb_id = r.target_tmdb_id AND m.tmdb_type = r.target_type
+           WHERE r.target_slug IS NULL AND r.resolve_attempted = 1
+           GROUP BY r.target_tmdb_id, r.target_type
+         )
+         SELECT target_tmdb_id, target_type, ref_count, has_local_target
+         FROM grouped
+         WHERE (has_local_target = 1 OR (? = 1 AND ref_count >= ?))
+         ${cursorClause}
+         ORDER BY has_local_target DESC, ref_count DESC, target_type ASC, target_tmdb_id ASC
+         LIMIT ?`
+      )
+      .bind(...binds)
+      .all<{ target_tmdb_id: number; target_type: string; ref_count: number; has_local_target: number }>();
+    return (res.results ?? []).map((r) => ({
+      targetTmdbId: r.target_tmdb_id,
+      targetType: r.target_type as TmdbType,
+      refCount: r.ref_count,
+      hasLocalTarget: r.has_local_target === 1,
+    }));
+  }
+
+  async requeueAttemptedGroups(groups: readonly RecommendationTargetGroup[]): Promise<void> {
+    if (groups.length === 0) return;
+    await this.db.batch(groups.map((group) => this.db
+      .prepare(
+        `UPDATE recommendation SET resolve_attempted = 0
+         WHERE target_tmdb_id = ? AND target_type = ?
+           AND target_slug IS NULL AND resolve_attempted = 1`
+      )
+      .bind(group.targetTmdbId, group.targetType)));
+  }
+
+  /** Source detail API tags to purge after a target-group edge write commits. */
+  async getSourceCacheTagsForTarget(targetTmdbId: number, targetType: TmdbType): Promise<string[]> {
+    const res = await this.db
+      .prepare(
+        `SELECT DISTINCT m.tmdb_type, m.tmdb_id
+         FROM recommendation r JOIN movie m ON m.slug = r.slug
+         WHERE r.target_tmdb_id = ? AND r.target_type = ?
+           AND m.tmdb_id IS NOT NULL AND m.tmdb_type IN ('movie', 'tv')`
+      )
+      .bind(targetTmdbId, targetType)
+      .all<{ tmdb_type: TmdbType; tmdb_id: number }>();
+    return (res.results ?? []).map((row) => `recommendation:${row.tmdb_type}:${row.tmdb_id}`);
   }
 
   /** Resolves every edge sharing this (target_tmdb_id, target_type) to a

@@ -16,6 +16,9 @@ export class SyncStateRepository {
       .bind(key, value, Math.floor(Date.now() / 1000))
       .run();
   }
+  async delete(key: string): Promise<void> {
+    await this.db.prepare('DELETE FROM sync_state WHERE key = ?').bind(key).run();
+  }
 
   private rowsKey(date = new Date()): string {
     return `rows:${date.toISOString().slice(0, 10)}`;

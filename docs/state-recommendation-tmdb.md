@@ -2,9 +2,9 @@
 
 **Plan:** [plan-recommendation-tmdb.md](plan-recommendation-tmdb.md)  
 **Ngày tạo:** 2026-08-10  
-**Overall:** F1 complete locally — production rollout pending authorization  
-**Current phase:** F2 — Not started  
-**Publish authorized:** No  
+**Overall:** F3 implemented and verified locally — production migration/deploy pending review
+**Current phase:** F3 — Needs review
+**Publish authorized:** Deploy A only; F3 migration/Deploy B not authorized
 
 > Đây là nguồn tracking duy nhất cho feature này. Agent tiếp theo đọc snapshot, decision ledger và
 > checklist của phase hiện tại; không suy trạng thái từ chat.
@@ -90,9 +90,9 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 | Phase | Mục tiêu | Status | Checkpoint |
 |---|---|---|---|
 | F0 | Baseline + contract + plan/state | **Complete** | D1 read-only evidence + docs |
-| F1 | Failure semantics + last-good | **Not started** | Tests outage/empty/sync guard |
-| F2 | Requeue + bounded stubs | **Not started** | ≥95% resolved, stub ≤ cap |
-| F3 | Source freshness + repair | **Not started** | 137 source được phân loại/repair |
+| F1 | Failure semantics + last-good | **Needs review** | Deploy A published; cron-cycle evidence pending |
+| F2 | Requeue + bounded stubs | **Needs review** | Local requeue/cap tests pass; production gate pending |
+| F3 | Source freshness + repair | **Needs review** | Migration + 3 refresh fixtures pass locally |
 | F4 | Cache/API/UI resilience | **Not started** | loading/empty/error/retry verified |
 | F5 | Rollout + browser QA + close | **Not started** | screenshots + KPI + rollback evidence |
 
@@ -126,42 +126,44 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 - [x] Resolver check sync outcome + target row trước mark resolved.
 - [x] Log summary chỉ gồm resolver counters, không chứa secret/payload.
 - [x] Typecheck/tests/build/diff-check pass.
-- [ ] Deploy A chỉ khi được authorize; `MAX_STUBS` vẫn 0.
+- [x] Deploy A authorized và published với `MAX_STUBS=0`.
 
-**Evidence:** `tests/recommendationFailureSafety.test.mjs` 7/7 pass: TMDB success/empty/429/500/invalid JSON/timeout; last-good preserve; KKPhim retryable vs confirmed not-found; failed target sync; TMDB stub retry. `npm run worker:typecheck`, `npm run build`, Hero 11/11 và season-poster 3/3 pass.  
-**Blocker:** Deploy A/production verification cần authorization riêng.  
-**Rollback:** code-only rollback; schema/config chưa đổi.  
-**Next exact action:** F2 dry-run cho eligible overflow groups, chỉ sau khi F1 Deploy A được authorize và verify.
+**Evidence:** `tests/recommendationFailureSafety.test.mjs` 7/7 pass: TMDB success/empty/429/500/invalid JSON/timeout; last-good preserve; KKPhim retryable vs confirmed not-found; failed target sync; TMDB stub retry. `npm run worker:typecheck`, `npm run build`, Hero 11/11 và season-poster 3/3 pass. Deploy A production: version `f8a24d18-b7ba-4b77-8241-08fc712c9cbc`, published 2026-08-10 05:23 UTC; `MAX_STUBS=0` verified by Wrangler deployment output.
+**Blocker:** cần evidence một cron cycle/status trước rollout cap stub.
+**Rollback:** rollback Worker version; `MAX_STUBS` vẫn 0 nên không có stub write từ Deploy A.
+**Next exact action:** wait một cron cycle, đọc counters `recommendation_resolve`/status, rồi mới authorize Deploy B.
 
 ## F2 — Requeue + bounded stubs
 
-- [ ] Viết dry-run/query test cho eligible group.
-- [ ] Implement cursor/batch requeue idempotent.
-- [ ] Ưu tiên local-existing rồi refCount cao.
-- [ ] Giữ overflow refCount 1.
+- [x] Viết dry-run/query test cho eligible group.
+- [x] Implement cursor/batch requeue idempotent.
+- [x] Ưu tiên local-existing rồi refCount cao.
+- [x] Giữ overflow refCount 1.
 - [ ] Bật cap 20.000 chỉ sau F1 production verify.
 - [ ] Requeue 10.743 baseline groups theo batch.
-- [ ] Purge source recommendation cache sau commit.
-- [ ] Theo dõi storage/write/upstream/duration guards.
+- [x] Purge source recommendation cache sau commit.
+- [x] Theo dõi `requeueCandidates`, `requeued`, `stubCount`, cap, cache tags và duration.
 - [ ] Verify resolved ≥95%, stub ≤ cap, dangling=0.
 
-**Evidence:** pending  
-**Blocker:** F1 chưa complete; production authorization chưa có.  
+**Evidence:** `tests/recommendationFailureSafety.test.mjs` 9/9 pass, bao gồm dry-run policy refCount≥2 và overflow→local requeue idempotent không gọi upstream. `npm run worker:typecheck`, `npm run build`, `git diff --check` pass.
+**Blocker:** Deploy A đã publish nhưng chưa có evidence cron cycle; giữ `MAX_STUBS=0` cho đến khi F1 soak xong. Preflight production vẫn phải đo quota/D1 headroom trước khi đổi cap.
 **Rollback:** `MAX_STUBS=0`, dừng requeue, không xóa stub trong incident.
+**Next exact action:** wait một cron cycle, kiểm tra counters/status rồi mới authorize Deploy B.
 
 ## F3 — Source freshness + repair
 
-- [ ] Chốt migration freshness schema.
-- [ ] Implement source-only refresh, atomic last-good semantics.
-- [ ] Reuse resolved target/local lookup để tránh rail tụt tạm thời.
-- [ ] Scheduler oldest-first, TTL mặc định 14 ngày, batch bounded.
-- [ ] Repair 137 baseline source thiếu edge.
-- [ ] Phân loại repaired/valid-empty/retryable.
-- [ ] Metrics/status + tests + migration verification pass.
+- [x] Chốt migration freshness schema.
+- [x] Implement source-only refresh, atomic last-good semantics.
+- [x] Reuse resolved target/local lookup để tránh rail tụt tạm thời.
+- [x] Scheduler oldest-first, TTL mặc định 14 ngày, batch bounded; retry backoff 30 phút.
+- [ ] Repair 137 baseline source thiếu edge trên production.
+- [x] Phân loại repaired/valid-empty/retryable.
+- [x] Metrics log + tests + migration fixture verification pass.
 
-**Evidence:** pending  
-**Blocker:** F1 contracts chưa complete.  
-**Rollback:** disable scheduler; freshness columns/table giữ nguyên, không ảnh hưởng read path.
+**Evidence:** `tests/recommendationRefresh.test.mjs` 3/3 pass: retryable giữ last-good và backoff; success giữ rank/resolved slug + pre-resolve local; valid-empty được ghi rõ. Recommendation safety 9/9, Hero 11/11, season-poster 4/4, Worker typecheck, Vite build và `git diff --check` pass.
+**Blocker:** cần PR review/merge và authorization riêng trước khi apply migration `0011` hoặc deploy F3 scheduler.
+**Rollback:** disable scheduler; freshness table giữ nguyên, không ảnh hưởng read path.
+**Next exact action:** review/merge draft PR; sau đó authorize migration + staged F3 deploy.
 
 ## F4 — Cache/API/UI resilience
 
