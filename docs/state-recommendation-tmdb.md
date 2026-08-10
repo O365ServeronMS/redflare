@@ -2,9 +2,9 @@
 
 **Plan:** [plan-recommendation-tmdb.md](plan-recommendation-tmdb.md)  
 **Ngày tạo:** 2026-08-10  
-**Overall:** F3 implemented and verified locally — production migration/deploy pending review
-**Current phase:** F3 — Needs review
-**Publish authorized:** Deploy A only; F3 migration/Deploy B not authorized
+**Overall:** F3 deployed — production repair is running with first-cycle evidence
+**Current phase:** F3 — In progress
+**Publish authorized:** Deploy A + F3 migration/scheduler; bounded stubs remain disabled
 
 > Đây là nguồn tracking duy nhất cho feature này. Agent tiếp theo đọc snapshot, decision ledger và
 > checklist của phase hiện tại; không suy trạng thái từ chat.
@@ -21,6 +21,8 @@
 | API limit | 12 card |
 | TMDB candidates/source | 15 |
 | Stub policy production | `MAX_STUBS=0` |
+| F3 production version | `62c7e9b5-438f-4fa0-98d1-76d155ef3df3` |
+| F3 first verified cycle | 16/16 success; 0 valid-empty; 0 retryable error at 2026-08-10 06:33 UTC |
 | Backfill | Complete: `backfill:done=1`, type index 4 |
 | Browser evidence | Chưa có; session F0 không có browser capture capability |
 | Production writes F0 | Không; mọi D1 query `rows_written=0` |
@@ -92,7 +94,7 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 | F0 | Baseline + contract + plan/state | **Complete** | D1 read-only evidence + docs |
 | F1 | Failure semantics + last-good | **Needs review** | Deploy A published; cron-cycle evidence pending |
 | F2 | Requeue + bounded stubs | **Needs review** | Local requeue/cap tests pass; production gate pending |
-| F3 | Source freshness + repair | **Needs review** | Migration + 3 refresh fixtures pass locally |
+| F3 | Source freshness + repair | **In progress** | Migration deployed; first cron cycle wrote 16/16 success |
 | F4 | Cache/API/UI resilience | **Not started** | loading/empty/error/retry verified |
 | F5 | Rollout + browser QA + close | **Not started** | screenshots + KPI + rollback evidence |
 
@@ -156,14 +158,17 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 - [x] Implement source-only refresh, atomic last-good semantics.
 - [x] Reuse resolved target/local lookup để tránh rail tụt tạm thời.
 - [x] Scheduler oldest-first, TTL mặc định 14 ngày, batch bounded; retry backoff 30 phút.
+- [x] Apply migration `0011_recommendation_freshness.sql` trên production.
+- [x] Deploy scheduler version `62c7e9b5-438f-4fa0-98d1-76d155ef3df3` với `MAX_STUBS=0`.
+- [x] Verify cron đầu tiên ghi 16 source: 16 success, 0 valid-empty, 0 retryable error.
 - [ ] Repair 137 baseline source thiếu edge trên production.
 - [x] Phân loại repaired/valid-empty/retryable.
 - [x] Metrics log + tests + migration fixture verification pass.
 
-**Evidence:** `tests/recommendationRefresh.test.mjs` 3/3 pass: retryable giữ last-good và backoff; success giữ rank/resolved slug + pre-resolve local; valid-empty được ghi rõ. Recommendation safety 9/9, Hero 11/11, season-poster 4/4, Worker typecheck, Vite build và `git diff --check` pass.
-**Blocker:** cần PR review/merge và authorization riêng trước khi apply migration `0011` hoặc deploy F3 scheduler.
+**Evidence:** `tests/recommendationRefresh.test.mjs` 3/3 pass: retryable giữ last-good và backoff; success giữ rank/resolved slug + pre-resolve local; valid-empty được ghi rõ. Recommendation safety 9/9, Hero 11/11, season-poster 4/4, Worker typecheck, Vite build và `git diff --check` pass. PR #5 squash-merged tại `9f0d082`; migration `0011` applied; production version `62c7e9b5-438f-4fa0-98d1-76d155ef3df3`. D1 read-only verification lúc 2026-08-10 06:33 UTC: 16 freshness rows, toàn bộ `success`, query ghi 0 row.
+**Blocker:** chưa đủ chu kỳ để phân loại/repair toàn bộ 137 source baseline; F2 bounded stubs vẫn chủ động tắt (`MAX_STUBS=0`).
 **Rollback:** disable scheduler; freshness table giữ nguyên, không ảnh hưởng read path.
-**Next exact action:** review/merge draft PR; sau đó authorize migration + staged F3 deploy.
+**Next exact action:** theo dõi các cron kế tiếp cho đến khi 137 source baseline được repair hoặc phân loại `valid_empty`/`retryable_error`.
 
 ## F4 — Cache/API/UI resilience
 
@@ -182,7 +187,7 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 ## F5 — Rollout + QA + close
 
 - [ ] Deploy A safety soak ít nhất một cron cycle.
-- [ ] Apply freshness migration khi authorized.
+- [x] Apply freshness migration khi authorized.
 - [ ] Deploy B bounded-stub/requeue khi authorized.
 - [ ] Monitor cron/error/write/storage/cache metrics.
 - [ ] Desktop 1440×900 screenshots accepted.
