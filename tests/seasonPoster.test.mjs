@@ -39,14 +39,19 @@ const seriesDetail = {
   poster_path: '/series-poster.jpg',
 };
 
-test('uses a distinct TMDB poster for each TV season', () => {
+test('uses the source-specific poster for each TV season', () => {
   const seasonOne = normalizeMovie(kkSeason(1), seriesDetail, { poster_path: '/season-1.jpg' }, []);
   const seasonTwo = normalizeMovie(kkSeason(2), seriesDetail, { poster_path: '/season-2.jpg' }, []);
 
-  assert.equal(seasonOne.thumbPath, 'https://image.tmdb.org/t/p/w500/season-1.jpg');
-  assert.equal(seasonTwo.thumbPath, 'https://image.tmdb.org/t/p/w500/season-2.jpg');
+  assert.equal(seasonOne.thumbPath, 'https://phimimg.com/season-1.jpg');
+  assert.equal(seasonTwo.thumbPath, 'https://phimimg.com/season-2.jpg');
   assert.notEqual(seasonOne.thumbPath, seasonTwo.thumbPath);
   assert.equal(seasonOne.posterPath, 'https://image.tmdb.org/t/p/w1280/series-backdrop.jpg');
+});
+
+test('uses a TMDB season poster when the source has none', () => {
+  const movie = normalizeMovie(kkSeason(2, ''), seriesDetail, { poster_path: '/season-2.jpg' }, []);
+  assert.equal(movie.thumbPath, 'https://image.tmdb.org/t/p/w500/season-2.jpg');
 });
 
 test('falls back to the season-specific KKPhim poster before the shared series poster', () => {

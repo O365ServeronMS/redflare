@@ -44,7 +44,9 @@ function mapEpisodes(kk: KkphimDetailResponse): EpisodeRecord[] {
 
 /** Field ownership follows CLAUDE.md's "Field ownership: OPhim vs TMDB"
  * table, ported to the KKPhim replacement source: TMDB overrides
- * name/origin_name/poster/thumb/vote/overview/year/trailer when present;
+ * name/origin_name/poster/vote/overview/year/trailer when present. A TV
+ * season thumbnail is KKPhim-owned when available because the upstream
+ * record distinguishes seasons even where TMDB reuses its artwork;
  * everything else (taxonomy, slug, episodes, badges) is KKPhim-owned. */
 export function normalizeMovie(
   kk: KkphimDetailResponse,
@@ -73,7 +75,7 @@ export function normalizeMovie(
     ? `${TMDB_IMG}/${POSTER_SIZE}${tmdbSeasonDetail.poster_path}`
     : '';
   const thumbPath = tmdbSeason
-    ? first(seasonThumbFromTmdb, m.thumb_url, seriesThumbFromTmdb)
+    ? first(m.thumb_url, seasonThumbFromTmdb, seriesThumbFromTmdb)
     : first(seriesThumbFromTmdb, m.thumb_url);
 
   const posterPath = first(posterFromTmdb, m.poster_url ?? undefined);
