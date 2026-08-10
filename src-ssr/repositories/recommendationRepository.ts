@@ -32,6 +32,22 @@ export class RecommendationRepository {
     await this.db.batch(statements);
   }
 
+  /** Reads last-good target refs when a TMDB recommendation request fails. */
+  async getTargetsForSlug(slug: string): Promise<RecommendationEdge[]> {
+    const res = await this.db
+      .prepare(
+        `SELECT target_tmdb_id, target_type, sort_order FROM recommendation
+         WHERE slug = ? ORDER BY sort_order`
+      )
+      .bind(slug)
+      .all<{ target_tmdb_id: number; target_type: string; sort_order: number }>();
+    return (res.results ?? []).map((row) => ({
+      targetTmdbId: row.target_tmdb_id,
+      targetType: row.target_type as TmdbType,
+      sortOrder: row.sort_order,
+    }));
+  }
+
   /** The detail page's 3rd query (plan §3.1) -- a single JOIN, not a loop
    * over getBySlugs for each target. Rows with target_slug still NULL
    * (unresolved -- Phase 4 hasn't run, or the target never resolved) are

@@ -98,27 +98,14 @@ export class KkphimClient {
    * getDetail). Used by the recommendation resolver (Phase 4) to check
    * whether a TMDB recommendation target exists on KKPhim at all, without
    * guessing via keyword search. */
-  async getByTmdbRef(type: 'movie' | 'tv', tmdbId: number): Promise<KkphimDetailResponse | null> {
-    await this.limiter.wait();
-    const res = await fetchWithTimeout(`${KKPHIM_BASE}/tmdb/${type}/${tmdbId}`);
-    if (!res) return null;
-    const data = await res.json<KkphimDetailResponse>().catch(() => null);
-    return data?.status && data.movie ? data : null;
-  }
-
-  /** Hero-only exact lookup. Unlike the older nullable method above, this
-   * preserves the difference between a confirmed absence and an upstream
-   * failure so a transient KKPhim outage cannot replace the last-good Hero
-   * snapshot with a partial list. */
-  async getMovieByTmdbId(tmdbId: number): Promise<KkphimTmdbLookupResult> {
+  async getByTmdbRef(type: 'movie' | 'tv', tmdbId: number): Promise<KkphimTmdbLookupResult> {
     await this.limiter.wait();
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 5000);
     try {
-      const res = await fetch(`${KKPHIM_BASE}/tmdb/movie/${tmdbId}`, { signal: ctrl.signal });
+      const res = await fetch(`${KKPHIM_BASE}/tmdb/${type}/${tmdbId}`, { signal: ctrl.signal });
       if (res.status === 404) return { kind: 'not_found' };
       if (!res.ok) return { kind: 'retryable_error', status: res.status };
-
       const data: unknown = await res.json().catch(() => null);
       if (isConfirmedNotFound(data)) return { kind: 'not_found' };
       if (!isDetailResponse(data)) return { kind: 'retryable_error', status: res.status };
@@ -128,6 +115,14 @@ export class KkphimClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** Hero-only exact lookup. Unlike the older nullable method above, this
+   * preserves the difference between a confirmed absence and an upstream
+   * failure so a transient KKPhim outage cannot replace the last-good Hero
+   * snapshot with a partial list. */
+  async getMovieByTmdbId(tmdbId: number): Promise<KkphimTmdbLookupResult> {
+    return this.getByTmdbRef('movie', tmdbId);
   }
 
   /** One page of the "recently updated" feed, used by the incremental sync

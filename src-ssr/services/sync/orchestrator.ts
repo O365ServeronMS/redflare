@@ -308,6 +308,7 @@ export interface ResolveTickResult {
   resolvedToExisting: number;
   resolvedToStub: number;
   overflow: number;
+  retryable: number;
 }
 
 /** Phase 4 (plan §4, ADR-0002 Finding 3) -- the three-tier recommendation
@@ -339,6 +340,7 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
   let resolvedToExisting = 0;
   let resolvedToStub = 0;
   let overflow = 0;
+  let retryable = 0;
   let groupsSeen = 0;
 
   for (const { targetTmdbId, targetType, refCount } of groups) {
@@ -353,19 +355,32 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
     }
 
     const onKkphim = await clients.kkphim.getByTmdbRef(targetType, targetTmdbId);
-    if (onKkphim) {
-      await syncOneMovie(env, onKkphim.movie.slug, clients, repos);
-      await repos.recommendation.markResolved(targetTmdbId, targetType, onKkphim.movie.slug);
+    if (onKkphim.kind === 'retryable_error') {
+      retryable++;
+      continue;
+    }
+    if (onKkphim.kind === 'found') {
+      const synced = await syncOneMovie(env, onKkphim.data.movie.slug, clients, repos);
+      if (synced.outcome !== 'written' && synced.outcome !== 'unchanged') {
+        retryable++;
+        continue;
+      }
+      const target = await repos.movie.getBySlug(onKkphim.data.movie.slug);
+      if (!target) {
+        retryable++;
+        continue;
+      }
+      await repos.recommendation.markResolved(targetTmdbId, targetType, target.slug);
       resolvedToExisting++;
       continue;
     }
 
     if (maxStubs > 0 && refCount >= STUB_MIN_REFCOUNT && stubCount < maxStubs) {
-      const tmdbDetail = await clients.tmdb.getDetail(targetType, targetTmdbId);
-      const rawTitle = tmdbDetail?.title || tmdbDetail?.name;
-      if (tmdbDetail && rawTitle) {
+      const tmdbDetail = await clients.tmdb.getDetailResult(targetType, targetTmdbId);
+      const rawTitle = tmdbDetail.kind === 'success' ? tmdbDetail.data.title || tmdbDetail.data.name : '';
+      if (tmdbDetail.kind === 'success' && rawTitle) {
         const slug = slugifyStub(rawTitle, targetType, targetTmdbId);
-        const stub = normalizeStubMovie(slug, tmdbDetail, targetTmdbId, targetType);
+        const stub = normalizeStubMovie(slug, tmdbDetail.data, targetTmdbId, targetType);
         const hash = hashMovie(stub);
         await repos.movie.upsertMany([{ movie: stub, hash }]);
         await repos.search.indexMovie(slug, stub.title, stub.originalTitle);
@@ -374,11 +389,15 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
         resolvedToStub++;
         continue;
       }
+      if (tmdbDetail.kind === 'retryable_error') {
+        retryable++;
+        continue;
+      }
     }
 
     await repos.recommendation.markAttempted(targetTmdbId, targetType);
     overflow++;
   }
 
-  return { groupsSeen, resolvedToExisting, resolvedToStub, overflow };
+  return { groupsSeen, resolvedToExisting, resolvedToStub, overflow, retryable };
 }

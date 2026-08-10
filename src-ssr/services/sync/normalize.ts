@@ -1,5 +1,5 @@
 import type { KkphimDetailResponse } from './kkphimClient';
-import type { TmdbDetail } from './tmdbClient';
+import type { TmdbDetail, TmdbSeasonDetail } from './tmdbClient';
 import type { EpisodeRecord, NormalizedMovie, TaxonomyRef, TmdbType } from '../../types/movie';
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p';
@@ -49,12 +49,16 @@ function mapEpisodes(kk: KkphimDetailResponse): EpisodeRecord[] {
 export function normalizeMovie(
   kk: KkphimDetailResponse,
   tmdb: TmdbDetail | null,
+  tmdbSeasonDetail: TmdbSeasonDetail | null,
   recommendationTmdbIds: number[]
 ): NormalizedMovie {
   const m = kk.movie;
   const tmdbId = m.tmdb?.id ? Number(m.tmdb.id) : null;
   const tmdbType: TmdbType | null = m.tmdb?.type === 'tv' ? 'tv' : m.tmdb?.type === 'movie' ? 'movie' : null;
-  const tmdbSeason = tmdbType === 'tv' && m.tmdb?.season ? Number(m.tmdb.season) : null;
+  const rawTmdbSeason = Number(m.tmdb?.season);
+  const tmdbSeason = tmdbType === 'tv' && Number.isInteger(rawTmdbSeason) && rawTmdbSeason > 0
+    ? rawTmdbSeason
+    : null;
 
   const tmdbTitle = tmdb ? readableTitle(tmdb.title || tmdb.name) : '';
   const tmdbOriginal = tmdb ? readableTitle(tmdb.original_title || tmdb.original_name) : '';
@@ -64,7 +68,13 @@ export function normalizeMovie(
   ) ?? tmdb?.videos?.results?.find((v) => v.site === 'YouTube' && v.type === 'Trailer');
 
   const posterFromTmdb = tmdb?.backdrop_path ? `${TMDB_IMG}/${BACKDROP_SIZE}${tmdb.backdrop_path}` : '';
-  const thumbFromTmdb = tmdb?.poster_path ? `${TMDB_IMG}/${POSTER_SIZE}${tmdb.poster_path}` : '';
+  const seriesThumbFromTmdb = tmdb?.poster_path ? `${TMDB_IMG}/${POSTER_SIZE}${tmdb.poster_path}` : '';
+  const seasonThumbFromTmdb = tmdbSeason && tmdbSeasonDetail?.poster_path
+    ? `${TMDB_IMG}/${POSTER_SIZE}${tmdbSeasonDetail.poster_path}`
+    : '';
+  const thumbPath = tmdbSeason
+    ? first(seasonThumbFromTmdb, m.thumb_url, seriesThumbFromTmdb)
+    : first(seriesThumbFromTmdb, m.thumb_url);
 
   const posterPath = first(posterFromTmdb, m.poster_url ?? undefined);
   const usesTmdbPoster = posterPath === posterFromTmdb && posterFromTmdb !== '';
@@ -81,7 +91,7 @@ export function normalizeMovie(
     originalTitle: first(tmdbOriginal, m.origin_name),
     overview: first(tmdb?.overview, stripHtml(m.content)),
     posterPath,
-    thumbPath: thumbFromTmdb || null,
+    thumbPath: thumbPath || null,
     posterHost: usesTmdbPoster ? 'tmdb' : 'phimimg',
     releaseYear: tmdbDate ? Number(tmdbDate.slice(0, 4)) : m.year || null,
     runtime: m.time,

@@ -68,7 +68,8 @@ export default {
           // Do not let an unexpected Hero failure starve later cron jobs.
           console.error('hero_snapshot_refresh_failed', error);
         }
-        await runRecommendationResolveTick(env);
+        const recommendation = await runRecommendationResolveTick(env);
+        console.info('recommendation_resolve', recommendation);
         await runBackfillTick(env);
       })()
     );

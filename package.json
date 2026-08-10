@@ -12,6 +12,8 @@
     "test:hero-snapshot": "node --test tests/heroSnapshotRepository.test.mjs",
     "test:hero-refresh": "esbuild tests/heroSnapshotRefresh.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/heroSnapshotRefresh.bundle.mjs && node --test tests/heroSnapshotRefresh.bundle.mjs && node -e \"require('fs').rmSync('tests/heroSnapshotRefresh.bundle.mjs', { force: true })\"",
     "test:hero-home-data": "esbuild tests/heroHomeData.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/heroHomeData.bundle.mjs && node --test tests/heroHomeData.bundle.mjs && node -e \"require('fs').rmSync('tests/heroHomeData.bundle.mjs', { force: true })\"",
+    "test:recommendation-safety": "esbuild tests/recommendationFailureSafety.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/recommendationFailureSafety.bundle.mjs && node --test tests/recommendationFailureSafety.bundle.mjs && node -e \"require('fs').rmSync('tests/recommendationFailureSafety.bundle.mjs', { force: true })\"",
+    "test:season-poster": "esbuild tests/seasonPoster.test.mjs --bundle --platform=node --format=esm --outfile=tests/seasonPoster.bundle.mjs && node --test tests/seasonPoster.bundle.mjs && node -e \"require('fs').rmSync('tests/seasonPoster.bundle.mjs', { force: true })\"",
     "db:migrate": "wrangler d1 migrations apply redflare-db --remote"
   },
   "devDependencies": {

@@ -6,7 +6,7 @@ import { RecommendationRepository } from '../../repositories/recommendationRepos
 import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
 import { SearchRepository } from '../../repositories/searchRepository';
 import { KkphimClient } from './kkphimClient';
-import { TmdbClient } from './tmdbClient';
+import { TmdbClient, type TmdbRecommendationResult } from './tmdbClient';
 import { normalizeMovie } from './normalize';
 import { hashMovie } from './hash';
 
@@ -44,16 +44,27 @@ export async function syncOneMovie(
 
     const tmdbId = detail.movie.tmdb?.id ? Number(detail.movie.tmdb.id) : null;
     const tmdbType = detail.movie.tmdb?.type === 'tv' ? 'tv' : detail.movie.tmdb?.type === 'movie' ? 'movie' : null;
+    const rawTmdbSeason = Number(detail.movie.tmdb?.season);
+    const tmdbSeason = tmdbType === 'tv' && Number.isInteger(rawTmdbSeason) && rawTmdbSeason > 0
+      ? rawTmdbSeason
+      : null;
 
-    const [tmdbDetail, recIds] =
+    const [tmdbDetail, tmdbSeasonDetail, recommendation] =
       tmdbId && tmdbType
         ? await Promise.all([
             clients.tmdb.getDetail(tmdbType, tmdbId),
+            tmdbSeason ? clients.tmdb.getSeasonDetail(tmdbId, tmdbSeason) : null,
             clients.tmdb.getRecommendationIds(tmdbType, tmdbId, TMDB_RECOMMENDATION_CANDIDATES),
           ])
-        : [null, []];
+        : [null, null, { kind: 'success', ids: [] } as TmdbRecommendationResult];
 
-    const movie = normalizeMovie(detail, tmdbDetail, recIds);
+    // Retryable failures keep the last-good refs: they are not valid empty
+    // results and must not remove an already-populated recommendation rail.
+    const recIds = recommendation.kind === 'success'
+      ? recommendation.ids
+      : (await repos.recommendation.getTargetsForSlug(slug)).map((target) => target.targetTmdbId);
+
+    const movie = normalizeMovie(detail, tmdbDetail, tmdbSeasonDetail, recIds);
     const hash = hashMovie(movie);
 
     const existingHash = (await repos.movie.getHashesBySlugs([slug])).get(slug);
@@ -61,15 +72,21 @@ export async function syncOneMovie(
 
     const written = await repos.movie.upsertMany([{ movie, hash }]);
     await repos.episode.replaceForSlug(slug, movie.episodes);
-    await repos.recommendation.replaceTargetsForSlug(
-      slug,
-      movie.recommendationTargets.map((t, i) => ({ targetTmdbId: t.tmdbId, targetType: t.tmdbType, sortOrder: i }))
-    );
+    if (recommendation.kind === 'success') {
+      await repos.recommendation.replaceTargetsForSlug(
+        slug,
+        movie.recommendationTargets.map((t, i) => ({ targetTmdbId: t.tmdbId, targetType: t.tmdbType, sortOrder: i }))
+      );
+    }
     await repos.taxonomy.syncMovieTaxonomy(slug, movie.genres, movie.countries);
     await repos.search.indexMovie(slug, movie.title, movie.originalTitle);
 
     const rowsWritten =
-      written + movie.episodes.length + movie.recommendationTargets.length + movie.genres.length * 2 + movie.countries.length * 2;
+      written
+      + movie.episodes.length
+      + (recommendation.kind === 'success' ? movie.recommendationTargets.length : 0)
+      + movie.genres.length * 2
+      + movie.countries.length * 2;
 
     // Purges detail + player (both tagged `movie:<slug>`, Phase 5). List/
     // genre/country pages that include this title are NOT purged here --

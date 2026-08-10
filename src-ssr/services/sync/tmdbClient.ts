@@ -19,9 +19,21 @@ export interface TmdbDetail {
   videos?: { results?: { site: string; type: string; official: boolean; key: string }[] };
 }
 
+export interface TmdbSeasonDetail {
+  poster_path?: string | null;
+}
+
 export interface TmdbRecommendation {
   id: number;
 }
+
+export type TmdbDetailResult =
+  | { kind: 'success'; data: TmdbDetail }
+  | { kind: 'retryable_error'; status?: number };
+
+export type TmdbRecommendationResult =
+  | { kind: 'success'; ids: number[] }
+  | { kind: 'retryable_error'; status?: number };
 
 export interface TmdbTrendingMovie {
   /** Original index in TMDB's first page. Gaps are intentional after
@@ -65,26 +77,55 @@ export class TmdbClient {
   }
 
   async getDetail(type: TmdbType, id: number): Promise<TmdbDetail | null> {
-    if (!this.token) return null;
+    const result = await this.getDetailResult(type, id);
+    return result.kind === 'success' ? result.data : null;
+  }
+
+  /** Preserve a transient failure so recommendation resolve can retry later. */
+  async getDetailResult(type: TmdbType, id: number): Promise<TmdbDetailResult> {
+    if (!this.token) return { kind: 'retryable_error' };
     await this.limiter.wait();
     const res = await fetchWithTimeout(
       `${TMDB_API}/${type}/${id}?language=vi-VN&append_to_response=videos`,
       this.token
     );
+    if (!res) return { kind: 'retryable_error' };
+    const data: unknown = await res.json().catch(() => null);
+    if (!isRecord(data)) return { kind: 'retryable_error' };
+    return { kind: 'success', data: data as TmdbDetail };
+  }
+
+  async getSeasonDetail(seriesId: number, seasonNumber: number): Promise<TmdbSeasonDetail | null> {
+    if (!this.token) return null;
+    await this.limiter.wait();
+    const res = await fetchWithTimeout(
+      `${TMDB_API}/tv/${seriesId}/season/${seasonNumber}?language=vi-VN`,
+      this.token
+    );
     if (!res) return null;
-    return res.json<TmdbDetail>().catch(() => null);
+    return res.json<TmdbSeasonDetail>().catch(() => null);
   }
 
   /** Top-N recommendation ids in rank order -- the raw ids only. Resolving
    * them to catalog slugs (or promoting to stubs) is Phase 4's job, not
    * this client's. */
-  async getRecommendationIds(type: TmdbType, id: number, limit: number): Promise<number[]> {
-    if (!this.token) return [];
+  async getRecommendationIds(type: TmdbType, id: number, limit: number): Promise<TmdbRecommendationResult> {
+    if (!this.token) return { kind: 'retryable_error' };
     await this.limiter.wait();
     const res = await fetchWithTimeout(`${TMDB_API}/${type}/${id}/recommendations?language=vi-VN`, this.token);
-    if (!res) return [];
-    const data = await res.json<{ results?: TmdbRecommendation[] }>().catch(() => null);
-    return (data?.results ?? []).slice(0, limit).map((r) => r.id);
+    if (!res) return { kind: 'retryable_error' };
+    const data: unknown = await res.json().catch(() => null);
+    if (!isRecord(data) || !Array.isArray(data.results)) return { kind: 'retryable_error' };
+    const ids: number[] = [];
+    const seen = new Set<number>();
+    for (const item of data.results) {
+      const candidate = isRecord(item) ? item.id : undefined;
+      if (!Number.isInteger(candidate) || (candidate as number) <= 0 || seen.has(candidate as number)) continue;
+      seen.add(candidate as number);
+      ids.push(candidate as number);
+      if (ids.length === limit) break;
+    }
+    return { kind: 'success', ids };
   }
 
   /** TMDB's weekly movie window is the sole Hero candidate source. Keep the
@@ -121,4 +162,8 @@ function isTrendingMovie(value: unknown): value is { id: number; media_type?: 'm
   // value is malformed and must never become a Hero candidate.
   return Number.isInteger(candidate.id) && (candidate.id as number) > 0
     && (candidate.media_type === undefined || candidate.media_type === 'movie');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
