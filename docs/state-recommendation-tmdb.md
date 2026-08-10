@@ -2,9 +2,9 @@
 
 **Plan:** [plan-recommendation-tmdb.md](plan-recommendation-tmdb.md)  
 **Ngày tạo:** 2026-08-10  
-**Overall:** F3 deployed — production repair is running with first-cycle evidence
-**Current phase:** F3 — In progress
-**Publish authorized:** Deploy A + F3 migration/scheduler; bounded stubs remain disabled
+**Overall:** F2 stub pilot authorized; F3 production repair continues
+**Current phase:** F2 — In progress
+**Publish authorized:** Deploy A + F3 migration/scheduler + F2 pilot (`MAX_STUBS=1000`)
 
 > Đây là nguồn tracking duy nhất cho feature này. Agent tiếp theo đọc snapshot, decision ledger và
 > checklist của phase hiện tại; không suy trạng thái từ chat.
@@ -20,7 +20,7 @@
 | UI | `MovieDetail` lazy-mount `Recommendation`; error/empty đều bị ẩn |
 | API limit | 12 card |
 | TMDB candidates/source | 15 |
-| Stub policy production | `MAX_STUBS=0` |
+| Stub policy production | F2 pilot `MAX_STUBS=1000` (pending deploy verification) |
 | F3 production version | `62c7e9b5-438f-4fa0-98d1-76d155ef3df3` |
 | F3 first verified cycle | 16/16 success; 0 valid-empty; 0 retryable error at 2026-08-10 06:33 UTC |
 | Backfill | Complete: `backfill:done=1`, type index 4 |
@@ -93,7 +93,7 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 |---|---|---|---|
 | F0 | Baseline + contract + plan/state | **Complete** | D1 read-only evidence + docs |
 | F1 | Failure semantics + last-good | **Needs review** | Deploy A published; cron-cycle evidence pending |
-| F2 | Requeue + bounded stubs | **Needs review** | Local requeue/cap tests pass; production gate pending |
+| F2 | Requeue + bounded stubs | **In progress** | Approved pilot cap 1.000; deploy + soak pending |
 | F3 | Source freshness + repair | **In progress** | Migration deployed; first cron cycle wrote 16/16 success |
 | F4 | Cache/API/UI resilience | **Not started** | loading/empty/error/retry verified |
 | F5 | Rollout + browser QA + close | **Not started** | screenshots + KPI + rollback evidence |
@@ -141,16 +141,16 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 - [x] Implement cursor/batch requeue idempotent.
 - [x] Ưu tiên local-existing rồi refCount cao.
 - [x] Giữ overflow refCount 1.
-- [ ] Bật cap 20.000 chỉ sau F1 production verify.
+- [x] Chốt pilot cap 1.000 sau F1/F3 production verify.
 - [ ] Requeue 10.743 baseline groups theo batch.
 - [x] Purge source recommendation cache sau commit.
 - [x] Theo dõi `requeueCandidates`, `requeued`, `stubCount`, cap, cache tags và duration.
 - [ ] Verify resolved ≥95%, stub ≤ cap, dangling=0.
 
 **Evidence:** `tests/recommendationFailureSafety.test.mjs` 9/9 pass, bao gồm dry-run policy refCount≥2 và overflow→local requeue idempotent không gọi upstream. `npm run worker:typecheck`, `npm run build`, `git diff --check` pass.
-**Blocker:** Deploy A đã publish nhưng chưa có evidence cron cycle; giữ `MAX_STUBS=0` cho đến khi F1 soak xong. Preflight production vẫn phải đo quota/D1 headroom trước khi đổi cap.
-**Rollback:** `MAX_STUBS=0`, dừng requeue, không xóa stub trong incident.
-**Next exact action:** wait một cron cycle, kiểm tra counters/status rồi mới authorize Deploy B.
+**Blocker:** pending deploy và soak pilot; không tăng cap khi chưa có cron evidence. Preflight: 0 stub hiện hữu, 10.026 overflow group đủ điều kiện `refCount>=2`, D1 khoảng 173 MB.
+**Rollback:** đặt `MAX_STUBS=0`, dừng requeue, không xóa stub trong incident.
+**Next exact action:** deploy `MAX_STUBS=1000`, rồi theo dõi cron metrics trong 3–6 giờ trước khi cân nhắc tăng lên 5.000.
 
 ## F3 — Source freshness + repair
 
