@@ -163,16 +163,22 @@ fallback `data.item`; `episodes` đọc `item.episodes || data.episodes ||
 data.data?.episodes` — cứ trả đúng shape trên là khớp nhánh đầu tiên, không cần lo các
 nhánh fallback.
 
-## 5. `GET /api/search?keyword=&page=`
+## 5. `POST /api/search`
 
-Nguồn: [ophim.js:100-108](../src/api/ophim.js#L100),
-[SearchOverlay.js:227-256](../src/modules/SearchOverlay/SearchOverlay.js#L227).
+Nguồn: [ophim.js](../src/api/ophim.js),
+[SearchOverlay.js](../src/modules/SearchOverlay/SearchOverlay.js).
 
-Cùng shape §2b. SearchOverlay chỉ gọi **không truyền `page`** (mặc định 1) — debounce
-400ms, huỷ request cũ bằng `AbortController` khi gõ tiếp. Không có logic phân trang trong
-overlay — trang 2 trở đi (nếu FE nào khác gọi) trả rỗng là chấp nhận được, không phải lỗi.
-100% client-side: lịch sử tìm kiếm (`localStorage`), debounce, empty-state — **không cần
-thay đổi gì phía FE**.
+Body là `application/x-www-form-urlencoded`:
+
+- `keyword`: từ khoá tìm kiếm.
+- `page`: mặc định 1; overlay không có phân trang.
+- `cf-turnstile-response`: token Turnstile action `search`, bắt buộc và single-use.
+
+Worker gọi Siteverify trước khi chạy FTS5, yêu cầu `success === true`, action `search`
+và hostname nằm trong `TURNSTILE_HOSTNAMES`. Thiếu/sai/hết hạn/replay token trả
+`403 forbidden`; response luôn `private, no-store`. Khi hợp lệ, response giữ nguyên
+shape §2b. SearchOverlay debounce 400ms, huỷ request cũ bằng `AbortController`, rồi
+reset widget sau mỗi attempt để request sau nhận token mới.
 
 ## 6. `GET /api/recommendation/:mediaType/:tmdbId` (+ alias `/api/related/:mediaType/:tmdbId`)
 

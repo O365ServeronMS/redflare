@@ -1867,7 +1867,34 @@
   display: flex;
   align-items: center;
   gap: 24px;
-  margin-bottom: 48px;
+  margin-bottom: 20px;
+}
+
+.search-overlay__verification {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 65px;
+  margin-bottom: 24px;
+}
+
+.search-overlay__turnstile {
+  min-width: 300px;
+  min-height: 65px;
+}
+
+.search-overlay__verification-status {
+  margin: 0;
+  color: #b3b3b3;
+  font-size: 14px;
+}
+
+.search-overlay__verification-status:empty {
+  display: none;
+}
+
+.search-overlay__verification-status--error {
+  color: #ff8a8f;
 }
 
 .search-overlay__input-wrapper {
@@ -2085,7 +2112,16 @@
   }
   .search-overlay__header {
     gap: 16px;
-    margin-bottom: 32px;
+    margin-bottom: 16px;
+  }
+  .search-overlay__verification {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .search-overlay__turnstile {
+    max-width: 100%;
   }
   .search-overlay__input-icon svg {
     width: 24px;

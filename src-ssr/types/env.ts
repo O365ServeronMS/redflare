@@ -4,6 +4,8 @@ export interface Env {
   ASSETS: Fetcher;
   CRON_KEY?: string;
   TMDB_API_TOKEN?: string;
+  TURNSTILE_SECRET?: string;
+  TURNSTILE_HOSTNAMES?: string;
   /** 'free' (governed, cron-paced) | 'burst' (Paid, throttled only by upstream politeness). */
   BACKFILL_MODE?: 'free' | 'burst';
   /** Global cap on stub-tier movies (ADR-0002 Finding 3) -- a string

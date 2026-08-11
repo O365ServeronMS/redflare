@@ -92,15 +92,28 @@ export async function getMovieDetail(slug) {
 }
 
 /**
- * Search movies by keyword
+ * Search movies by keyword. Search intentionally bypasses the shared GET
+ * cache because every Turnstile token can be redeemed only once.
  * @param {string} keyword
- * @param {number} page
+ * @param {string} turnstileToken
+ * @param {{page?: number, signal?: AbortSignal}} [options]
  * @returns {Promise<{items: Array, pagination: Object}>}
  */
-export async function searchMovies(keyword, page = 1) {
-  const data = await fetchJson(
-    `${CATALOG_BASE}/api/search?keyword=${encodeURIComponent(keyword)}&page=${page}`
-  );
+export async function searchMovies(keyword, turnstileToken, { page = 1, signal } = {}) {
+  const body = new URLSearchParams({
+    keyword,
+    page: String(page),
+    'cf-turnstile-response': turnstileToken,
+  });
+  const res = await fetch(`${CATALOG_BASE}/api/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+    signal,
+  });
+  if (!res.ok) throw new Error(`API Error: ${res.status} ${res.statusText}`);
+
+  const data = await res.json();
   const d = data.data || data;
   return {
     items: (d.items || []).map(normalizeListItem),

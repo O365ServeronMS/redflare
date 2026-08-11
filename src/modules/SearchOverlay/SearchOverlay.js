@@ -10,6 +10,31 @@ import { renderPosterCard } from '../PosterCard/PosterCard.js';
 const RECENT_SEARCHES_KEY = 'bluesia-recent-searches';
 const MAX_RECENT = 8; // Increased slightly for pills layout
 const DEBOUNCE_MS = 400;
+const TURNSTILE_SITEKEY = '0x4AAAAAAEMrWp9ESv4_-T5g';
+const TURNSTILE_ACTION = 'search';
+const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+
+let turnstileLoadPromise = null;
+
+function loadTurnstile() {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (turnstileLoadPromise) return turnstileLoadPromise;
+
+  turnstileLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = TURNSTILE_SCRIPT_URL;
+    script.async = true;
+    script.defer = true;
+    script.addEventListener('load', () => {
+      if (window.turnstile) resolve(window.turnstile);
+      else reject(new Error('Turnstile API unavailable'));
+    }, { once: true });
+    script.addEventListener('error', () => reject(new Error('Turnstile API failed to load')), { once: true });
+    document.head.appendChild(script);
+  });
+
+  return turnstileLoadPromise;
+}
 
 // ---------------------------------------------------------------------------
 // Recent searches helpers
@@ -135,13 +160,31 @@ export function renderSearchOverlay(container) {
   content.appendChild(resultsGrid);
   content.appendChild(emptyState);
 
+  const verification = document.createElement('div');
+  verification.className = 'search-overlay__verification';
+
+  const turnstileContainer = document.createElement('div');
+  turnstileContainer.className = 'search-overlay__turnstile';
+
+  const verificationStatus = document.createElement('p');
+  verificationStatus.className = 'search-overlay__verification-status';
+  verificationStatus.setAttribute('aria-live', 'polite');
+  verificationStatus.textContent = 'Đang tải xác minh bảo mật…';
+
+  verification.appendChild(turnstileContainer);
+  verification.appendChild(verificationStatus);
+
   overlay.appendChild(header);
+  overlay.appendChild(verification);
   overlay.appendChild(content);
   container.appendChild(overlay);
 
   // ---- Internal state ----
   let debounceTimer = null;
   let abortController = null;
+  let widgetId = null;
+  let turnstileToken = '';
+  let pendingKeyword = '';
 
   // ---- Helpers ----
 
@@ -154,9 +197,11 @@ export function renderSearchOverlay(container) {
   function close() {
     overlay.classList.remove('search-overlay--open');
     input.value = '';
+    pendingKeyword = '';
     clearResults();
     if (debounceTimer) clearTimeout(debounceTimer);
     if (abortController) abortController.abort();
+    resetTurnstile();
   }
 
   function clearResults() {
@@ -207,7 +252,7 @@ export function renderSearchOverlay(container) {
       btn.textContent = term;
       btn.addEventListener('click', () => {
         input.value = term;
-        performSearch(term);
+        queueSearch(term);
       });
 
       const removeBtn = document.createElement('button');
@@ -233,23 +278,53 @@ export function renderSearchOverlay(container) {
     resultsGrid.appendChild(createSkeletonCards(10));
   }
 
-  async function performSearch(keyword) {
-    if (!keyword || !keyword.trim()) {
+  function setVerificationStatus(message, isError = false) {
+    verificationStatus.textContent = message;
+    verificationStatus.classList.toggle('search-overlay__verification-status--error', isError);
+  }
+
+  function resetTurnstile() {
+    turnstileToken = '';
+    if (widgetId !== null && window.turnstile) {
+      setVerificationStatus('Đang làm mới xác minh bảo mật…');
+      window.turnstile.reset(widgetId);
+    }
+  }
+
+  function queueSearch(keyword) {
+    const normalized = keyword?.trim() ?? '';
+    if (!normalized) {
+      pendingKeyword = '';
       showRecent();
       return;
     }
 
-    // Cancel any in-flight request
+    pendingKeyword = normalized;
+    if (!turnstileToken) {
+      setVerificationStatus('Đang chờ xác minh bảo mật…');
+      return;
+    }
+
+    const token = turnstileToken;
+    turnstileToken = '';
+    pendingKeyword = '';
+    void performSearch(normalized, token);
+  }
+
+  async function performSearch(keyword, token) {
+    // Cancel any in-flight request. Its token may already have been redeemed,
+    // so every completed attempt resets the widget before another search.
     if (abortController) abortController.abort();
-    abortController = new AbortController();
+    const controller = new AbortController();
+    abortController = controller;
 
     showSkeletons();
 
     try {
-      const { items } = await searchMovies(keyword.trim());
+      const { items } = await searchMovies(keyword, token, { signal: controller.signal });
 
       // Guard against stale results (user may have typed something else)
-      if (input.value.trim() !== keyword.trim()) return;
+      if (input.value.trim() !== keyword) return;
 
       resultsGrid.innerHTML = '';
       recentSection.style.display = 'none';
@@ -268,14 +343,46 @@ export function renderSearchOverlay(container) {
         resultsGrid.appendChild(cardWrapper);
       });
 
-      saveRecentSearch(keyword.trim());
+      saveRecentSearch(keyword);
     } catch (err) {
       if (err.name === 'AbortError') return;
       resultsGrid.innerHTML = '';
       emptyState.innerHTML = '<p>Đã xảy ra lỗi khi tìm kiếm. Vui lòng thử lại.</p>';
       emptyState.style.display = 'flex';
+    } finally {
+      if (abortController === controller) abortController = null;
+      resetTurnstile();
     }
   }
+
+  loadTurnstile()
+    .then((turnstile) => {
+      if (!overlay.isConnected || widgetId !== null) return;
+      widgetId = turnstile.render(turnstileContainer, {
+        sitekey: TURNSTILE_SITEKEY,
+        action: TURNSTILE_ACTION,
+        theme: 'dark',
+        callback(token) {
+          turnstileToken = token;
+          setVerificationStatus('');
+          if (overlay.classList.contains('search-overlay--open') && pendingKeyword) {
+            queueSearch(pendingKeyword);
+          }
+        },
+        'expired-callback'() {
+          turnstileToken = '';
+          setVerificationStatus('Xác minh đã hết hạn. Đang thử lại…');
+          if (widgetId !== null) turnstile.reset(widgetId);
+        },
+        'error-callback'() {
+          turnstileToken = '';
+          setVerificationStatus('Không thể xác minh. Vui lòng thử lại.', true);
+        },
+      });
+    })
+    .catch(() => {
+      setVerificationStatus('Không thể tải xác minh bảo mật. Vui lòng tải lại trang.', true);
+    });
 
   // ---- Event handlers ----
 
@@ -299,7 +406,7 @@ export function renderSearchOverlay(container) {
     }
 
     debounceTimer = setTimeout(() => {
-      performSearch(keyword);
+      queueSearch(keyword);
     }, DEBOUNCE_MS);
   }
 
@@ -325,6 +432,7 @@ export function renderSearchOverlay(container) {
     input.removeEventListener('input', handleInput);
     if (debounceTimer) clearTimeout(debounceTimer);
     if (abortController) abortController.abort();
+    if (widgetId !== null && window.turnstile) window.turnstile.remove(widgetId);
     overlay.remove();
   };
 }

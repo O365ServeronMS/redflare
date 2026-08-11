@@ -87,6 +87,9 @@ database_id = "40c364b3-10a8-4d03-bd51-60debe94610a"
 [vars]
 BACKFILL_MODE = "burst"
 MAX_STUBS = "1000"
+# Siteverify must match the hostname of the frontend that produced the token.
+# Localhost belongs only in a local override, never in this production value.
+TURNSTILE_HOSTNAMES = "phim.bluesia.net"
 
 # Single cron: drives BOTH incremental sync (plan §2.1) and, since
 # 2026-08-07, the Phase 7 backfill walk (services/sync/orchestrator.ts

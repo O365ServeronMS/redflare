@@ -190,7 +190,11 @@ apiRoute.post('/api/search', async (c) => {
       }),
     });
     if (!response.ok) throw new Error(`siteverify ${response.status}`);
-    verification = await response.json();
+    const payload: unknown = await response.json();
+    if (payload === null || typeof payload !== 'object') {
+      throw new Error('invalid siteverify response');
+    }
+    verification = payload as { success?: boolean; action?: string; hostname?: string };
   } catch {
     applyNoStore(c);
     return c.text('forbidden', 403);

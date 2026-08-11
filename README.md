@@ -181,7 +181,7 @@ Entrypoint: `src-ssr/index.ts`. Worker chỉ nhận những route nằm trong `a
 | `GET` | `/api/list?type=&page=` | Phim mới hoặc danh sách theo type |
 | `GET` | `/api/genre?slug=&page=` | Grid theo thể loại |
 | `GET` | `/api/country?slug=&page=` | Grid theo quốc gia |
-| `GET` | `/api/search?keyword=&page=1` | FTS5 search, tối đa 24 kết quả |
+| `POST` | `/api/search` | FTS5 search, yêu cầu Turnstile token, tối đa 24 kết quả |
 | `GET` | `/api/recommendation/:mediaType/:tmdbId` | Tối đa 12 phim đã resolve |
 | `GET` | `/api/related/:mediaType/:tmdbId` | Alias tương thích |
 
@@ -377,7 +377,7 @@ Backfill toàn catalog tự chạy và resume bằng cron. `/__sync/backfill-pag
 curl -I https://<your-domain>/
 curl -I https://<your-domain>/phim/<known-slug>
 curl https://<your-domain>/api/home-data
-curl https://<your-domain>/api/search?keyword=bach%20ho
+curl -i -X POST https://<your-domain>/api/search --data 'keyword=bach ho&page=1'
 curl https://<your-domain>/robots.txt
 curl -H "x-cron-key: $CRON_KEY" https://<your-domain>/__sync/status
 ```
@@ -386,6 +386,7 @@ Kỳ vọng:
 
 - `/` và deep link trả cùng SPA shell.
 - `/api/home-data` trả JSON, không phải HTML.
+- `/api/search` thiếu Turnstile token trả `403`; smoke test thành công chạy từ search overlay trên trình duyệt.
 - `/api/khong-ton-tai` trả `404`, không rơi vào SPA fallback.
 - `/__sync/status` thiếu/sai key trả `404` + `no-store`.
 - `/assets/*` có cache immutable.

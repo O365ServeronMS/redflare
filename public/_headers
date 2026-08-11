@@ -1,5 +1,5 @@
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' https://image.tmdb.org https://phimimg.com data:; media-src 'self' blob: https:; connect-src 'self' https:; worker-src blob:; frame-src https://player.phimapi.com https://www.youtube.com; object-src 'none'; base-uri 'none'; frame-ancestors 'self'
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' https://image.tmdb.org https://phimimg.com data:; media-src 'self' blob: https:; connect-src 'self' https:; worker-src blob:; frame-src https://player.phimapi.com https://www.youtube.com https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'self'
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
