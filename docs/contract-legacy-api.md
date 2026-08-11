@@ -178,7 +178,10 @@ Worker gọi Siteverify trước khi chạy FTS5, yêu cầu `success === true`,
 và hostname nằm trong `TURNSTILE_HOSTNAMES`. Thiếu/sai/hết hạn/replay token trả
 `403 forbidden`; response luôn `private, no-store`. Khi hợp lệ, response giữ nguyên
 shape §2b. SearchOverlay debounce 400ms, huỷ request cũ bằng `AbortController`, rồi
-reset widget sau mỗi attempt để request sau nhận token mới.
+chạy Invisible Turnstile theo `execution: "execute"` chỉ khi debounce hoàn tất. Widget
+không chiếm layout; nếu keyword thay đổi trong lúc challenge/request đang chạy, chỉ
+keyword mới nhất được giữ lại. Sau mỗi attempt, widget reset để request kế tiếp nhận
+token single-use mới.
 
 ## 6. `GET /api/recommendation/:mediaType/:tmdbId` (+ alias `/api/related/:mediaType/:tmdbId`)
 

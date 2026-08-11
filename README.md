@@ -154,7 +154,7 @@ Router dùng HTML5 History API và intercept link nội bộ. Cloudflare Static 
 | `Carousel` | Hàng poster ngang + arrow desktop + eased scrolling |
 | `PosterCard` | Poster, badge/metadata overlay, navigation, ảnh `w185` |
 | `Grid` | Grid danh mục + numbered pagination |
-| `SearchOverlay` | Overlay blur toàn màn hình + recent searches |
+| `SearchOverlay` | Overlay blur + recent searches + Invisible Turnstile khi debounce hoàn tất |
 | `MovieDetail` | Backdrop, metadata, episodes, trailer, recommendation |
 | `Player` | ArtPlayer/hls.js, recovery, iframe fallback, Media Session |
 | `Header` | Nav, search, mobile menu, sticky global back button |
