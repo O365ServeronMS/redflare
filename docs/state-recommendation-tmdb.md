@@ -2,8 +2,8 @@
 
 **Plan:** [plan-recommendation-tmdb.md](plan-recommendation-tmdb.md)  
 **Ngày tạo:** 2026-08-10  
-**Overall:** F2 stub pilot deployed and healthy; F3 production repair continues; corrective track C fixes a verified missing TMDB identity for Game of Thrones in House of the Dragon recommendations.
-**Current phase:** C4 — In progress (approved production migration and deploy)
+**Overall:** F2 stub pilot deployed and healthy; F3 production repair continues; corrective track C is production-verified for Game of Thrones in House of the Dragon recommendations.
+**Current phase:** F3 — In progress (corrective track C complete)
 **Publish authorized:** Deploy A + F3 migration/scheduler + F2 pilot (`MAX_STUBS=1000`)
 
 > Đây là nguồn tracking duy nhất cho feature này. Agent tiếp theo đọc snapshot, decision ledger và
@@ -212,11 +212,13 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 | C1 | Confirm root cause and preserve existing canonical slug | **Complete** | `tv/1399` candidates could not match because all eight catalog seasons lack upstream TMDB identity; no duplicate stub is created. |
 | C2 | Add reviewed slug-to-TMDB override data and effective identity in sync | **Complete** | Migration `0012_tmdb_override.sql`; exact mapping seasons 1–8 to TMDB `tv/1399`. |
 | C3 | Resolve edges through local override even when stub cap is full | **Complete** | Canonical resolver/requeue joins `tmdb_override`; regression suite covers an override before catalog re-sync. |
-| C4 | Apply migration, deploy Worker, and verify production recommendation output | **In progress** | Local migration and full validation pass. Awaiting approved remote migration/deploy and scheduled resolver evidence. |
+| C4 | Apply migration, deploy Worker, and verify production recommendation output | **Complete** | `0012` applied; Worker `94c17d2e-697b-497a-9c8a-cb3656a2b183` deployed; production API/D1 read-back pass. |
 
 **Root cause:** KKPhim and phimapi return `tmdb: null` for the existing Game of Thrones catalog records. The original resolver used only `movie.tmdb_type/tmdb_id`, so the 23 pending `tv/1399` edges from House of the Dragon could never resolve to the already-streamable `tro-choi-vuong-quyen-phan-1` page. Raising `MAX_STUBS` risks a duplicate placeholder and does not repair identity.
 
 **C4 acceptance:** all `tv/1399` House of the Dragon edges resolve to the existing season 1 slug; the recommendation API returns that slug at TMDB rank 0; no `game-of-thrones-tv-1399` stub is created. Re-syncing the eight catalog rows is a follow-up only if an authenticated batch trigger is available; it is not required for the render path after C3.
+
+**C4 production evidence — 2026-08-11 03:16 UTC:** migration `0012_tmdb_override.sql` applied remotely; Worker `94c17d2e-697b-497a-9c8a-cb3656a2b183` deployed with dashboard `MAX_STUBS=1000` preserved. Read-back: 8 verified override rows, 23/23 `tv/1399` edges resolve to `tro-choi-vuong-quyen-phan-1`; `gia-toc-rong-phan-3` keeps `sort_order=0`; public API returns that slug first; duplicate `game-of-thrones-tv-1399` stub count is 0.
 
 ---
 
