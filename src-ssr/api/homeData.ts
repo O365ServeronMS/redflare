@@ -23,15 +23,14 @@ export interface HomeData {
 /** Built per request from D1 (no runtime KKPhim/TMDB call, ADR-0002
  * Principle 3). The old architecture pre-built this into KV via an hourly
  * cron; here it's cheap enough to read from D1 on demand and let Workers
- * Caching (max-age=60) absorb the load. Five small indexed reads. */
+ * Caching (max-age=60) absorb the load. Four small indexed reads. */
 export async function buildHomeData(db: D1Database): Promise<HomeData> {
   const repo = new MovieRepository(db);
   const heroSnapshot = new HeroSnapshotRepository(db);
-  const [newMovies, phimLe, phimBo, trending, hero] = await Promise.all([
+  const [newMovies, phimLe, phimBo, weeklyTrending] = await Promise.all([
     repo.getRecentMovies(NEW_MOVIES_COUNT),
     repo.getPageByTypeOffset('single', 1, RAIL_COUNT),
     repo.getPageByTypeOffset('series', 1, RAIL_COUNT),
-    repo.getTrending(TRENDING_COUNT),
     heroSnapshot.getRankedMovies(),
   ]);
 
@@ -39,7 +38,7 @@ export async function buildHomeData(db: D1Database): Promise<HomeData> {
     newMovies: { items: toLegacyItems(newMovies) },
     phimLe: { items: toLegacyItems(phimLe) },
     phimBo: { items: toLegacyItems(phimBo) },
-    trending: { items: toLegacyItems(trending) },
-    heroMovies: toLegacyItems(hero),
+    trending: { items: toLegacyItems(weeklyTrending.slice(0, TRENDING_COUNT)) },
+    heroMovies: toLegacyItems(weeklyTrending),
   };
 }

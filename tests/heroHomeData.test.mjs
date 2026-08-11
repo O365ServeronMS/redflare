@@ -42,7 +42,7 @@ async function seedMovie(db, slug, tmdbId, popularity) {
     .run();
 }
 
-test('home-data reads Hero only from the ranked snapshot and never falls back to popularity', async () => {
+test('home-data reads Hero and Trending only from the weekly ranked snapshot', async () => {
   const { db, hero } = await setup();
   await seedMovie(db, 'ranked-weekly-movie', 101, 1);
   await seedMovie(db, 'popular-but-not-snapshot', 202, 99_999);
@@ -52,14 +52,41 @@ test('home-data reads Hero only from the ranked snapshot and never falls back to
     result: { tmdbCount: 20, matchedCount: 1, notFoundCount: 19, failedCount: 0 },
   });
 
-  assert.deepEqual((await buildHomeData(db)).heroMovies.map((movie) => movie.slug), ['ranked-weekly-movie']);
+  const homeData = await buildHomeData(db);
+  assert.deepEqual(homeData.heroMovies.map((movie) => movie.slug), ['ranked-weekly-movie']);
+  assert.deepEqual(homeData.trending.items.map((movie) => movie.slug), ['ranked-weekly-movie']);
 
   await hero.replaceSnapshot([], {
     lastSuccessAt: 1_800_001_800,
     lastAttemptAt: 1_800_001_800,
     result: { tmdbCount: 20, matchedCount: 0, notFoundCount: 20, failedCount: 0 },
   });
-  assert.deepEqual((await buildHomeData(db)).heroMovies, []);
+  const emptyHomeData = await buildHomeData(db);
+  assert.deepEqual(emptyHomeData.heroMovies, []);
+  assert.deepEqual(emptyHomeData.trending.items, []);
+});
+
+test('home-data caps Trending at 12 while preserving TMDB weekly order', async () => {
+  const { db, hero } = await setup();
+  const rows = [];
+  for (let index = 1; index <= 13; index++) {
+    const slug = `weekly-${index}`;
+    await seedMovie(db, slug, 1_000 + index, 100_000 - index);
+    rows.push({ rank: index, tmdbId: 1_000 + index, slug });
+  }
+  await seedMovie(db, 'popular-but-not-weekly', 9_999, 999_999);
+  await hero.replaceSnapshot(rows, {
+    lastSuccessAt: 1_800_000_000,
+    lastAttemptAt: 1_800_000_000,
+    result: { tmdbCount: 20, matchedCount: 13, notFoundCount: 7, failedCount: 0 },
+  });
+
+  const homeData = await buildHomeData(db);
+  assert.deepEqual(
+    homeData.trending.items.map((movie) => movie.slug),
+    Array.from({ length: 12 }, (_, index) => `weekly-${index + 1}`)
+  );
+  assert.equal(homeData.heroMovies.length, 13);
 });
 
 test('Hero ops routes remain CRON_KEY-gated and status exposes only refresh metadata', async () => {

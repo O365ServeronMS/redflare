@@ -199,21 +199,6 @@ export class MovieRepository {
     return res.results ?? [];
   }
 
-  /** Home "Phim Trending" rail (docs/plan-restore-spa-frontend.md F4). The
-   * old architecture ranked by TMDB's live trending endpoint at build time;
-   * runtime can't call that (ADR-0002 Principle 3), so we rank by the
-   * `popularity` snapshot captured at sync time (migration 0009). `NULLS
-   * LAST` keeps titles with no tmdb_id (thus no popularity) off the rail
-   * rather than sorting them first. */
-  async getTrending(limit: number): Promise<MovieRow[]> {
-    const res = await this.db
-      .prepare(
-        "SELECT * FROM movie WHERE tier = 'catalog' AND popularity IS NOT NULL ORDER BY popularity DESC LIMIT ?"
-      )
-      .bind(limit)
-      .all<MovieRow>();
-    return res.results ?? [];
-  }
 
   /** Hero pool (docs/plan-restore-spa-frontend.md F4). Two filters beyond
    * "popular catalog title":
