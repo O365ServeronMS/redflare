@@ -104,9 +104,12 @@ export class RecommendationRepository {
     const res = await this.db
       .prepare(
         `SELECT m.* FROM recommendation r JOIN movie m ON m.slug = r.target_slug
-         WHERE r.slug = ? ORDER BY r.sort_order LIMIT ?`
+         WHERE r.slug = ? AND r.target_slug != ?
+         GROUP BY r.target_slug
+         ORDER BY MIN(r.sort_order) ASC, m.slug ASC
+         LIMIT ?`
       )
-      .bind(slug, limit)
+      .bind(slug, slug, limit)
       .all<MovieRow>();
     return res.results ?? [];
   }

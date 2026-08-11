@@ -96,7 +96,7 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 | F1 | Failure semantics + last-good | **Needs review** | Deploy A published; cron-cycle evidence pending |
 | F2 | Requeue + bounded stubs | **In progress** | First pilot cron healthy; 43/1.000 stubs; soak continues |
 | F3 | Source freshness + repair | **In progress** | Migration deployed; first cron cycle wrote 16/16 success |
-| F4 | Cache/API/UI resilience | **Not started** | loading/empty/error/retry verified |
+| F4 | Cache/API/UI resilience | **Needs review** | Contract + UI states tested; browser QA pending |
 | F5 | Rollout + browser QA + close | **Not started** | screenshots + KPI + rollback evidence |
 
 ---
@@ -173,17 +173,18 @@ Allowed status: `Not started`, `In progress`, `Needs review`, `Blocked`, `Comple
 
 ## F4 — Cache/API/UI resilience
 
-- [ ] Purge exact source recommendation tags khi edge/resolution đổi.
-- [ ] API order/dedupe/self-exclusion/limit tests.
-- [ ] Frontend phân biệt success-empty và request error.
-- [ ] Loading skeleton khi lazy mount bắt đầu.
-- [ ] Error state gọn + retry một lần theo user action.
-- [ ] Reuse Carousel/PosterCard/tokens; không redesign.
+- [x] Purge exact source recommendation tags khi edge/resolution đổi.
+- [x] API order/dedupe/self-exclusion/limit tests.
+- [x] Frontend phân biệt success-empty và request error.
+- [x] Loading skeleton khi lazy mount bắt đầu.
+- [x] Error state gọn + retry một lần theo user action.
+- [x] Reuse Carousel/PosterCard/tokens; không redesign.
 - [ ] Keyboard/focus/reduced-motion checks.
 
-**Evidence:** pending  
-**Blocker:** cần browser capability để nghiệm thu visual/interaction.  
+**Evidence:** recommendation client 2/2; safety suite 10/10 gồm self-exclusion/dedupe/TMDB order; refresh suite 3/3; Worker typecheck, Vite build và diff-check pass. UI loading, valid-empty, error/retry được implement trong Recommendation.js.
+**Blocker:** Browser plugin không có và Playwright CLI thiếu runtime module, nên chưa có screenshot/interaction QA desktop/mobile.
 **Rollback:** API contract giữ `{items}`; frontend có thể rollback độc lập.
+**Next exact action:** chạy browser QA desktop/mobile cho loading, populated, valid-empty, error/retry và keyboard/focus trước production deploy.
 
 ## F5 — Rollout + QA + close
 

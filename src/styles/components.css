@@ -958,6 +958,65 @@
 }
 
 /* ==========================================================================
+   RECOMMENDATION STATES
+   ========================================================================== */
+
+.recommendation {
+  margin-bottom: 40px;
+}
+
+.recommendation__skeleton-track {
+  display: flex;
+  gap: 8px;
+  overflow: hidden;
+  padding: 0 4%;
+}
+
+.recommendation__skeleton-card {
+  flex: 0 0 calc((100% - 40px) / 6);
+  aspect-ratio: 2 / 3;
+  background: linear-gradient(90deg, #1a1a1a 25%, #2a2a2a 50%, #1a1a1a 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite linear;
+  border-radius: 4px;
+}
+
+.recommendation--error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 4%;
+  color: var(--color-silver);
+}
+
+.recommendation__error-message {
+  margin: 0;
+}
+
+.recommendation__retry {
+  min-height: 36px;
+  padding: 8px 14px;
+  border-radius: var(--radius-buttons);
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--color-chalk-white);
+  font-weight: var(--font-weight-bold);
+}
+
+.recommendation__retry:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+@media (max-width: 768px) {
+  .recommendation__skeleton-card {
+    flex-basis: calc((100% - 12px) / 2);
+  }
+
+  .recommendation--error {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+/* ==========================================================================
    MOVIE CARD
    ========================================================================== */
 

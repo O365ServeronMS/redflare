@@ -274,3 +274,28 @@ test('dry-run selects only overflow groups eligible under the bounded-stub polic
   }]);
 });
 
+test('resolved recommendations exclude the source, dedupe target slugs, and retain TMDB rank', async () => {
+  const { db } = await setupResolver();
+  await db.batch([
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES (?, ?, ?, ?)')
+      .bind('source', 101, 'movie', 'catalog'),
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES (?, ?, ?, ?)')
+      .bind('target-a', 201, 'movie', 'catalog'),
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES (?, ?, ?, ?)')
+      .bind('target-b', 202, 'movie', 'catalog'),
+    db.prepare('UPDATE recommendation SET target_slug = ?, sort_order = ? WHERE slug = ?')
+      .bind('target-a', 2, 'source'),
+    db.prepare('INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order) VALUES (?, ?, ?, ?, ?)')
+      .bind('source', 'target-b', 43, 'movie', 0),
+    db.prepare('INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order) VALUES (?, ?, ?, ?, ?)')
+      .bind('source', 'target-b', 44, 'movie', 1),
+    db.prepare('INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order) VALUES (?, ?, ?, ?, ?)')
+      .bind('source', 'source', 45, 'movie', 3),
+  ]);
+  const repo = new RecommendationRepository(db);
+
+  assert.deepEqual(
+    (await repo.getResolvedForSlug('source', 12)).map((movie) => movie.slug),
+    ['target-b', 'target-a']
+  );
+});
