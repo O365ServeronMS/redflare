@@ -615,6 +615,17 @@ every new below-fold section through them rather than setting `loading`/
   retired host) and it silently does nothing useful, no error either way.
 
 ## Conventions & gotchas
+- **Responsive TMDB portrait images (mandatory).** Use the shared
+  `src/lib/image.js` `<picture>` policy; do not hand-roll `srcset` or
+  viewport checks in components.
+  - At `max-width: 768px`: Hero rail = `w154`; PosterCard = `w185`.
+  - At `min-width: 769px`: Hero rail = `w185`; PosterCard = `w500`.
+  - Apply variants only to `image.tmdb.org/t/p/w154|w185|w500` poster URLs.
+    KKPhim/phimimg URLs and the existing `w500` mobile backdrop / `w1280`
+    desktop backdrop contracts pass through unchanged.
+  - This is browser-only presentation policy: keep D1/API/sync canonical
+    URLs unchanged and never run a backfill for a display-size change.
+  - If a desktop `<source>` fails, remove it before assigning the image fallback.
 
 - **CSS specificity + media-query source order bites here.** Media queries add
   *zero* specificity, so an override declared earlier loses to an equal-specificity
