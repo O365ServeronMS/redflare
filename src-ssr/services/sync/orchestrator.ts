@@ -28,6 +28,78 @@ const SHARD_COUNT = 5;
 const PER_SHARD_CONCURRENCY = 6; // Workers free/paid: 6 simultaneous outgoing connections/invocation
 const RECENT_PAGE_LIMIT = 20; // pages of /danh-sach/phim-moi-cap-nhat to scan before giving up on this tick
 
+/** Versioned cursor for the recent feed. `slug` is a deterministic
+ * tie-breaker/diagnostic value; equal-timestamp items are still scanned on
+ * every pass so feed reordering cannot hide a title at the boundary. */
+export interface RecentCursor {
+  time: string;
+  slug: string;
+}
+
+export type IncrementalStopReason =
+  | 'cursor_crossed'
+  | 'empty_page'
+  | 'page_limit'
+  | 'upstream_error'
+  | 'shard_error'
+  | 'governed'
+  | 'cursor_write_error'
+  | 'no_new_slugs';
+
+export interface IncrementalSyncResult {
+  slugsFound: number;
+  fetched: number;
+  processed: number;
+  written: number;
+  unchanged: number;
+  failed: number;
+  rowsWritten: number;
+  pagesScanned: number;
+  stopReason: IncrementalStopReason;
+  cursorBefore: RecentCursor | null;
+  cursorAfter: RecentCursor | null;
+  shards: ShardResult[];
+}
+
+function parseRecentCursor(value: string | null): RecentCursor | null {
+  if (!value) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      typeof parsed === 'object' && parsed !== null
+      && typeof (parsed as Record<string, unknown>).time === 'string'
+      && !Number.isNaN(Date.parse((parsed as Record<string, unknown>).time as string))
+      && typeof (parsed as Record<string, unknown>).slug === 'string'
+    ) {
+      return {
+        time: (parsed as Record<string, unknown>).time as string,
+        slug: (parsed as Record<string, unknown>).slug as string,
+      };
+    }
+  } catch {
+    // Pre-Phase 3 deployments stored the raw ISO timestamp. Keep those
+    // cursors readable so rollout does not require a reset or migration.
+  }
+  return Number.isNaN(Date.parse(value)) ? null : { time: value, slug: '' };
+}
+
+function newerCursor(a: RecentCursor, b: RecentCursor): RecentCursor {
+  const aTime = Date.parse(a.time);
+  const bTime = Date.parse(b.time);
+  if (aTime !== bTime) return aTime > bTime ? a : b;
+  return a.slug >= b.slug ? a : b;
+}
+
+async function persistRecentSummary(repos: ReturnType<typeof buildRepos>, result: IncrementalSyncResult): Promise<void> {
+  try {
+    await repos.syncState.set('recent:last_run', JSON.stringify({ ...result, recordedAt: new Date().toISOString() }));
+  } catch {
+    // Observability must never turn a completed sync into a failed sync. The
+    // structured console log remains available when this best-effort write is
+    // unavailable (for example during a transient D1 outage).
+  }
+}
+
 async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let cursor = 0;
@@ -67,6 +139,14 @@ export interface ShardResult {
   errors: number;
   rowsWritten: number;
   governed: boolean;
+}
+
+function isShardResult(value: unknown): value is ShardResult {
+  if (typeof value !== 'object' || value === null) return false;
+  const result = value as Record<string, unknown>;
+  return ['processed', 'written', 'unchanged', 'errors', 'rowsWritten']
+    .every((key) => typeof result[key] === 'number' && Number.isFinite(result[key] as number) && (result[key] as number) >= 0)
+    && typeof result.governed === 'boolean';
 }
 
 /** Syncs one shard's worth of slugs. Called both directly (single-shard
@@ -121,32 +201,88 @@ function chunkInto<T>(items: readonly T[], parts: number): T[][] {
  * worker/lib/home.js: a Worker fetch()-ing its own Custom Domain 522s; a
  * service binding does not touch the public network at all), then advance
  * the cursor only if the whole pass completed cleanly -- a partial failure
- * re-scans the same window next tick rather than silently skipping items. */
-export async function runIncrementalSync(env: Env): Promise<{ slugsFound: number; shards: ShardResult[] }> {
+ * re-scans the same window next tick rather than silently skipping items.
+ * Items sharing the cursor timestamp are deliberately re-scanned: KKPhim can
+ * reorder ties between pages, and a timestamp-only stop at the first tie
+ * loses titles at that boundary. */
+export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResult> {
   const repos = buildRepos(env);
   const clients = buildClients(env);
-  const cursor = await repos.syncState.get('cursor:recent');
-  const cursorTime = cursor ? new Date(cursor).getTime() : 0;
+  const rawCursor = await repos.syncState.get('cursor:recent');
+  const cursor = parseRecentCursor(rawCursor);
+  const cursorTime = cursor ? Date.parse(cursor.time) : 0;
+  const finish = async (result: IncrementalSyncResult): Promise<IncrementalSyncResult> => {
+    await persistRecentSummary(repos, result);
+    return result;
+  };
 
   const slugs: string[] = [];
-  let newest = cursor ?? '';
+  const seenSlugs = new Set<string>();
+  let newest = cursor;
+  let scanComplete = false;
+  let scanFailed = false;
+  let pagesScanned = 0;
+  let fetched = 0;
+  let discoveryStopReason: IncrementalStopReason | null = null;
   for (let page = 1; page <= RECENT_PAGE_LIMIT; page++) {
-    const items = await clients.kkphim.getRecentPage(page);
-    if (items.length === 0) break;
+    pagesScanned++;
+    const pageResult = await clients.kkphim.getRecentPage(page);
+    if (pageResult.kind !== 'success') {
+      scanFailed = true;
+      discoveryStopReason = 'upstream_error';
+      break;
+    }
+    const items = pageResult.items;
+    fetched += items.length;
+    if (items.length === 0) {
+      scanComplete = true;
+      discoveryStopReason = 'empty_page';
+      break;
+    }
     let crossedCursor = false;
     for (const item of items) {
       const t = item.modified?.time;
-      if (t && new Date(t).getTime() <= cursorTime) {
+      const itemTime = t ? Date.parse(t) : Number.NaN;
+      if (cursorTime > 0 && itemTime < cursorTime) {
         crossedCursor = true;
-        break;
+        // Do not abandon the rest of this page: an upstream reorder can put
+        // an equal-timestamp item after the first older item.
+        continue;
       }
+      // A v2 cursor identifies one item already committed at the boundary.
+      // Skip that exact slug, but continue scanning every other equal-time
+      // item so a reordered page cannot hide a newly inserted title.
+      if (cursor && itemTime === cursorTime && item.slug === cursor.slug) continue;
+      if (seenSlugs.has(item.slug)) continue;
+      seenSlugs.add(item.slug);
       slugs.push(item.slug);
-      if (!newest || (t && t > newest)) newest = t;
+      const candidate = { time: t, slug: item.slug } satisfies RecentCursor;
+      newest = newest ? newerCursor(newest, candidate) : candidate;
     }
-    if (crossedCursor) break;
+    if (crossedCursor) {
+      scanComplete = true;
+      discoveryStopReason = 'cursor_crossed';
+      break;
+    }
   }
+  if (!discoveryStopReason) discoveryStopReason = 'page_limit';
 
-  if (slugs.length === 0) return { slugsFound: 0, shards: [] };
+  if (slugs.length === 0) {
+    return finish({
+      slugsFound: 0,
+      fetched,
+      processed: 0,
+      written: 0,
+      unchanged: 0,
+      failed: scanFailed ? 1 : 0,
+      rowsWritten: 0,
+      pagesScanned,
+      stopReason: discoveryStopReason === 'page_limit' ? 'no_new_slugs' : discoveryStopReason,
+      cursorBefore: cursor,
+      cursorAfter: cursor,
+      shards: [],
+    });
+  }
 
   const batches = chunkInto(slugs, SHARD_COUNT);
   const shardResults = await Promise.all(
@@ -160,17 +296,64 @@ export async function runIncrementalSync(env: Env): Promise<{ slugsFound: number
         headers: { 'content-type': 'application/json', 'x-cron-key': env.CRON_KEY ?? '' },
         body: JSON.stringify({ slugs: batch }),
       })
-        .then((r) => r.json<ShardResult>())
+        .then(async (r) => {
+          if (!r.ok) throw new Error(`SELF shard returned HTTP ${r.status}`);
+          const result = await r.json<unknown>();
+          if (!isShardResult(result)) throw new Error('SELF shard returned an invalid result');
+          return result;
+        })
         .catch(
           (): ShardResult => ({ processed: 0, written: 0, unchanged: 0, errors: batch.length, rowsWritten: 0, governed: false })
         )
     )
   );
 
-  const anyGoverned = shardResults.some((r) => r.governed);
-  if (!anyGoverned && newest) await repos.syncState.set('cursor:recent', newest);
+  const allShardsSucceeded = shardResults.every(
+    (result, index) => !result.governed && result.errors === 0 && result.processed === batches[index]!.length
+  );
+  const totals = shardResults.reduce(
+    (acc, result, index) => {
+      acc.processed += result.processed;
+      acc.written += result.written;
+      acc.unchanged += result.unchanged;
+      acc.rowsWritten += result.rowsWritten;
+      if (!result.governed) acc.failed += Math.max(result.errors, batches[index]!.length - result.processed);
+      return acc;
+    },
+    { processed: 0, written: 0, unchanged: 0, failed: scanFailed ? 1 : 0, rowsWritten: 0 }
+  );
+  let cursorAfter = cursor;
+  let cursorWriteFailed = false;
+  if (!scanFailed && scanComplete && allShardsSucceeded && newest) {
+    try {
+      await repos.syncState.set('cursor:recent', JSON.stringify(newest));
+      cursorAfter = newest;
+    } catch {
+      cursorWriteFailed = true;
+      totals.failed++;
+    }
+  }
 
-  return { slugsFound: slugs.length, shards: shardResults };
+  let stopReason: IncrementalStopReason = discoveryStopReason ?? 'no_new_slugs';
+  if (cursorWriteFailed) stopReason = 'cursor_write_error';
+  else if (scanFailed) stopReason = 'upstream_error';
+  else if (!scanComplete) stopReason = 'page_limit';
+  else if (!allShardsSucceeded) stopReason = shardResults.some((result) => result.governed) ? 'governed' : 'shard_error';
+
+  return finish({
+    slugsFound: slugs.length,
+    fetched,
+    processed: totals.processed,
+    written: totals.written,
+    unchanged: totals.unchanged,
+    failed: totals.failed,
+    rowsWritten: totals.rowsWritten,
+    pagesScanned,
+    stopReason,
+    cursorBefore: cursor,
+    cursorAfter,
+    shards: shardResults,
+  });
 }
 
 /** One page of one taxonomy listing (plan §7). Not sharded -- called either

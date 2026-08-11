@@ -55,6 +55,10 @@ export interface KkphimListItem {
   modified: { time: string };
 }
 
+export type KkphimRecentPageResult =
+  | { kind: 'success'; items: KkphimListItem[] }
+  | { kind: 'retryable_error'; reason: 'fetch_failed' | 'invalid_json' | 'invalid_shape' };
+
 export type KkphimTmdbLookupResult =
   | { kind: 'found'; data: KkphimDetailResponse }
   | { kind: 'not_found' }
@@ -127,12 +131,14 @@ export class KkphimClient {
 
   /** One page of the "recently updated" feed, used by the incremental sync
    * cursor (plan §2.1). */
-  async getRecentPage(page: number): Promise<KkphimListItem[]> {
+  async getRecentPage(page: number): Promise<KkphimRecentPageResult> {
     await this.limiter.wait();
     const res = await fetchWithTimeout(`${KKPHIM_BASE}/danh-sach/phim-moi-cap-nhat?page=${page}`);
-    if (!res) return [];
-    const data = await res.json<{ items?: KkphimListItem[] }>().catch(() => null);
-    return data?.items ?? [];
+    if (!res) return { kind: 'retryable_error', reason: 'fetch_failed' };
+    const data = await res.json<unknown>().catch(() => null);
+    if (data === null) return { kind: 'retryable_error', reason: 'invalid_json' };
+    if (!isRecentPageResponse(data)) return { kind: 'retryable_error', reason: 'invalid_shape' };
+    return { kind: 'success', items: data.items };
   }
 
   /** One page of a taxonomy listing, used by backfill (plan Phase 7).
@@ -164,6 +170,26 @@ export class KkphimClient {
 
 function isConfirmedNotFound(value: unknown): boolean {
   return typeof value === 'object' && value !== null && (value as Record<string, unknown>).status === false;
+}
+
+function isRecentPageResponse(value: unknown): value is { status: true; items: KkphimListItem[] } {
+  if (typeof value !== 'object' || value === null) return false;
+  const response = value as Record<string, unknown>;
+  return response.status === true
+    && Array.isArray(response.items)
+    && response.items.every(isRecentListItem);
+}
+
+function isRecentListItem(value: unknown): value is KkphimListItem {
+  if (typeof value !== 'object' || value === null) return false;
+  const item = value as Record<string, unknown>;
+  const modified = item.modified;
+  return typeof item.slug === 'string'
+    && item.slug.length > 0
+    && typeof modified === 'object'
+    && modified !== null
+    && typeof (modified as Record<string, unknown>).time === 'string'
+    && !Number.isNaN(Date.parse((modified as Record<string, unknown>).time as string));
 }
 
 function isDetailResponse(value: unknown): value is KkphimDetailResponse {

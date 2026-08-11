@@ -61,7 +61,14 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(
       (async () => {
-        await runIncrementalSync(env);
+        try {
+          const incremental = await runIncrementalSync(env);
+          console.info('incremental_sync', incremental);
+        } catch (error) {
+          console.error('incremental_sync_failed', {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
         try {
           const hero = await refreshHeroSnapshot(env);
           console.info('hero_snapshot_refresh', hero);

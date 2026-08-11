@@ -17,6 +17,15 @@ import { refreshHeroSnapshot } from '../services/sync/heroSnapshot';
 
 const FREE_PLAN_DAILY_REQUEST_LIMIT = 100_000;
 
+function parseStoredJson(value: string | null): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return { invalid: true };
+  }
+}
+
 export const syncRoute = new Hono<{ Bindings: Env }>();
 // Ops routes reflect live/mutating state -- never cache-eligible, including
 // the CRON_KEY rejection itself (requireCronKey returns 404 without calling
@@ -80,6 +89,7 @@ syncRoute.get('/__sync/status', async (c) => {
   const heroSnapshot = new HeroSnapshotRepository(c.env.DB);
   const [
     cursor,
+    recentLastRun,
     rowsToday,
     catalogCount,
     stubCount,
@@ -91,6 +101,7 @@ syncRoute.get('/__sync/status', async (c) => {
     heroRefresh,
   ] = await Promise.all([
     syncState.get('cursor:recent'),
+    syncState.get('recent:last_run'),
     syncState.getRowsWrittenToday(),
     movieRepo.countByTier('catalog'),
     movieRepo.countByTier('stub'),
@@ -109,6 +120,7 @@ syncRoute.get('/__sync/status', async (c) => {
 
   return c.json({
     cursorRecent: cursor,
+    recentSync: parseStoredJson(recentLastRun),
     rowsWrittenToday: rowsToday,
     backfillMode: c.env.BACKFILL_MODE ?? 'free',
     catalogMovieCount: catalogCount,

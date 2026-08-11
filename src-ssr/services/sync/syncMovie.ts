@@ -38,11 +38,24 @@ export async function syncOneMovie(
     taxonomy: TaxonomyRepository;
     search: SearchRepository;
     tmdbOverride: TmdbOverrideRepository;
-  }
+  },
+  reconciled = false
 ): Promise<SyncOneResult> {
   try {
     const detail = await clients.kkphim.getDetail(slug);
     if (!detail) return { slug, outcome: 'error', rowsWritten: 0 };
+    if (detail.movie.slug !== slug) {
+      // A feed entry can briefly retain an old alias while /phim/{slug}
+      // already answers with the canonical KKPhim slug. Never write that
+      // payload under the requested alias. Re-fetch once under the canonical
+      // identity and let the normal idempotent pipeline write that row; a
+      // second mismatch is treated as an upstream contract failure.
+      const canonicalSlug = detail.movie.slug;
+      if (reconciled || !/^[a-z0-9-]{1,120}$/.test(canonicalSlug)) {
+        return { slug, outcome: 'error', rowsWritten: 0 };
+      }
+      return syncOneMovie(env, canonicalSlug, clients, repos, true);
+    }
 
     const tmdbRef = (await repos.tmdbOverride.getBySlug(slug)) ?? getUpstreamTmdbRef(detail.movie);
     const tmdbId = tmdbRef?.tmdbId ?? null;
