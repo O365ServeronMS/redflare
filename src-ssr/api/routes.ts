@@ -143,22 +143,81 @@ apiRoute.get('/api/country', async (c) => {
   });
 });
 
-// GET /api/search?keyword=&page= (docs/contract-legacy-api.md §5) -- no
-// pagination beyond page 1 (FTS5 rank order has no cheap OFFSET; the
-// overlay never requests page 2 anyway). Cache-Tag is generic ("search"),
-// not per-keyword -- keyword cardinality is unbounded, tagging per-query
-// would recreate the cache-poisoning problem the rest of the API avoids.
-apiRoute.get('/api/search', async (c) => {
-  const keyword = (c.req.query('keyword') ?? '').trim();
-  const page = clampPage(c.req.query('page'));
+// POST /api/search (docs/contract-legacy-api.md §5). Search is the only
+// visitor-authored request in this read-only application, so it is gated by
+// Turnstile before the existing FTS query runs. The response is private and
+// uncacheable because every token is single-use.
+apiRoute.post('/api/search', async (c) => {
+  let form: FormData;
+  try {
+    form = await c.req.raw.formData();
+  } catch {
+    applyNoStore(c);
+    return c.text('forbidden', 403);
+  }
+
+  const token = form.get('cf-turnstile-response');
+  const expectedAction = 'search';
+  const expectedHostnames = new Set(
+    (c.env.TURNSTILE_HOSTNAMES ?? '')
+      .split(',')
+      .map((hostname) => hostname.trim())
+      .filter(Boolean),
+  );
+
+  if (
+    typeof c.env.TURNSTILE_SECRET !== 'string'
+    || c.env.TURNSTILE_SECRET.length === 0
+    || typeof token !== 'string'
+    || token.length === 0
+    || token.length > 2048
+    || expectedHostnames.size === 0
+  ) {
+    applyNoStore(c);
+    return c.text('forbidden', 403);
+  }
+
+  let verification: { success?: boolean; action?: string; hostname?: string };
+  try {
+    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      signal: AbortSignal.timeout(10_000),
+      body: new URLSearchParams({
+        secret: c.env.TURNSTILE_SECRET,
+        response: token,
+        remoteip: c.req.header('CF-Connecting-IP') ?? '',
+      }),
+    });
+    if (!response.ok) throw new Error(`siteverify ${response.status}`);
+    verification = await response.json();
+  } catch {
+    applyNoStore(c);
+    return c.text('forbidden', 403);
+  }
+
+  if (
+    verification.success !== true
+    || verification.action !== expectedAction
+    || typeof verification.hostname !== 'string'
+    || !expectedHostnames.has(verification.hostname)
+  ) {
+    applyNoStore(c);
+    return c.text('forbidden', 403);
+  }
+
+  const keywordValue = form.get('keyword');
+  const pageValue = form.get('page');
+  const keyword = typeof keywordValue === 'string' ? keywordValue.trim() : '';
+  const page = clampPage(typeof pageValue === 'string' ? pageValue : undefined);
   if (!keyword || keyword.length > MAX_KEYWORD_LENGTH) {
-    applyApiCache(c, ['search']);
+    applyNoStore(c);
     return c.json({ data: { items: [], params: { pagination: buildPagination(0, SEARCH_LIMIT, 1) } } });
   }
 
   const rows = page === 1 ? await new SearchRepository(c.env.DB).search(keyword, SEARCH_LIMIT) : [];
 
-  applyApiCache(c, ['search']);
+  applyNoStore(c);
   return c.json({
     data: {
       items: toLegacyItems(rows),
@@ -180,7 +239,7 @@ async function handleRecommendation(c: Context<{ Bindings: Env }>) {
     return c.json({ items: [] });
   }
 
-  const movie = await new MovieRepository(c.env.DB).getByTmdbRef(mediaType, tmdbId);
+  const movie = await new MovieRepository(c.env.DB).getRecommendationSourceByTmdbRef(mediaType, tmdbId);
   const rows = movie
     ? await new RecommendationRepository(c.env.DB).getResolvedForSlug(movie.slug, RECOMMENDATION_LIMIT)
     : [];

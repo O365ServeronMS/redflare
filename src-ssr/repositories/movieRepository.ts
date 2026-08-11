@@ -114,9 +114,38 @@ export class MovieRepository {
    * ever calling KKPhim's /tmdb/ lookup. Uses idx_movie_tmdb
    * (migrations/0005_ssr_schema.sql), the same index that exists
    * specifically because tmdb_id isn't unique (ADR-0002 Finding 1). */
-  async getByTmdbRef(tmdbType: 'movie' | 'tv', tmdbId: number): Promise<MovieRow | null> {
+  async getCanonicalTargetByTmdbRef(tmdbType: 'movie' | 'tv', tmdbId: number): Promise<MovieRow | null> {
     return this.db
-      .prepare('SELECT * FROM movie WHERE tmdb_type = ? AND tmdb_id = ? LIMIT 1')
+      .prepare(
+        `SELECT m.* FROM movie m
+         LEFT JOIN tmdb_override o ON o.slug = m.slug
+         WHERE (m.tmdb_type = ? AND m.tmdb_id = ?)
+            OR (o.tmdb_type = ? AND o.tmdb_id = ?)
+         ORDER BY CASE tier WHEN 'catalog' THEN 0 ELSE 1 END,
+                  CASE WHEN has_stream = 1 THEN 0 ELSE 1 END,
+                  CASE WHEN m.tmdb_season = 1 THEN 0 ELSE 1 END,
+                  CASE WHEN m.tmdb_season IS NULL THEN 1 ELSE 0 END,
+                  m.tmdb_season ASC, m.slug ASC
+         LIMIT 1`
+      )
+      .bind(tmdbType, tmdbId, tmdbType, tmdbId)
+      .first<MovieRow>();
+  }
+
+
+  async getRecommendationSourceByTmdbRef(tmdbType: 'movie' | 'tv', tmdbId: number): Promise<MovieRow | null> {
+    return this.db
+      .prepare(
+        `SELECT m.* FROM movie m
+         LEFT JOIN recommendation_freshness f ON f.slug = m.slug
+         WHERE m.tmdb_type = ? AND m.tmdb_id = ? AND m.tier = 'catalog'
+         ORDER BY CASE WHEN f.last_success_at IS NULL THEN 1 ELSE 0 END,
+                  f.last_success_at DESC, m.last_synced DESC,
+                  CASE WHEN m.tmdb_season = 1 THEN 0 ELSE 1 END,
+                  CASE WHEN m.tmdb_season IS NULL THEN 1 ELSE 0 END,
+                  m.tmdb_season ASC, m.slug ASC
+         LIMIT 1`
+      )
       .bind(tmdbType, tmdbId)
       .first<MovieRow>();
   }

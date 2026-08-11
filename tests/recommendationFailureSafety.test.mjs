@@ -6,6 +6,7 @@ import { TmdbClient } from '../src-ssr/services/sync/tmdbClient.ts';
 import { RateLimiter } from '../src-ssr/services/sync/throttle.ts';
 import { syncOneMovie } from '../src-ssr/services/sync/syncMovie.ts';
 import { runRecommendationResolveTick } from '../src-ssr/services/sync/orchestrator.ts';
+import { MovieRepository } from '../src-ssr/repositories/movieRepository.ts';
 import { RecommendationRepository } from '../src-ssr/repositories/recommendationRepository.ts';
 
 const originalFetch = globalThis.fetch;
@@ -97,6 +98,7 @@ test('preserves last-good targets when the TMDB recommendation request is retrya
     },
     taxonomy: { syncMovieTaxonomy: async () => undefined },
     search: { indexMovie: async () => undefined },
+    tmdbOverride: { getBySlug: async () => null },
   };
   const clients = {
     kkphim: { getDetail: async () => kkDetail() },
@@ -132,6 +134,7 @@ test('replaces targets with an empty list only after a valid TMDB empty result',
     },
     taxonomy: { syncMovieTaxonomy: async () => undefined },
     search: { indexMovie: async () => undefined },
+    tmdbOverride: { getBySlug: async () => null },
   };
   const clients = {
     kkphim: { getDetail: async () => kkDetail() },
@@ -147,6 +150,34 @@ test('replaces targets with an empty list only after a valid TMDB empty result',
   assert.deepEqual(replaced, [['source', []]]);
 });
 
+
+test('uses a verified TMDB override when the upstream record has no TMDB identity', async () => {
+  const written = [];
+  const detail = kkDetail('tro-choi-vuong-quyen-phan-1');
+  detail.movie.tmdb = { id: null, type: null, season: null };
+  const repos = {
+    movie: { getHashesBySlugs: async () => new Map([['tro-choi-vuong-quyen-phan-1', 'old']]), upsertMany: async (rows) => { written.push(...rows); return 1; } },
+    episode: { replaceForSlug: async () => undefined },
+    recommendation: { replaceTargetsForSlug: async () => undefined, getTargetsForSlug: async () => [] },
+    taxonomy: { syncMovieTaxonomy: async () => undefined },
+    search: { indexMovie: async () => undefined },
+    tmdbOverride: { getBySlug: async () => ({ tmdbId: 1399, tmdbType: 'tv', tmdbSeason: 1, source: 'override' }) },
+  };
+  const clients = {
+    kkphim: { getDetail: async () => detail },
+    tmdb: {
+      getDetail: async () => null,
+      getSeasonDetail: async () => null,
+      getRecommendationIds: async () => ({ kind: 'success', ids: [71912] }),
+    },
+  };
+  const result = await syncOneMovie({}, 'tro-choi-vuong-quyen-phan-1', clients, repos);
+  assert.equal(result.outcome, 'written');
+  assert.deepEqual(written[0].movie.recommendationTargets, [{ tmdbId: 71912, tmdbType: 'tv' }]);
+  assert.deepEqual([written[0].movie.tmdbId, written[0].movie.tmdbType, written[0].movie.tmdbSeason], [1399, 'tv', 1]);
+  assert.equal(written[0].movie.tmdbOverrideKey, 'tv:1399:1');
+});
+
 async function setupResolver(maxStubs = '0') {
   const mf = new Miniflare({
     modules: true,
@@ -156,8 +187,10 @@ async function setupResolver(maxStubs = '0') {
   instances.push(mf);
   const db = await mf.getD1Database('DB');
   await db.batch([
-    db.prepare('CREATE TABLE movie (slug TEXT PRIMARY KEY, tmdb_id INTEGER, tmdb_type TEXT, tier TEXT)'),
+    db.prepare('CREATE TABLE movie (slug TEXT PRIMARY KEY, tmdb_id INTEGER, tmdb_type TEXT, tmdb_season INTEGER, has_stream INTEGER NOT NULL DEFAULT 0, tier TEXT, last_synced INTEGER NOT NULL DEFAULT 0)'),
     db.prepare('CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)'),
+    db.prepare('CREATE TABLE tmdb_override (slug TEXT PRIMARY KEY, tmdb_id INTEGER NOT NULL, tmdb_type TEXT NOT NULL, tmdb_season INTEGER)'),
+    db.prepare('CREATE TABLE recommendation_freshness (slug TEXT PRIMARY KEY, last_success_at INTEGER, last_attempt_at INTEGER NOT NULL, result TEXT NOT NULL)'),
     db.prepare(
       'CREATE TABLE recommendation (slug TEXT NOT NULL, target_slug TEXT, target_tmdb_id INTEGER NOT NULL, target_type TEXT NOT NULL, sort_order INTEGER NOT NULL, resolve_attempted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (slug, target_tmdb_id, target_type))'
     ),
@@ -232,9 +265,10 @@ test('TMDB retryable failure while building a stub leaves the target pending', a
   });
   assert.deepEqual(await resolveState(db), { target_slug: null, resolve_attempted: 0 });
 });
-test('requeues overflow only when its target is now local, then resolves idempotently without upstream', async () => {
-  const { db, env } = await setupResolver();
+test('requeues a local target at the stub cap, then resolves idempotently without upstream', async () => {
+  const { db, env } = await setupResolver('1');
   await db.batch([
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tmdb_season, has_stream, tier) VALUES (?, 9000, ?, NULL, 0, ?)').bind('full-cap-stub', 'movie', 'stub'),
     db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES (?, ?, ?, ?)').bind('source', 101, 'movie', 'catalog'),
     db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES (?, ?, ?, ?)').bind('local-target', 42, 'movie', 'catalog'),
     db.prepare('UPDATE recommendation SET resolve_attempted = 1 WHERE slug = ?').bind('source'),
@@ -272,6 +306,36 @@ test('dry-run selects only overflow groups eligible under the bounded-stub polic
   assert.deepEqual(await repo.getOverflowGroupsForRequeue(10, 2, true, null), [{
     targetTmdbId: 42, targetType: 'movie', refCount: 2, hasLocalTarget: false,
   }]);
+});
+
+
+test('canonical TV target prefers the streamable season 1 catalog page over other seasons and stubs', async () => {
+  const { db } = await setupResolver();
+  await db.batch([
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tmdb_season, has_stream, tier) VALUES (?, 1399, ?, NULL, 0, ?)').bind('game-of-thrones-tv-1399', 'tv', 'stub'),
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tmdb_season, has_stream, tier) VALUES (?, 1399, ?, 3, 1, ?)').bind('tro-choi-vuong-quyen-phan-3', 'tv', 'catalog'),
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tmdb_season, has_stream, tier) VALUES (?, 1399, ?, 1, 1, ?)').bind('tro-choi-vuong-quyen-phan-1', 'tv', 'catalog'),
+  ]);
+  const repo = new MovieRepository(db);
+  const target = await repo.getCanonicalTargetByTmdbRef('tv', 1399);
+  assert.equal(target?.slug, 'tro-choi-vuong-quyen-phan-1');
+  await db.batch([
+    db.prepare('UPDATE movie SET last_synced = 200 WHERE slug = ?').bind('tro-choi-vuong-quyen-phan-3'),
+    db.prepare('INSERT INTO recommendation_freshness VALUES (?, 300, 300, ?)').bind('tro-choi-vuong-quyen-phan-1', 'success'),
+  ]);
+  const source = await repo.getRecommendationSourceByTmdbRef('tv', 1399);
+  assert.equal(source?.slug, 'tro-choi-vuong-quyen-phan-1');
+});
+
+
+test('canonical target resolves an exact verified override before the catalog row is resynced', async () => {
+  const { db } = await setupResolver();
+  await db.batch([
+    db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tmdb_season, has_stream, tier) VALUES (?, NULL, NULL, NULL, 1, ?)').bind('tro-choi-vuong-quyen-phan-1', 'catalog'),
+    db.prepare('INSERT INTO tmdb_override (slug, tmdb_id, tmdb_type, tmdb_season) VALUES (?, 1399, ?, 1)').bind('tro-choi-vuong-quyen-phan-1', 'tv'),
+  ]);
+  const target = await new MovieRepository(db).getCanonicalTargetByTmdbRef('tv', 1399);
+  assert.equal(target?.slug, 'tro-choi-vuong-quyen-phan-1');
 });
 
 test('resolved recommendations exclude the source, dedupe target slugs, and retain TMDB rank', async () => {

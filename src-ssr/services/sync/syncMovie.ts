@@ -7,9 +7,10 @@ import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
 import { SearchRepository } from '../../repositories/searchRepository';
 import { KkphimClient } from './kkphimClient';
 import { TmdbClient, type TmdbRecommendationResult } from './tmdbClient';
-import { normalizeMovie } from './normalize';
+import { getUpstreamTmdbRef, normalizeMovie } from './normalize';
 import { hashMovie } from './hash';
 
+import { TmdbOverrideRepository } from '../../repositories/tmdbOverrideRepository';
 const TMDB_RECOMMENDATION_CANDIDATES = 15;
 
 export interface SyncOneResult {
@@ -36,18 +37,17 @@ export async function syncOneMovie(
     recommendation: RecommendationRepository;
     taxonomy: TaxonomyRepository;
     search: SearchRepository;
+    tmdbOverride: TmdbOverrideRepository;
   }
 ): Promise<SyncOneResult> {
   try {
     const detail = await clients.kkphim.getDetail(slug);
     if (!detail) return { slug, outcome: 'error', rowsWritten: 0 };
 
-    const tmdbId = detail.movie.tmdb?.id ? Number(detail.movie.tmdb.id) : null;
-    const tmdbType = detail.movie.tmdb?.type === 'tv' ? 'tv' : detail.movie.tmdb?.type === 'movie' ? 'movie' : null;
-    const rawTmdbSeason = Number(detail.movie.tmdb?.season);
-    const tmdbSeason = tmdbType === 'tv' && Number.isInteger(rawTmdbSeason) && rawTmdbSeason > 0
-      ? rawTmdbSeason
-      : null;
+    const tmdbRef = (await repos.tmdbOverride.getBySlug(slug)) ?? getUpstreamTmdbRef(detail.movie);
+    const tmdbId = tmdbRef?.tmdbId ?? null;
+    const tmdbType = tmdbRef?.tmdbType ?? null;
+    const tmdbSeason = tmdbRef?.tmdbSeason ?? null;
 
     const [tmdbDetail, tmdbSeasonDetail, recommendation] =
       tmdbId && tmdbType
@@ -64,7 +64,7 @@ export async function syncOneMovie(
       ? recommendation.ids
       : (await repos.recommendation.getTargetsForSlug(slug)).map((target) => target.targetTmdbId);
 
-    const movie = normalizeMovie(detail, tmdbDetail, tmdbSeasonDetail, recIds);
+    const movie = normalizeMovie(detail, tmdbDetail, tmdbSeasonDetail, recIds, tmdbRef);
     const hash = hashMovie(movie);
 
     const existingHash = (await repos.movie.getHashesBySlugs([slug])).get(slug);

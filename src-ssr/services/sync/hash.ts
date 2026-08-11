@@ -48,5 +48,9 @@ export function hashMovie(m: NormalizedMovie): string {
     // Finding 2); it "rides along" on whatever change actually triggers a
     // rewrite instead.
   ];
+  // Keep hashes for normal upstream rows byte-for-byte compatible with the
+  // existing catalog. A verified override gets a distinct fingerprint so a
+  // targeted resync cannot be skipped as an upstream no-op.
+  if (m.tmdbOverrideKey) parts.push(`tmdb-override:${m.tmdbOverrideKey}`);
   return fnv1a(parts.join(''));
 }

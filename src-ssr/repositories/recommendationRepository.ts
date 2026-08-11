@@ -120,9 +120,11 @@ export class RecommendationRepository {
     const res = await this.db
       .prepare(
         `SELECT r.target_tmdb_id, r.target_type, COUNT(*) AS ref_count,
-                MAX(CASE WHEN m.slug IS NOT NULL THEN 1 ELSE 0 END) AS has_local_target
+                MAX(CASE WHEN m.slug IS NOT NULL OR override_movie.slug IS NOT NULL THEN 1 ELSE 0 END) AS has_local_target
          FROM recommendation r
          LEFT JOIN movie m ON m.tmdb_id = r.target_tmdb_id AND m.tmdb_type = r.target_type
+         LEFT JOIN tmdb_override o ON o.tmdb_id = r.target_tmdb_id AND o.tmdb_type = r.target_type
+         LEFT JOIN movie override_movie ON override_movie.slug = o.slug
          WHERE r.target_slug IS NULL AND r.resolve_attempted = 0
          GROUP BY r.target_tmdb_id, r.target_type
          ORDER BY has_local_target DESC, ref_count DESC, r.target_type ASC, r.target_tmdb_id ASC
@@ -164,9 +166,11 @@ export class RecommendationRepository {
       .prepare(
         `WITH grouped AS (
            SELECT r.target_tmdb_id, r.target_type, COUNT(*) AS ref_count,
-                  MAX(CASE WHEN m.slug IS NOT NULL THEN 1 ELSE 0 END) AS has_local_target
+                  MAX(CASE WHEN m.slug IS NOT NULL OR override_movie.slug IS NOT NULL THEN 1 ELSE 0 END) AS has_local_target
            FROM recommendation r
            LEFT JOIN movie m ON m.tmdb_id = r.target_tmdb_id AND m.tmdb_type = r.target_type
+           LEFT JOIN tmdb_override o ON o.tmdb_id = r.target_tmdb_id AND o.tmdb_type = r.target_type
+           LEFT JOIN movie override_movie ON override_movie.slug = o.slug
            WHERE r.target_slug IS NULL AND r.resolve_attempted = 1
            GROUP BY r.target_tmdb_id, r.target_type
          )

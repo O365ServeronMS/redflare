@@ -2,6 +2,14 @@ export type PosterHost = 'tmdb' | 'phimimg';
 export type MovieTier = 'catalog' | 'stub';
 export type TmdbType = 'movie' | 'tv';
 
+/** TMDB identity after applying a verified catalog override, if one exists. */
+export interface TmdbRef {
+  tmdbId: number;
+  tmdbType: TmdbType;
+  tmdbSeason: number | null;
+  source: 'upstream' | 'override';
+}
+
 export interface TaxonomyRef {
   slug: string;
   name: string;
@@ -49,6 +57,9 @@ export interface NormalizedMovie {
   episodes: EpisodeRecord[];
   /** target (tmdbId, tmdbType) pairs, in rank order -- resolved to slugs in Phase 4. */
   recommendationTargets: { tmdbId: number; tmdbType: TmdbType }[];
+  /** Present only for a verified mapping override. Keeps its sync fingerprint
+   * distinct from the same upstream record with no TMDB identity. */
+  tmdbOverrideKey?: string;
   /** MovieDetail.js renders this (docs/contract-legacy-api.md §4) -- KKPhim
    * detail already has it, just wasn't captured before Phase F3. */
   actors: string[];

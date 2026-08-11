@@ -6,6 +6,7 @@ import { RecommendationRepository } from '../../repositories/recommendationRepos
 import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
 import { SearchRepository } from '../../repositories/searchRepository';
 import { SyncStateRepository } from '../../repositories/syncStateRepository';
+import { TmdbOverrideRepository } from '../../repositories/tmdbOverrideRepository';
 import { KkphimClient } from './kkphimClient';
 import { TmdbClient } from './tmdbClient';
 import { syncOneMovie, type SyncOneResult } from './syncMovie';
@@ -48,6 +49,7 @@ function buildRepos(env: Env) {
     taxonomy: new TaxonomyRepository(env.DB),
     search: new SearchRepository(env.DB),
     syncState: new SyncStateRepository(env.DB),
+    tmdbOverride: new TmdbOverrideRepository(env.DB),
   };
 }
 
@@ -451,7 +453,7 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
     if (Date.now() >= deadline) break;
     groupsSeen++;
 
-    const local = await repos.movie.getByTmdbRef(targetType, targetTmdbId);
+    const local = await repos.movie.getCanonicalTargetByTmdbRef(targetType, targetTmdbId);
     if (local) {
       cacheTagsPurged += await resolveTarget(repos, targetTmdbId, targetType, local.slug);
       resolvedToExisting++;

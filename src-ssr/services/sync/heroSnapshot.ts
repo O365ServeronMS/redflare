@@ -7,6 +7,7 @@ import { EpisodeRepository } from '../../repositories/episodeRepository';
 import { RecommendationRepository } from '../../repositories/recommendationRepository';
 import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
 import { SearchRepository } from '../../repositories/searchRepository';
+import { TmdbOverrideRepository } from '../../repositories/tmdbOverrideRepository';
 import { KkphimClient, type KkphimDetailResponse } from './kkphimClient';
 import { TmdbClient, type TmdbTrendingMovie } from './tmdbClient';
 import { PHIMAPI_AGGREGATE_RPS, RateLimiter, TMDB_AGGREGATE_RPS } from './throttle';
@@ -217,6 +218,7 @@ async function buildDependencies(env: Env): Promise<HeroRefreshDependencies> {
   const recommendation = new RecommendationRepository(env.DB);
   const taxonomy = new TaxonomyRepository(env.DB);
   const search = new SearchRepository(env.DB);
+  const tmdbOverride = new TmdbOverrideRepository(env.DB);
   const kkphim = new KkphimClient(new RateLimiter(PHIMAPI_AGGREGATE_RPS));
   const tmdb = new TmdbClient(env.TMDB_API_TOKEN ?? '', new RateLimiter(TMDB_AGGREGATE_RPS));
   return {
@@ -226,7 +228,7 @@ async function buildDependencies(env: Env): Promise<HeroRefreshDependencies> {
     movie,
     syncCanonical: async (slug) => {
       const { syncOneMovie } = await import('./syncMovie');
-      return syncOneMovie(env, slug, { kkphim, tmdb }, { movie, episode, recommendation, taxonomy, search });
+      return syncOneMovie(env, slug, { kkphim, tmdb }, { movie, episode, recommendation, taxonomy, search, tmdbOverride });
     },
   };
 }

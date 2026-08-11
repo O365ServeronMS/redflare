@@ -1,6 +1,6 @@
-import type { KkphimDetailResponse } from './kkphimClient';
+import type { KkphimDetailResponse, KkphimMovie } from './kkphimClient';
 import type { TmdbDetail, TmdbSeasonDetail } from './tmdbClient';
-import type { EpisodeRecord, NormalizedMovie, TaxonomyRef, TmdbType } from '../../types/movie';
+import type { EpisodeRecord, NormalizedMovie, TaxonomyRef, TmdbRef, TmdbType } from '../../types/movie';
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p';
 const BACKDROP_SIZE = 'w1280';
@@ -52,15 +52,13 @@ export function normalizeMovie(
   kk: KkphimDetailResponse,
   tmdb: TmdbDetail | null,
   tmdbSeasonDetail: TmdbSeasonDetail | null,
-  recommendationTmdbIds: number[]
+  recommendationTmdbIds: number[],
+  effectiveTmdbRef: TmdbRef | null = getUpstreamTmdbRef(kk.movie)
 ): NormalizedMovie {
   const m = kk.movie;
-  const tmdbId = m.tmdb?.id ? Number(m.tmdb.id) : null;
-  const tmdbType: TmdbType | null = m.tmdb?.type === 'tv' ? 'tv' : m.tmdb?.type === 'movie' ? 'movie' : null;
-  const rawTmdbSeason = Number(m.tmdb?.season);
-  const tmdbSeason = tmdbType === 'tv' && Number.isInteger(rawTmdbSeason) && rawTmdbSeason > 0
-    ? rawTmdbSeason
-    : null;
+  const tmdbId = effectiveTmdbRef?.tmdbId ?? null;
+  const tmdbType = effectiveTmdbRef?.tmdbType ?? null;
+  const tmdbSeason = effectiveTmdbRef?.tmdbSeason ?? null;
 
   const tmdbTitle = tmdb ? readableTitle(tmdb.title || tmdb.name) : '';
   const tmdbOriginal = tmdb ? readableTitle(tmdb.original_title || tmdb.original_name) : '';
@@ -115,6 +113,9 @@ export function normalizeMovie(
       tmdbType && tmdbId
         ? recommendationTmdbIds.map((id) => ({ tmdbId: id, tmdbType: tmdbType as TmdbType }))
         : [],
+    tmdbOverrideKey: effectiveTmdbRef?.source === 'override'
+      ? `${effectiveTmdbRef.tmdbType}:${effectiveTmdbRef.tmdbId}:${effectiveTmdbRef.tmdbSeason ?? ''}`
+      : undefined,
     actors: m.actor ?? [],
     popularity: tmdb?.popularity ?? null,
   };
@@ -173,4 +174,14 @@ export function normalizeStubMovie(slug: string, tmdb: TmdbDetail, tmdbId: numbe
     actors: [], // no KKPhim record exists for a stub -- nothing to source cast from
     popularity: tmdb.popularity ?? null,
   };
+}
+
+export function getUpstreamTmdbRef(movie: KkphimMovie): TmdbRef | null {
+  const tmdbId = movie.tmdb?.id ? Number(movie.tmdb.id) : null;
+  const tmdbType: TmdbType | null = movie.tmdb?.type === 'tv' ? 'tv' : movie.tmdb?.type === 'movie' ? 'movie' : null;
+  const rawTmdbSeason = Number(movie.tmdb?.season);
+  const tmdbSeason = tmdbType === 'tv' && Number.isInteger(rawTmdbSeason) && rawTmdbSeason > 0
+    ? rawTmdbSeason
+    : null;
+  return tmdbId && tmdbType ? { tmdbId, tmdbType, tmdbSeason, source: 'upstream' } : null;
 }
