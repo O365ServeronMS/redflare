@@ -159,6 +159,42 @@ expect roughly double the sync traffic until the legacy `scheduled()` path is
 removed (plan Phase 5), which should only happen after the Workflows have been
 observed stable for a few days.
 
+## Phase 4 — Parallel-run soak, baseline (2026-08-13, ~T+20min post-deploy)
+
+Deployed to production (`main` at `a346a64`, pushed 2026-08-13). Confirmed live:
+`GET /` and `GET /api/home-data` both 200. `CRON_KEY` rotated via `wrangler secret
+put` to a temporary operator-supplied value for this soak period (operator will
+rotate it again once done monitoring).
+
+First post-deploy `GET /__sync/status` snapshot, ~20 min after deploy (both the
+legacy `*/15` cron and the new Workflow schedules are live at this point, so this
+reading can't yet be attributed to one path or the other -- it's a baseline, not a
+comparison):
+
+```
+cursorRecent: {"time":"2026-08-13T02:22:59.000Z","slug":"loi-moi"}   (unchanged from Phase 0)
+recentSync: {slugsFound:0, fetched:24, pagesScanned:1, stopReason:"cursor_crossed", recordedAt:"2026-08-13T03:00:14.409Z"}
+rowsWrittenToday: 0
+recommendation: {resolved:114940, pendingUnresolved:136, overflow:74843}   (was 114931/139/74849 at Phase 0)
+hero: {matchedCount:10, snapshotAgeSeconds:1933}
+backfill: {done:true, typeIndex:4, page:1}   (unchanged, still inert as expected -- BACKFILL_ENABLED defaults "false")
+quota: {estimatedRequestsToday:100, estimatedPercentUsed:0.1}
+```
+
+`pendingUnresolved` ticking down (139 → 136) between Phase 0 and this reading is a
+good early sign — resolve is still making progress with the same repositories either
+path writes through. `pagesScanned:1` on the recent-page scan confirms
+`RECENT_PAGE_LIMIT: 2` is working as expected in steady state (only needed 1 page).
+No errors surfaced in either check.
+
+**Not yet established:** whether it was the legacy `scheduled()` or a Workflow
+instance that produced this particular `recentSync` entry — `/__sync/status` doesn't
+distinguish the two paths, since both write through the same repositories. Confirming
+that split needs the Cloudflare dashboard's Workflows tab (per-instance run history)
+compared against `wrangler tail` timestamps for the legacy cron, which needs a longer
+observation window than one snapshot. Next check should compare this baseline against
+a reading a day or more later.
+
 **Verification done:** `npm run worker:typecheck` clean; `npm run build` succeeds;
 `npx wrangler deploy --dry-run` confirms all 5 `[[workflows]]` bindings resolve to
 their exported classes and all new vars are recognized; full existing test suite
