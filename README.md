@@ -13,7 +13,7 @@
 ---
 
 > [!IMPORTANT]
-> Đây là mô tả kiến trúc hiện tại, đã audit trực tiếp từ code ngày **2026-08-07**. Redflare **không còn VPS, KV, R2, pipeline mirror ảnh hay SSR page renderer**. Một số comment/tài liệu lịch sử vẫn nhắc kiến trúc cũ; khi mâu thuẫn, ưu tiên `README.md` → code đang chạy → `docs/contract-legacy-api.md` → `docs/HANDOFF.md`.
+> Đây là mô tả kiến trúc hiện tại, đã audit trực tiếp từ code ngày **2026-08-13**. Redflare **không còn VPS, KV, R2, pipeline mirror ảnh hay SSR page renderer**. Kể từ 2026-08-13, catalog sync cũng **không còn một Cron Trigger `scheduled()` duy nhất** — 5 job chạy độc lập qua **Cloudflare Workflows**, mỗi job tự lịch riêng (xem [5 Cloudflare Workflows nuôi catalog](#️-dữ-liệu-và-đồng-bộ)). Lý do: `docs/state-free-plan-migration.md` Phase 5 — thiết kế cũ (5 job dùng chung một invocation) bị Cloudflare kill vì vượt CPU time khi CPU limit được set về 10ms (giả lập Free plan). Một số comment/tài liệu lịch sử vẫn nhắc kiến trúc cũ; khi mâu thuẫn, ưu tiên `README.md` → code đang chạy → `docs/plan-free-plan-migration.md`/`docs/state-free-plan-migration.md` → `docs/contract-legacy-api.md` → `docs/HANDOFF.md`.
 
 ## 🧭 Mục lục
 
@@ -40,7 +40,7 @@
 - 🗂️ **Danh mục, thể loại, quốc gia** với URL sạch và phân trang `?page=N`.
 - 📱 **Responsive desktop/mobile**, gồm cả chế độ mobile landscape.
 - ⚡ **Request người dùng không gọi KKPhim/TMDB**: browser chỉ đọc dữ liệu đã chuẩn hóa trong D1.
-- 🤖 **Cron tự nuôi catalog**: incremental sync, resolve recommendation và backfill toàn bộ catalog.
+- 🤖 **5 Cloudflare Workflows tự nuôi catalog**: incremental sync, hero snapshot, resolve/refresh recommendation, backfill — mỗi job một lịch riêng, mỗi step tự ngân sách CPU/subrequest riêng.
 
 ## 🏗️ Kiến trúc hiện tại
 
@@ -50,7 +50,7 @@ flowchart LR
     A["📦 Cloudflare Static Assets<br/>dist/"]
     W["🧠 Hono Worker<br/>src-ssr/index.ts"]
     D["🗃️ Cloudflare D1"]
-    C["⏰ Cron */30"]
+    C["⏰ 5 Cloudflare Workflows<br/>src-ssr/workflows/*.ts<br/>*/15 & */30 schedules"]
     K["🎞️ KKPhim / phimapi.com"]
     T["🎬 TMDB API"]
     I["🖼️ image.tmdb.org / phimimg.com"]
@@ -58,10 +58,9 @@ flowchart LR
     U -->|"browser pages + /assets/*"| A
     U -->|"/api/*, sitemap, robots"| W
     W -->|"runtime reads only"| D
-    C --> W
-    W -->|"sync-time only"| K
-    W -->|"sync-time only"| T
-    W -->|"normalized writes"| D
+    C -->|"step-by-step, own CPU/subrequest budget each"| D
+    C -->|"sync-time only"| K
+    C -->|"sync-time only"| T
     U -->|"hotlink artwork"| I
 ```
 
@@ -111,11 +110,12 @@ redflare/
 │   ├── lib/                     # Image, lazy mount, Media Session
 │   └── styles/                  # Premium UI hiện tại
 ├── src-ssr/                     # 🧠 Worker backend (tên thư mục là di sản)
-│   ├── index.ts                 # Hono fetch + scheduled entrypoint
+│   ├── index.ts                 # Hono fetch entrypoint + Workflow class re-exports
 │   ├── api/                     # JSON API tương thích SPA
 │   ├── routes/                  # Sync, sitemap, robots
 │   ├── repositories/            # Mọi truy cập D1
 │   ├── services/sync/           # KKPhim/TMDB sync + normalize + backfill
+│   ├── workflows/                # 5 Cloudflare Workflow class, mỗi job một file
 │   ├── middleware/              # CSP, CRON_KEY, validation, sampling
 │   └── types/                   # Env + model types
 ├── migrations/                  # 🗃️ D1 migrations 0001 → 0009
@@ -222,22 +222,43 @@ Migrations `0001`–`0004` là schema legacy; `0006` xóa các bảng cũ. Với
 
 Nếu không có TMDB token, sync vẫn ghi được catalog KKPhim nhưng thiếu enrichment, hero/trending chất lượng cao và recommendation.
 
-### Một tick cron `*/30` làm gì?
+### 5 Cloudflare Workflows nuôi catalog
 
-1. 🆕 **Incremental sync** — quét feed phim mới đến cursor gần nhất, chia 5 shard qua `SELF`.
-2. 🔗 **Recommendation resolve** — tối đa khoảng 3 phút, ưu tiên target được nhiều phim tham chiếu.
-3. 🧹 **Backfill** — tối đa khoảng 10 phút, đi lần lượt `phim-le → phim-bo → hoat-hinh → tv-shows` và lưu cursor.
+Không còn một Cron Trigger `scheduled()` duy nhất chạy tuần tự nhiều job (thiết kế cũ bị Cloudflare kill vì cộng dồn CPU time khi test ở giới hạn 10ms — xem `docs/state-free-plan-migration.md` Phase 5). Mỗi job giờ là một [Cloudflare Workflow](https://developers.cloudflare.com/workflows/) riêng (`src-ssr/workflows/*.ts`, khai báo ở `wrangler.toml` `[[workflows]]`), tự lịch chạy riêng, và **mỗi `step.do()` bên trong một Workflow tự có ngân sách CPU/subrequest riêng** — không cộng dồn qua các step hay qua các job khác.
+
+| Workflow | Lịch | Việc làm |
+|---|---|---|
+| `IncrementalSyncWorkflow` | `*/30 * * * *` | Quét 2 trang gần nhất của feed phim mới; mỗi slug mới/đổi là một step riêng gọi `syncOneMovie` |
+| `HeroSnapshotWorkflow` | `*/15 * * * *` (cổng 30 phút, nên thực chạy ~mỗi giờ) | Lấy TMDB trending; mỗi candidate là một step riêng |
+| `RecommendationResolveWorkflow` | `*/15 * * * *` | Resolve target chưa có slug, ưu tiên target được nhiều phim tham chiếu; chia batch ~15 group/step |
+| `RecommendationRefreshWorkflow` | `*/15 * * * *` | Làm mới danh sách recommendation ID từ TMDB; chia batch ~5 source/step |
+| `BackfillWorkflow` | `*/15 * * * *`, **inert mặc định** | Chỉ chạy khi `BACKFILL_ENABLED="true"` (xem bảng dưới); mỗi step tối đa 5 trang |
 
 Mỗi movie được normalize rồi hash. Nếu `source_hash` không đổi, pipeline ghi **0 row**, tránh đốt D1 write quota.
 
+Các route ops thủ công (`/__sync/run`, `/__sync/resolve-recommendations`) vẫn dùng logic batch cũ (`orchestrator.ts` `runIncrementalSync`/`runRecommendationResolveTick`, fan-out qua `SELF`) cho mục đích debug/smoke-test tay — chỉ đường tự động qua cron mới đã chuyển hẳn sang Workflows.
+
 ### Backfill modes
+
+`BackfillWorkflow` chỉ chạy khi được bật rõ ràng — catalog ban đầu coi như đã backfill xong, các biến dưới đây đều là `[vars]` trong `wrangler.toml`, sửa được thẳng trên Cloudflare dashboard ("Variables and secrets") **không cần redeploy**:
 
 | Biến | Giá trị | Hành vi |
 |---|---|---|
 | `BACKFILL_MODE` | `free` | Mặc định; dừng khi đạt 85.000 row writes/ngày |
 | `BACKFILL_MODE` | `burst` | Tắt governor; chỉ bật khi chắc chắn account đang ở Workers Paid |
+| `BACKFILL_ENABLED` | `false` | **Mặc định** — `BackfillWorkflow` mỗi tick chỉ đọc 1 dòng D1 rồi return, gần như miễn phí |
+| `BACKFILL_ENABLED` | `true` | Bật lại backfill (crawl mới, hoặc thêm listing type) |
+| `BACKFILL_TYPE` | rỗng | Mặc định; đi lần lượt cả 4 type `phim-le → phim-bo → hoat-hinh → tv-shows` |
+| `BACKFILL_TYPE` | một trong 4 type trên | Giới hạn backfill vào đúng type đó |
+| `BACKFILL_PAGE_FROM` | rỗng | Mặc định; resume từ cursor D1 đã lưu |
+| `BACKFILL_PAGE_FROM` | số nguyên | Chỉ có tác dụng khi lần chạy trước đã `done` — ép bắt đầu lại từ trang này |
+| `BACKFILL_PAGE_TO` | rỗng | Mặc định; đi tới khi upstream báo hết trang |
+| `BACKFILL_PAGE_TO` | số nguyên | Dừng type hiện tại khi vượt trang này, dùng để giới hạn một lần re-crawl |
 | `MAX_STUBS` | `0` | Mặc định; không tạo TMDB-only stub |
 | `MAX_STUBS` | `>0` | Cho phép materialize recommendation target không có trên KKPhim, tối thiểu 2 references |
+
+> [!TIP]
+> Deploy mới (D1 rỗng) **phải** set `BACKFILL_ENABLED="true"` để tự crawl toàn catalog — mặc định `"false"` cho account đã có catalog đầy đủ. Xem [bước 8](#8-khởi-tạo-catalog).
 
 ## 🖼️ Chính sách ảnh
 
@@ -313,15 +334,19 @@ Nếu đổi Worker name khỏi `redflare`, đổi cả `name` và `[[services]]
 
 ### 4. Cấu hình chế độ catalog
 
-Mặc định an toàn:
+Mặc định an toàn cho một account **đã có** catalog:
 
 ```toml
 [vars]
 BACKFILL_MODE = "free"
+BACKFILL_ENABLED = "false"
 MAX_STUBS = "0"
 ```
 
 Chỉ đổi `BACKFILL_MODE="burst"` sau khi xác nhận Workers Paid. Đừng bật stub hàng loạt trước khi đo dung lượng D1.
+
+> [!IMPORTANT]
+> Deploy **mới** (D1 rỗng, chưa có catalog) phải set `BACKFILL_ENABLED = "true"` — mặc định `"false"` là dành cho catalog đã crawl xong (xem [Backfill modes](#️-dữ-liệu-và-đồng-bộ) và [bước 8](#8-khởi-tạo-catalog)).
 
 ### 5. Build và bootstrap Worker
 
@@ -333,7 +358,7 @@ npx wrangler deploy
 ```
 
 > [!TIP]
-> Ở một Cloudflare account hoàn toàn mới, deploy đầu có thể báo `SELF` target chưa tồn tại. Khi đó tạm comment block `[[services]]` và `[triggers]`, deploy một bản bootstrap để tạo service, khôi phục hai block rồi deploy lại ngay. Đây là chicken/egg của self-service binding, không phải lỗi application.
+> Ở một Cloudflare account hoàn toàn mới, deploy đầu có thể báo `SELF` target chưa tồn tại. Khi đó tạm comment block `[[services]]`, deploy một bản bootstrap để tạo service, khôi phục block rồi deploy lại ngay. Đây là chicken/egg của self-service binding, không phải lỗi application. `[[workflows]]` không gặp vấn đề này — chỉ `[[services]]` (dùng bởi route ops `/__sync/run` để fan-out qua `SELF`) mới cần.
 
 ### 6. Thêm secrets
 
@@ -359,7 +384,10 @@ Production dùng Cloudflare Git integration: push lên `main` sẽ chạy build 
 
 ### 8. Khởi tạo catalog
 
-D1 mới bắt đầu rỗng. Cron `*/30` sẽ tự incremental sync, resolve recommendation và backfill.
+D1 mới bắt đầu rỗng. `IncrementalSyncWorkflow`/`HeroSnapshotWorkflow`/`RecommendationResolveWorkflow`/`RecommendationRefreshWorkflow` tự chạy theo lịch (`*/15`, `*/30`) ngay sau deploy — nhưng chúng chỉ theo dõi **phim mới**, không backfill catalog cũ.
+
+> [!WARNING]
+> `BackfillWorkflow` **mặc định tắt** (`BACKFILL_ENABLED = "false"`). Với D1 rỗng, phải set `BACKFILL_ENABLED = "true"` (dashboard hoặc `wrangler.toml` rồi deploy lại) **trước** khi mong đợi catalog tự đầy — nếu không, `IncrementalSyncWorkflow` chỉ thấy được vài chục phim "mới nhất" mỗi 30 phút, không bao giờ crawl phần còn lại của catalog.
 
 Có thể chạy incremental pass đầu tiên bằng route ops:
 
@@ -369,7 +397,7 @@ curl -H "x-cron-key: $CRON_KEY" https://<your-domain>/__sync/resolve-recommendat
 curl -H "x-cron-key: $CRON_KEY" https://<your-domain>/__sync/status
 ```
 
-Backfill toàn catalog tự chạy và resume bằng cron. `/__sync/backfill-page?type=phim-le&page=1` chỉ phù hợp smoke test một page; nó không thay thế cursor loop của scheduled handler.
+Sau khi bật `BACKFILL_ENABLED = "true"`, backfill toàn catalog tự chạy và resume qua `BackfillWorkflow` (`*/15`, tối đa 5 trang/step, tối đa 40 step/run — hết step trong một run thì lần chạy kế tiếp tự resume từ cursor D1). `/__sync/backfill-page?type=phim-le&page=1` chỉ phù hợp smoke test một page; nó không thay thế vòng lặp cursor của Workflow. Nhớ đổi lại `BACKFILL_ENABLED = "false"` sau khi backfill xong để tránh tốn ngân sách step/ngày cho những tick không cần thiết.
 
 ### 9. Smoke test production
 
@@ -424,10 +452,13 @@ Tất cả route dưới đây cần `x-cron-key` và trả `Cache-Control: priv
 | Route | Tác dụng |
 |---|---|
 | `GET /__sync/status` | Catalog/stub counts, quota estimate, recommendation và backfill progress |
-| `GET /__sync/run` | Incremental sync thủ công |
-| `GET /__sync/resolve-recommendations` | Một recommendation resolve tick |
+| `GET /__sync/run` | Incremental sync thủ công (batch, fan-out qua `SELF` — dùng cho debug, không phải đường tự động) |
+| `GET /__sync/resolve-recommendations` | Một recommendation resolve tick thủ công (batch) |
+| `POST /__sync/refresh-hero?force=true` | Ép hero snapshot chạy ngay, bỏ qua cổng 30 phút |
 | `GET /__sync/backfill-page?type=&page=` | Sync thử một listing page |
 | `POST /__sync/batch/:n` | Internal shard endpoint; không gọi tay trừ khi debug |
+
+Đường tự động (không cần gọi tay) là 5 Workflow trong `wrangler.toml [[workflows]]` — các route trên chỉ dùng để test/debug/vận hành thủ công một lần.
 
 ### Status nên theo dõi
 
@@ -523,10 +554,13 @@ Không thêm `_redirects` và không đổi sang hash routing.
 1. Xác nhận migrations đã apply remote.
 2. Xác nhận `CRON_KEY` và `TMDB_API_TOKEN` tồn tại.
 3. Gọi `/__sync/status`.
-4. Chạy `/__sync/run` và chờ cron backfill.
-5. Kiểm tra D1 đúng `database_id`, không phải local database rỗng.
+4. Xác nhận `BACKFILL_ENABLED = "true"` nếu đây là D1 rỗng chưa từng backfill (mặc định `"false"`, xem [bước 8](#8-khởi-tạo-catalog)) — nếu không, các Workflow chỉ theo dõi phim mới chứ không tự crawl catalog cũ.
+5. Chạy `/__sync/run` để test incremental sync thủ công, hoặc chờ `IncrementalSyncWorkflow`/`BackfillWorkflow` tick tiếp theo (`*/30`/`*/15`).
+6. Kiểm tra D1 đúng `database_id`, không phải local database rỗng.
 
-### Sync shard lỗi/404/522
+### Sync shard lỗi/404/522 (route ops thủ công `/__sync/run`)
+
+Chỉ áp dụng cho route ops thủ công — đường tự động qua Workflows không dùng `SELF` fan-out nữa.
 
 - `[[services]].service` phải trùng Worker `name`.
 - Worker target phải đã tồn tại; xử lý bootstrap chicken/egg như phần deploy.
@@ -554,6 +588,9 @@ Kiểm tra `TMDB_API_TOKEN`. KKPhim-only sync vẫn chạy nên lỗi này có t
 | `docs/contract-legacy-api.md` | ✅ Hiện hành | Shape JSON mà SPA bắt buộc cần |
 | `docs/HANDOFF.md` | ✅ Hiện hành | Trạng thái cutover và bẫy vận hành |
 | `docs/DESIGN.md` | ✅ Hiện hành cho visual language | Netflix-style UI; bỏ qua ví dụ Tailwind |
+| `docs/plan-free-plan-migration.md` | ✅ Hiện hành | Vì sao chuyển sang 5 Cloudflare Workflows, thiết kế từng job |
+| `docs/state-free-plan-migration.md` | ✅ Hiện hành | Bằng chứng thực tế (dashboard logs) worker cũ vượt CPU 10ms; log từng phase |
+| `docs/audit-prompt-free-plan-cpu.md` | 📜 Tham khảo | Prompt audit gốc dùng để verify giả thuyết CPU/subrequest trước khi tái cấu trúc |
 | `docs/adr/0002-no-vps-ssr-architecture.md` | 🟡 Một phần | D1/sync rationale còn đúng; nguyên tắc “No SPA” đã bị đảo |
 | `docs/plan-restore-spa-frontend.md` | 📜 Lịch sử quyết định | Vì sao SPA được phục hồi |
 | `docs/plan-hit-rate.md`, `docs/state-hit-rate.md` | 🗄️ Lịch sử | Kiến trúc KV/R2 cũ, không dùng để triển khai mới |
