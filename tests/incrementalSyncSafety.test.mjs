@@ -112,11 +112,18 @@ function createIncrementalHarness({ cursor = T0, recentPage, shardResponse }) {
 }
 
 test('does not advance cursor when a later recent-feed page times out', async () => {
+  // RECENT_PAGE_LIMIT is 2 (orchestrator.ts -- backfill is complete, steady
+  // state only needs a shallow scan, docs/plan-free-plan-migration.md), so
+  // page 2's retry must itself cross the cursor for the scan to resolve
+  // within budget -- 'too-old' below is what does that (strictly earlier
+  // than the stored cursor), where the original 3-page fixture used a
+  // trailing empty page instead.
+  const tooOld = '2026-08-10T23:50:00.000Z';
   const harness = createIncrementalHarness({
     recentPage: async (page, run) => {
       if (page === 1) return [item('new-page-1', T1)];
       if (page === 2 && run === 1) return new Error('timeout');
-      if (page === 2) return [item('older-never-seen', T2), item('old-cursor', T0)];
+      if (page === 2) return [item('older-never-seen', T2), item('old-cursor', T0), item('too-old', tooOld)];
       return [];
     },
     shardResponse: async (slugs) => successfulShard(slugs),
@@ -134,10 +141,10 @@ test('does not advance cursor when a later recent-feed page times out', async ()
   assert.equal(second.result.slugsFound, 3, 'the recovered page and equal-time boundary must be scanned and retried');
   assert.equal(second.result.processed, 3);
   assert.equal(second.result.failed, 0);
-  assert.equal(second.result.stopReason, 'empty_page');
+  assert.equal(second.result.stopReason, 'cursor_crossed');
   assert.deepEqual(harness.requestedPages, [
     { run: 1, page: 1 }, { run: 1, page: 2 },
-    { run: 2, page: 1 }, { run: 2, page: 2 }, { run: 2, page: 3 },
+    { run: 2, page: 1 }, { run: 2, page: 2 },
   ]);
 });
 

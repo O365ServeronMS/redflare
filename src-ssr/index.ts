@@ -9,6 +9,15 @@ import { runIncrementalSync, runBackfillTick, runRecommendationResolveTick } fro
 import { runRecommendationRefreshTick } from './services/sync/recommendationRefresh';
 import { refreshHeroSnapshot } from './services/sync/heroSnapshot';
 
+// Re-exported so wrangler's [[workflows]] class_name bindings
+// (wrangler.toml) can resolve them -- Workflows must be exported from the
+// main module. docs/plan-free-plan-migration.md Phase 3.
+export { IncrementalSyncWorkflow } from './workflows/incrementalSyncWorkflow';
+export { HeroSnapshotWorkflow } from './workflows/heroSnapshotWorkflow';
+export { RecommendationResolveWorkflow } from './workflows/recommendationResolveWorkflow';
+export { RecommendationRefreshWorkflow } from './workflows/recommendationRefreshWorkflow';
+export { BackfillWorkflow } from './workflows/backfillWorkflow';
+
 const app = new Hono<{ Bindings: Env }>();
 
 const SPA_DOCUMENT_PATHS = [
@@ -50,14 +59,19 @@ app.notFound(async (c) => {
 export default {
   fetch: app.fetch,
 
-  // */15, four jobs sharing one Cron Trigger wall-time budget:
-  // incremental sync (small, bounded, keeps recent titles fresh) ->
+  // LEGACY PATH (docs/plan-free-plan-migration.md Phase 4/5): */15, four
+  // jobs sharing one Cron Trigger wall-time budget -- incremental sync ->
   // Hero snapshot refresh (30-minute success gate, so it normally skips) ->
-  // recommendation resolve (Phase 4, ~3 min budget -- cheap, high UX
-  // value per minute, so it runs before backfill) -> backfill (Phase 7,
-  // ~10 min budget, resumes from its own D1 cursor next tick). All four
-  // are cron-driven rather than CRON_KEY-HTTP-driven for the same reason
-  // (see runBackfillTick's doc comment in services/sync/orchestrator.ts).
+  // recommendation resolve (~3 min budget) -> backfill (~10 min budget,
+  // resumes from its own D1 cursor next tick; inert by default now that
+  // env.BACKFILL_ENABLED defaults to "false", services/sync/orchestrator.ts
+  // runBackfillTick). docs/state-free-plan-migration.md Phase 0 measured
+  // this shape -- five jobs, no per-job invocation boundary -- exceeding
+  // the Free-plan 50-external-subrequest cap on two of the jobs
+  // individually. Running in parallel, on purpose, with the
+  // [[workflows]] schedules in wrangler.toml during the migration soak
+  // period; remove this handler and the [triggers] cron once those have
+  // been observed stable for a few days (plan Phase 5).
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(
       (async () => {

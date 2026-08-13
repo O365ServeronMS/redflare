@@ -12,7 +12,7 @@ import { KkphimClient, type KkphimDetailResponse } from './kkphimClient';
 import { TmdbClient, type TmdbTrendingMovie } from './tmdbClient';
 import { PHIMAPI_AGGREGATE_RPS, RateLimiter, TMDB_AGGREGATE_RPS } from './throttle';
 
-const HERO_REFRESH_INTERVAL_SECONDS = 30 * 60;
+export const HERO_REFRESH_INTERVAL_SECONDS = 30 * 60;
 const HERO_LOOKUP_CONCURRENCY = 4;
 
 type CanonicalSyncOutcome = { outcome: 'written' | 'unchanged' | 'skipped' | 'error' };
@@ -45,7 +45,7 @@ export interface HeroRefreshSummary extends HeroRefreshResult {
   durationMs: number;
 }
 
-type CandidateOutcome =
+export type CandidateOutcome =
   | { kind: 'matched'; row: HeroSnapshotEntry }
   | { kind: 'not_found' }
   | { kind: 'filtered_type' }
@@ -112,7 +112,7 @@ export async function refreshHeroSnapshot(env: Env, options: RefreshHeroSnapshot
   return result;
 }
 
-function dedupeTrendingMovies(movies: readonly TmdbTrendingMovie[]): TmdbTrendingMovie[] {
+export function dedupeTrendingMovies(movies: readonly TmdbTrendingMovie[]): TmdbTrendingMovie[] {
   const seen = new Set<number>();
   return movies.filter((movie) => {
     if (seen.has(movie.id)) return false;
@@ -121,7 +121,14 @@ function dedupeTrendingMovies(movies: readonly TmdbTrendingMovie[]): TmdbTrendin
   });
 }
 
-async function resolveCandidate(candidate: TmdbTrendingMovie, deps: HeroRefreshDependencies): Promise<CandidateOutcome> {
+/** Exported for src-ssr/workflows/heroSnapshotWorkflow.ts, which wraps one
+ * call to this per candidate in its own step -- each candidate can trigger
+ * a full syncOneMovie internally (kkphim + up to 3 TMDB calls), and the
+ * whole batch of ~20 candidates run together in refreshHeroSnapshot below
+ * was observed (docs/state-free-plan-migration.md Phase 0 audit) to cost
+ * ~60+ external subrequests in one invocation -- over the Free-plan
+ * 50/invocation cap on its own. */
+export async function resolveCandidate(candidate: TmdbTrendingMovie, deps: HeroRefreshDependencies): Promise<CandidateOutcome> {
   const lookup = await deps.kkphim.getMovieByTmdbId(candidate.id);
   if (lookup.kind === 'not_found') return lookup;
   if (lookup.kind === 'retryable_error') return lookup;
@@ -212,7 +219,7 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) 
   return results;
 }
 
-async function buildDependencies(env: Env): Promise<HeroRefreshDependencies> {
+export async function buildDependencies(env: Env): Promise<HeroRefreshDependencies> {
   const movie = new MovieRepository(env.DB);
   const episode = new EpisodeRepository(env.DB);
   const recommendation = new RecommendationRepository(env.DB);

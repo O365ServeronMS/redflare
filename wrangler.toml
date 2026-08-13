@@ -84,23 +84,76 @@ database_id = "40c364b3-10a8-4d03-bd51-60debe94610a"
 # Cron wall time, and D1's Paid-plan 10GB per-database platform limit.
 # F2 pilot: materialize only highly shared TMDB targets, bounded at 1,000
 # total stub rows while cron health and D1 growth are observed.
+#
+# BACKFILL_ENABLED/BACKFILL_TYPE/BACKFILL_PAGE_FROM/BACKFILL_PAGE_TO
+# (docs/plan-free-plan-migration.md Phase 3): all four are plain [vars], so
+# they're editable by hand from the Cloudflare dashboard ("Variables and
+# secrets") without a redeploy. Left at their inert defaults here -- the
+# initial catalog backfill is already complete
+# (docs/state-free-plan-migration.md Phase 0); flip BACKFILL_ENABLED to
+# "true" (optionally scoped with the other three) on the dashboard for a
+# future targeted re-crawl. See services/sync/orchestrator.ts
+# runBackfillTick for exact semantics.
 [vars]
 BACKFILL_MODE = "burst"
 MAX_STUBS = "1000"
+BACKFILL_ENABLED = "false"
+BACKFILL_TYPE = ""
+BACKFILL_PAGE_FROM = ""
+BACKFILL_PAGE_TO = ""
 # Siteverify must match the hostname of the frontend that produced the token.
 # Localhost belongs only in a local override, never in this production value.
 TURNSTILE_HOSTNAMES = "phim.bluesia.net"
 
-# Single cron: drives BOTH incremental sync (plan §2.1) and, since
-# 2026-08-07, the Phase 7 backfill walk (services/sync/orchestrator.ts
-# runBackfillTick -- resumes from a D1 cursor each tick, no external
-# trigger needed, matches ADR-0002's "cron is the only thing allowed to
-# call TMDB/phimimg" principle). The old worker's hourly home-refresh and
-# */10 mirror-drain crons have no equivalent in the new architecture (no KV
-# home cache, no R2 mirroring) and are gone with worker/lib/home.js and
-# worker/lib/mirror.js.
+# Legacy single cron (docs/plan-free-plan-migration.md Phase 4/5): still
+# drives the old scheduled() handler in src-ssr/index.ts in parallel with
+# the [[workflows]] schedules below during the migration soak period.
+# Remove this trigger (and scheduled() itself) once the Workflows below have
+# been observed stable for a few days -- see the plan's Phase 5.
 [triggers]
 crons = ["*/15 * * * *"]
+
+# Cloudflare Workflows (docs/plan-free-plan-migration.md Phase 3) -- one per
+# job, each step getting its own fresh CPU/subrequest budget instead of all
+# five jobs sharing one scheduled() invocation's (Free-plan cap: 10ms
+# CPU + 50 external subrequests per invocation, confirmed exceeded by two of
+# the five jobs individually -- docs/state-free-plan-migration.md Phase 0).
+# Each Workflow's `schedules` is its own cron budget (up to 100 cron
+# expressions/account), separate from the classic [triggers] Cron Trigger
+# quota above (5/account on Free) -- this is what lets incremental sync run
+# every 30 min while the other three keep their original 15-min cadence,
+# which a single shared Cron Trigger could not do.
+[[workflows]]
+name = "incremental-sync"
+binding = "INCREMENTAL_SYNC_WORKFLOW"
+class_name = "IncrementalSyncWorkflow"
+schedules = ["*/30 * * * *"]
+
+[[workflows]]
+name = "hero-snapshot"
+binding = "HERO_SNAPSHOT_WORKFLOW"
+class_name = "HeroSnapshotWorkflow"
+schedules = ["*/15 * * * *"]
+
+[[workflows]]
+name = "recommendation-resolve"
+binding = "RECOMMENDATION_RESOLVE_WORKFLOW"
+class_name = "RecommendationResolveWorkflow"
+schedules = ["*/15 * * * *"]
+
+[[workflows]]
+name = "recommendation-refresh"
+binding = "RECOMMENDATION_REFRESH_WORKFLOW"
+class_name = "RecommendationRefreshWorkflow"
+schedules = ["*/15 * * * *"]
+
+# Scheduled but inert by default (BACKFILL_ENABLED = "false" above) -- each
+# tick costs one cheap D1 read + early return until an operator flips it on.
+[[workflows]]
+name = "backfill"
+binding = "BACKFILL_WORKFLOW"
+class_name = "BackfillWorkflow"
+schedules = ["*/15 * * * *"]
 
 # SELF: service binding used by services/sync/orchestrator.ts to fan out
 # /__sync/batch/:n shards without a same-zone fetch() 522ing (same reasoning

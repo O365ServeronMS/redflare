@@ -26,7 +26,14 @@ const MAX_ROWS_PER_DAY = 85_000;
 // worker/lib/mirror.js) rather than inventing a new one.
 const SHARD_COUNT = 5;
 const PER_SHARD_CONCURRENCY = 6; // Workers free/paid: 6 simultaneous outgoing connections/invocation
-const RECENT_PAGE_LIMIT = 20; // pages of /danh-sach/phim-moi-cap-nhat to scan before giving up on this tick
+// Backfill is complete (docs/plan-free-plan-migration.md) -- steady state only
+// needs to catch what's new since the last tick, not walk deep into history. 2,
+// not 1: cheap insurance against a single-page miss (feed reorder, a burst of
+// >1 page's worth of new titles in one 30-min window) without meaningfully
+// growing the external-subrequest footprint. If the cursor isn't crossed
+// within these pages the tick stops at 'page_limit' and does NOT advance the
+// cursor (see below), so a miss here is a delay, never data loss.
+const RECENT_PAGE_LIMIT = 2; // pages of /danh-sach/phim-moi-cap-nhat to scan before giving up on this tick
 
 /** Versioned cursor for the recent feed. `slug` is a deterministic
  * tie-breaker/diagnostic value; equal-timestamp items are still scanned on
@@ -90,7 +97,16 @@ function newerCursor(a: RecentCursor, b: RecentCursor): RecentCursor {
   return a.slug >= b.slug ? a : b;
 }
 
-async function persistRecentSummary(repos: ReturnType<typeof buildRepos>, result: IncrementalSyncResult): Promise<void> {
+/** Advances the incremental-sync cursor. Split out so
+ * src-ssr/workflows/incrementalSyncWorkflow.ts can wrap it in its own step,
+ * run only after every per-slug sync step in that tick has succeeded --
+ * same "advance only on a clean full pass" invariant runIncrementalSync
+ * enforces inline (see its own cursor-write block below). */
+export async function commitRecentCursor(env: Env, cursor: RecentCursor): Promise<void> {
+  await buildRepos(env).syncState.set('cursor:recent', JSON.stringify(cursor));
+}
+
+export async function persistRecentSummary(repos: ReturnType<typeof buildRepos>, result: IncrementalSyncResult): Promise<void> {
   try {
     await repos.syncState.set('recent:last_run', JSON.stringify({ ...result, recordedAt: new Date().toISOString() }));
   } catch {
@@ -113,7 +129,7 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) 
   return results;
 }
 
-function buildRepos(env: Env) {
+export function buildRepos(env: Env) {
   return {
     movie: new MovieRepository(env.DB),
     episode: new EpisodeRepository(env.DB),
@@ -125,7 +141,7 @@ function buildRepos(env: Env) {
   };
 }
 
-function buildClients(env: Env, shardDivisor = SHARD_COUNT) {
+export function buildClients(env: Env, shardDivisor = SHARD_COUNT) {
   return {
     kkphim: new KkphimClient(new RateLimiter(PHIMAPI_AGGREGATE_RPS / shardDivisor)),
     tmdb: new TmdbClient(env.TMDB_API_TOKEN ?? '', new RateLimiter(TMDB_AGGREGATE_RPS / shardDivisor)),
@@ -195,26 +211,32 @@ function chunkInto<T>(items: readonly T[], parts: number): T[][] {
   return out.filter((c) => c.length > 0);
 }
 
-/** Incremental sync (plan §2.1): scan /danh-sach/phim-moi-cap-nhat pages
- * newest-first until we cross the last-seen cursor, fan the collected slugs
- * out across shards via the SELF service binding (same reasoning as
- * worker/lib/home.js: a Worker fetch()-ing its own Custom Domain 522s; a
- * service binding does not touch the public network at all), then advance
- * the cursor only if the whole pass completed cleanly -- a partial failure
- * re-scans the same window next tick rather than silently skipping items.
- * Items sharing the cursor timestamp are deliberately re-scanned: KKPhim can
- * reorder ties between pages, and a timestamp-only stop at the first tie
- * loses titles at that boundary. */
-export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResult> {
+export interface RecentScanResult {
+  slugs: string[];
+  cursorBefore: RecentCursor | null;
+  newest: RecentCursor | null;
+  scanComplete: boolean;
+  scanFailed: boolean;
+  pagesScanned: number;
+  fetched: number;
+  stopReason: IncrementalStopReason;
+}
+
+/** The page-scanning half of incremental sync, extracted so a caller that
+ * wants per-slug step boundaries (src-ssr/workflows/incrementalSyncWorkflow.ts)
+ * can request just the candidate slug list without also getting
+ * runIncrementalSync's own SELF-fan-out shape. Behavior identical to what
+ * used to be inline in runIncrementalSync below -- scan
+ * /danh-sach/phim-moi-cap-nhat pages newest-first until the last-seen cursor
+ * is crossed. Items sharing the cursor timestamp are deliberately
+ * re-scanned: KKPhim can reorder ties between pages, and a timestamp-only
+ * stop at the first tie loses titles at that boundary. */
+export async function scanRecentSlugs(env: Env, pageLimit = RECENT_PAGE_LIMIT): Promise<RecentScanResult> {
   const repos = buildRepos(env);
   const clients = buildClients(env);
   const rawCursor = await repos.syncState.get('cursor:recent');
   const cursor = parseRecentCursor(rawCursor);
   const cursorTime = cursor ? Date.parse(cursor.time) : 0;
-  const finish = async (result: IncrementalSyncResult): Promise<IncrementalSyncResult> => {
-    await persistRecentSummary(repos, result);
-    return result;
-  };
 
   const slugs: string[] = [];
   const seenSlugs = new Set<string>();
@@ -224,7 +246,7 @@ export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResul
   let pagesScanned = 0;
   let fetched = 0;
   let discoveryStopReason: IncrementalStopReason | null = null;
-  for (let page = 1; page <= RECENT_PAGE_LIMIT; page++) {
+  for (let page = 1; page <= pageLimit; page++) {
     pagesScanned++;
     const pageResult = await clients.kkphim.getRecentPage(page);
     if (pageResult.kind !== 'success') {
@@ -267,6 +289,39 @@ export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResul
   }
   if (!discoveryStopReason) discoveryStopReason = 'page_limit';
 
+  return {
+    slugs,
+    cursorBefore: cursor,
+    newest,
+    scanComplete,
+    scanFailed,
+    pagesScanned,
+    fetched,
+    stopReason: slugs.length === 0 && discoveryStopReason === 'page_limit' ? 'no_new_slugs' : discoveryStopReason,
+  };
+}
+
+/** Incremental sync (plan §2.1): scanRecentSlugs above finds candidate
+ * slugs, then this fans them out across shards via the SELF service binding
+ * (same reasoning as worker/lib/home.js: a Worker fetch()-ing its own
+ * Custom Domain 522s; a service binding does not touch the public network
+ * at all), then advances the cursor only if the whole pass completed
+ * cleanly -- a partial failure re-scans the same window next tick rather
+ * than silently skipping items. Retained for the manual /__sync/run route
+ * and the legacy scheduled() cron path (src-ssr/index.ts) during the
+ * Workflows migration soak period (docs/plan-free-plan-migration.md Phase
+ * 4) -- src-ssr/workflows/incrementalSyncWorkflow.ts calls scanRecentSlugs
+ * directly instead, so each slug gets its own step rather than being
+ * batched into a handful of SELF-fanned invocations. */
+export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResult> {
+  const repos = buildRepos(env);
+  const scan = await scanRecentSlugs(env);
+  const { slugs, cursorBefore: cursor, newest, scanComplete, scanFailed, pagesScanned, fetched } = scan;
+  const finish = async (result: IncrementalSyncResult): Promise<IncrementalSyncResult> => {
+    await persistRecentSummary(repos, result);
+    return result;
+  };
+
   if (slugs.length === 0) {
     return finish({
       slugsFound: 0,
@@ -277,7 +332,7 @@ export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResul
       failed: scanFailed ? 1 : 0,
       rowsWritten: 0,
       pagesScanned,
-      stopReason: discoveryStopReason === 'page_limit' ? 'no_new_slugs' : discoveryStopReason,
+      stopReason: scan.stopReason,
       cursorBefore: cursor,
       cursorAfter: cursor,
       shards: [],
@@ -334,7 +389,7 @@ export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResul
     }
   }
 
-  let stopReason: IncrementalStopReason = discoveryStopReason ?? 'no_new_slugs';
+  let stopReason: IncrementalStopReason = scan.stopReason;
   if (cursorWriteFailed) stopReason = 'cursor_write_error';
   else if (scanFailed) stopReason = 'upstream_error';
   else if (!scanComplete) stopReason = 'page_limit';
@@ -409,29 +464,83 @@ const BACKFILL_MAX_PAGES_PER_TYPE = 5000;
 // phim-le listing alone reporting 16,920 items / 705 pages).
 const MAX_CONSECUTIVE_EMPTY_RETRIES = 3;
 
-/** Cron-driven backfill (Phase 7) -- deliberately NOT invoked over HTTP.
- * ADR-0002's own principle ("Cron is the ONLY component allowed to call
- * TMDB/phimimg") argues against a design that needs a human to keep curling
- * a CRON_KEY-gated route by hand; this instead resumes from a D1 cursor
- * every scheduled() tick until the whole catalog is walked, then no-ops
- * forever. `env.BACKFILL_MODE === 'burst'` only changes what syncSlugBatch
- * does inside this loop (governor on/off, plan §7 table) -- the walking
- * logic itself is identical either way, just faster or slower to finish. */
-export async function runBackfillTick(env: Env): Promise<{ ticked: boolean; pagesProcessed: number; done: boolean }> {
+/** Reads env.BACKFILL_ENABLED (Cloudflare dashboard "Variables and
+ * secrets", editable without a redeploy -- docs/plan-free-plan-migration.md
+ * user requirement). Default off: the initial catalog backfill is complete
+ * (docs/state-free-plan-migration.md Phase 0), so backfill should be
+ * inert unless an operator explicitly flips this on for a future re-crawl
+ * (a new listing type, a targeted range) via BACKFILL_TYPE/
+ * BACKFILL_PAGE_FROM/BACKFILL_PAGE_TO below. */
+function isBackfillEnabled(env: Env): boolean {
+  return (env.BACKFILL_ENABLED ?? '').trim().toLowerCase() === 'true';
+}
+
+/** env.BACKFILL_TYPE narrows the walk to one listing type instead of the
+ * full BACKFILL_TYPES sequence. Empty/unrecognized value = all types, same
+ * as before this control existed. */
+function resolveBackfillTypes(env: Env): string[] {
+  const override = env.BACKFILL_TYPE?.trim();
+  return override && BACKFILL_TYPES.includes(override) ? [override] : BACKFILL_TYPES;
+}
+
+function parsePositiveInt(value: string | undefined): number | null {
+  if (!value) return null;
+  const n = Number(value.trim());
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+export interface BackfillTickResult {
+  ticked: boolean;
+  pagesProcessed: number;
+  done: boolean;
+  enabled: boolean;
+}
+
+/** Backfill (Phase 7) -- deliberately NOT invoked over HTTP for its
+ * scheduled path. ADR-0002's own principle ("Cron is the ONLY component
+ * allowed to call TMDB/phimimg") argues against a design that needs a
+ * human to keep curling a CRON_KEY-gated route by hand; this instead
+ * resumes from a D1 cursor every tick until the walk (or the configured
+ * env.BACKFILL_PAGE_TO range) is exhausted, then no-ops forever until an
+ * operator re-enables it. `env.BACKFILL_MODE === 'burst'` only changes what
+ * syncSlugBatch does inside this loop (governor on/off, plan §7 table) --
+ * the walking logic itself is identical either way, just faster or slower
+ * to finish.
+ *
+ * `maxPagesThisCall` bounds one call to a small page count instead of
+ * relying solely on BACKFILL_TICK_BUDGET_MS's wall-time budget --
+ * src-ssr/workflows/backfillWorkflow.ts passes a small number (its own step
+ * calls this once per step), the legacy scheduled() path and the default
+ * leave it unbounded (Infinity), preserving the original wall-time-only
+ * behavior. */
+export async function runBackfillTick(env: Env, maxPagesThisCall = Infinity): Promise<BackfillTickResult> {
+  if (!isBackfillEnabled(env)) return { ticked: false, pagesProcessed: 0, done: true, enabled: false };
+
   const repos = buildRepos(env);
+  const types = resolveBackfillTypes(env);
+  const pageTo = parsePositiveInt(env.BACKFILL_PAGE_TO);
+
   if ((await repos.syncState.get('backfill:done')) === '1') {
-    return { ticked: false, pagesProcessed: 0, done: true };
+    const pageFrom = parsePositiveInt(env.BACKFILL_PAGE_FROM);
+    if (!pageFrom) return { ticked: false, pagesProcessed: 0, done: true, enabled: true };
+    // A previous walk finished and the operator has asked (via the
+    // dashboard) for a fresh, explicitly-bounded run -- restart the cursor
+    // at the chosen page rather than silently staying done forever.
+    await repos.syncState.delete('backfill:done');
+    await repos.syncState.set('backfill:type_index', '0');
+    await repos.syncState.set('backfill:page', String(pageFrom));
   }
 
   let typeIndex = Number((await repos.syncState.get('backfill:type_index')) ?? '0');
+  if (typeIndex >= types.length) typeIndex = 0; // BACKFILL_TYPE narrowed the list since the cursor was last written
   let page = Number((await repos.syncState.get('backfill:page')) ?? '1');
   const deadline = Date.now() + BACKFILL_TICK_BUDGET_MS;
   let pagesProcessed = 0;
   let consecutiveEmpty = 0;
 
-  while (Date.now() < deadline && typeIndex < BACKFILL_TYPES.length) {
-    const type = BACKFILL_TYPES[typeIndex] as string;
-    if (page > BACKFILL_MAX_PAGES_PER_TYPE) {
+  while (Date.now() < deadline && pagesProcessed < maxPagesThisCall && typeIndex < types.length) {
+    const type = types[typeIndex] as string;
+    if (page > BACKFILL_MAX_PAGES_PER_TYPE || (pageTo !== null && page > pageTo)) {
       typeIndex++;
       page = 1;
       consecutiveEmpty = 0;
@@ -473,10 +582,10 @@ export async function runBackfillTick(env: Env): Promise<{ ticked: boolean; page
   await repos.syncState.set('backfill:type_index', String(typeIndex));
   await repos.syncState.set('backfill:page', String(page));
 
-  const done = typeIndex >= BACKFILL_TYPES.length;
+  const done = typeIndex >= types.length;
   if (done) await repos.syncState.set('backfill:done', '1');
 
-  return { ticked: true, pagesProcessed, done };
+  return { ticked: true, pagesProcessed, done, enabled: true };
 }
 
 // See BACKFILL_TICK_BUDGET_MS above for how this fits in the same 15-min
@@ -484,7 +593,7 @@ export async function runBackfillTick(env: Env): Promise<{ ticked: boolean; page
 const RESOLVE_TICK_BUDGET_MS = 3 * 60 * 1000;
 // Groups considered per tick, upper bound -- the wall-time budget above is
 // what actually cuts a tick short in practice.
-const RESOLVE_BATCH_SIZE = 300;
+export const RESOLVE_BATCH_SIZE = 300;
 // Overflow is reopened separately before the resolver reads pending work. A
 // smaller page keeps D1 writes and cache invalidation bounded per cron.
 const REQUEUE_BATCH_SIZE = 100;
@@ -508,7 +617,8 @@ export interface ResolveTickResult {
   durationMs: number;
 }
 
-type Repositories = ReturnType<typeof buildRepos>;
+export type Repositories = ReturnType<typeof buildRepos>;
+export type Clients = ReturnType<typeof buildClients>;
 
 function parseRequeueCursor(value: string | null) {
   if (!value) return null;
@@ -532,7 +642,7 @@ function parseRequeueCursor(value: string | null) {
   }
 }
 
-async function requeueOverflowGroups(repos: Repositories, maxStubs: number, stubCount: number) {
+export async function requeueOverflowGroups(repos: Repositories, maxStubs: number, stubCount: number) {
   let cursor = parseRequeueCursor(await repos.syncState.get(REQUEUE_CURSOR_KEY));
   const includeStubEligible = maxStubs > stubCount;
   let candidates = await repos.recommendation.getOverflowGroupsForRequeue(
@@ -597,11 +707,24 @@ async function resolveTarget(
   }
 }
 
-/** Phase 4 (plan §4, ADR-0002 Finding 3) -- the three-tier recommendation
- * resolve. Cron-driven for the same reason backfill is (services/sync/
- * orchestrator.ts runBackfillTick doc comment): no CRON_KEY needed to
- * operate it. For each (target_tmdb_id, target_type) still unresolved,
- * most-referenced first:
+export interface ResolveGroup {
+  targetTmdbId: number;
+  targetType: 'movie' | 'tv';
+  refCount: number;
+}
+
+export interface ResolveGroupOutcome {
+  kind: 'resolved_existing' | 'resolved_stub' | 'overflow' | 'retryable';
+  cacheTagsPurged: number;
+}
+
+/** One (target_tmdb_id, target_type) group's worth of the three-tier
+ * resolve, extracted from the tick loop below so a caller wanting per-group
+ * step boundaries (src-ssr/workflows/recommendationResolveWorkflow.ts) can
+ * wrap this single group in its own step instead of the whole batch.
+ * `stubCountRef` is mutated in place -- the stub budget is shared and must
+ * stay accurate across sequential calls within one tick/run, same as the
+ * `stubCount` local runRecommendationResolveTick used to close over inline.
  *   1. Already in the local catalog (idx_movie_tmdb)? -> resolve directly,
  *      no network call.
  *   2. On KKPhim but not synced yet (/tmdb/{type}/{id} lookup)? -> sync it
@@ -614,14 +737,75 @@ async function resolveTarget(
  *      its own -- crawl depth stops here on purpose) and resolve to it.
  *   4. Otherwise -- overflow. markAttempted so it isn't re-fetched every
  *      tick; the edge stays in the table, unrendered, not deleted. */
+export async function resolveOneGroup(
+  env: Env,
+  repos: Repositories,
+  clients: Clients,
+  group: ResolveGroup,
+  maxStubs: number,
+  stubCountRef: { count: number }
+): Promise<ResolveGroupOutcome> {
+  const { targetTmdbId, targetType, refCount } = group;
+
+  const local = await repos.movie.getCanonicalTargetByTmdbRef(targetType, targetTmdbId);
+  if (local) {
+    const cacheTagsPurged = await resolveTarget(repos, targetTmdbId, targetType, local.slug);
+    return { kind: 'resolved_existing', cacheTagsPurged };
+  }
+
+  const onKkphim = await clients.kkphim.getByTmdbRef(targetType, targetTmdbId);
+  if (onKkphim.kind === 'retryable_error') return { kind: 'retryable', cacheTagsPurged: 0 };
+  if (onKkphim.kind === 'found') {
+    const synced = await syncOneMovie(env, onKkphim.data.movie.slug, clients, repos);
+    if (synced.outcome !== 'written' && synced.outcome !== 'unchanged') {
+      return { kind: 'retryable', cacheTagsPurged: 0 };
+    }
+    const target = await repos.movie.getBySlug(onKkphim.data.movie.slug);
+    if (!target) return { kind: 'retryable', cacheTagsPurged: 0 };
+    const cacheTagsPurged = await resolveTarget(repos, targetTmdbId, targetType, target.slug);
+    return { kind: 'resolved_existing', cacheTagsPurged };
+  }
+
+  if (maxStubs > 0 && refCount >= STUB_MIN_REFCOUNT && stubCountRef.count < maxStubs) {
+    const tmdbDetail = await clients.tmdb.getDetailResult(targetType, targetTmdbId);
+    const rawTitle = tmdbDetail.kind === 'success' ? tmdbDetail.data.title || tmdbDetail.data.name : '';
+    if (tmdbDetail.kind === 'success' && rawTitle) {
+      const slug = slugifyStub(rawTitle, targetType, targetTmdbId);
+      const stub = normalizeStubMovie(slug, tmdbDetail.data, targetTmdbId, targetType);
+      const hash = hashMovie(stub);
+      await repos.movie.upsertMany([{ movie: stub, hash }]);
+      await repos.search.indexMovie(slug, stub.title, stub.originalTitle);
+      const cacheTagsPurged = await resolveTarget(repos, targetTmdbId, targetType, slug);
+      stubCountRef.count++;
+      return { kind: 'resolved_stub', cacheTagsPurged };
+    }
+    if (tmdbDetail.kind === 'retryable_error') return { kind: 'retryable', cacheTagsPurged: 0 };
+  }
+
+  await repos.recommendation.markAttempted(targetTmdbId, targetType);
+  return { kind: 'overflow', cacheTagsPurged: 0 };
+}
+
+/** Phase 4 (plan §4, ADR-0002 Finding 3) -- the three-tier recommendation
+ * resolve, batched over resolveOneGroup above. Cron-driven for the same
+ * reason backfill is (services/sync/orchestrator.ts runBackfillTick doc
+ * comment): no CRON_KEY needed to operate it. Retained for the manual
+ * /__sync/resolve-recommendations route and the legacy scheduled() cron
+ * path during the Workflows migration soak period
+ * (docs/plan-free-plan-migration.md Phase 4) --
+ * src-ssr/workflows/recommendationResolveWorkflow.ts calls resolveOneGroup
+ * directly instead, chunked into small per-batch steps rather than one
+ * wall-time-bounded loop (docs/state-free-plan-migration.md Phase 0 audit:
+ * this tick alone observed ~169 external subrequests in one invocation
+ * against a real backlog, over 3x the Free-plan 50/invocation cap). */
 export async function runRecommendationResolveTick(env: Env): Promise<ResolveTickResult> {
   const startedAt = Date.now();
   const repos = buildRepos(env);
   const clients = buildClients(env, 1);
   const configuredMaxStubs = Number(env.MAX_STUBS ?? '0');
   const maxStubs = Number.isFinite(configuredMaxStubs) ? Math.max(0, Math.floor(configuredMaxStubs)) : 0;
-  let stubCount = maxStubs > 0 ? await repos.movie.countByTier('stub') : 0;
-  const requeue = await requeueOverflowGroups(repos, maxStubs, stubCount);
+  const stubCountRef = { count: maxStubs > 0 ? await repos.movie.countByTier('stub') : 0 };
+  const requeue = await requeueOverflowGroups(repos, maxStubs, stubCountRef.count);
   const groups = await repos.recommendation.getUnresolvedGroupedByTarget(RESOLVE_BATCH_SIZE);
   const deadline = Date.now() + RESOLVE_TICK_BUDGET_MS;
 
@@ -632,60 +816,15 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
   let cacheTagsPurged = 0;
   let groupsSeen = 0;
 
-  for (const { targetTmdbId, targetType, refCount } of groups) {
+  for (const group of groups) {
     if (Date.now() >= deadline) break;
     groupsSeen++;
-
-    const local = await repos.movie.getCanonicalTargetByTmdbRef(targetType, targetTmdbId);
-    if (local) {
-      cacheTagsPurged += await resolveTarget(repos, targetTmdbId, targetType, local.slug);
-      resolvedToExisting++;
-      continue;
-    }
-
-    const onKkphim = await clients.kkphim.getByTmdbRef(targetType, targetTmdbId);
-    if (onKkphim.kind === 'retryable_error') {
-      retryable++;
-      continue;
-    }
-    if (onKkphim.kind === 'found') {
-      const synced = await syncOneMovie(env, onKkphim.data.movie.slug, clients, repos);
-      if (synced.outcome !== 'written' && synced.outcome !== 'unchanged') {
-        retryable++;
-        continue;
-      }
-      const target = await repos.movie.getBySlug(onKkphim.data.movie.slug);
-      if (!target) {
-        retryable++;
-        continue;
-      }
-      cacheTagsPurged += await resolveTarget(repos, targetTmdbId, targetType, target.slug);
-      resolvedToExisting++;
-      continue;
-    }
-
-    if (maxStubs > 0 && refCount >= STUB_MIN_REFCOUNT && stubCount < maxStubs) {
-      const tmdbDetail = await clients.tmdb.getDetailResult(targetType, targetTmdbId);
-      const rawTitle = tmdbDetail.kind === 'success' ? tmdbDetail.data.title || tmdbDetail.data.name : '';
-      if (tmdbDetail.kind === 'success' && rawTitle) {
-        const slug = slugifyStub(rawTitle, targetType, targetTmdbId);
-        const stub = normalizeStubMovie(slug, tmdbDetail.data, targetTmdbId, targetType);
-        const hash = hashMovie(stub);
-        await repos.movie.upsertMany([{ movie: stub, hash }]);
-        await repos.search.indexMovie(slug, stub.title, stub.originalTitle);
-        cacheTagsPurged += await resolveTarget(repos, targetTmdbId, targetType, slug);
-        stubCount++;
-        resolvedToStub++;
-        continue;
-      }
-      if (tmdbDetail.kind === 'retryable_error') {
-        retryable++;
-        continue;
-      }
-    }
-
-    await repos.recommendation.markAttempted(targetTmdbId, targetType);
-    overflow++;
+    const outcome = await resolveOneGroup(env, repos, clients, group, maxStubs, stubCountRef);
+    cacheTagsPurged += outcome.cacheTagsPurged;
+    if (outcome.kind === 'resolved_existing') resolvedToExisting++;
+    else if (outcome.kind === 'resolved_stub') resolvedToStub++;
+    else if (outcome.kind === 'overflow') overflow++;
+    else retryable++;
   }
 
   return {
@@ -697,7 +836,7 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
     overflow,
     retryable,
     cacheTagsPurged,
-    stubCount,
+    stubCount: stubCountRef.count,
     maxStubs,
     durationMs: Date.now() - startedAt,
   };
