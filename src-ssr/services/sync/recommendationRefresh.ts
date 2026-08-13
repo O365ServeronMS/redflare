@@ -52,11 +52,14 @@ export async function refreshOneSource(
 }
 
 /** Refreshes source recommendation IDs without fetching KKPhim/movie detail,
- * batched over refreshOneSource above. Retained for the manual path and the
- * legacy scheduled() cron during the Workflows migration soak period
- * (docs/plan-free-plan-migration.md Phase 4). A retryable TMDB response
- * leaves both the existing edges and success time intact, so it remains
- * eligible on the next tick either way. */
+ * batched over refreshOneSource above. The scheduled() cron this used to
+ * serve is retired as of docs/plan-free-plan-migration.md Phase 5 --
+ * src-ssr/workflows/recommendationRefreshWorkflow.ts calls refreshOneSource
+ * directly instead, chunked into small per-batch steps. Kept as a thin
+ * batch wrapper for tests/recommendationRefresh.test.mjs's coverage of
+ * refreshOneSource's behavior. A retryable TMDB response leaves both the
+ * existing edges and success time intact, so it remains eligible on the
+ * next tick either way. */
 export async function runRecommendationRefreshTick(env: Env): Promise<RecommendationRefreshTickResult> {
   const freshness = new RecommendationFreshnessRepository(env.DB);
   const recommendation = new RecommendationRepository(env.DB);

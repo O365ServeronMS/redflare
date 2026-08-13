@@ -308,9 +308,9 @@ export async function scanRecentSlugs(env: Env, pageLimit = RECENT_PAGE_LIMIT): 
  * at all), then advances the cursor only if the whole pass completed
  * cleanly -- a partial failure re-scans the same window next tick rather
  * than silently skipping items. Retained for the manual /__sync/run route
- * and the legacy scheduled() cron path (src-ssr/index.ts) during the
- * Workflows migration soak period (docs/plan-free-plan-migration.md Phase
- * 4) -- src-ssr/workflows/incrementalSyncWorkflow.ts calls scanRecentSlugs
+ * (the scheduled() cron this used to also serve is retired as of
+ * docs/plan-free-plan-migration.md Phase 5) --
+ * src-ssr/workflows/incrementalSyncWorkflow.ts calls scanRecentSlugs
  * directly instead, so each slug gets its own step rather than being
  * batched into a handful of SELF-fanned invocations. */
 export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResult> {
@@ -787,12 +787,11 @@ export async function resolveOneGroup(
 }
 
 /** Phase 4 (plan §4, ADR-0002 Finding 3) -- the three-tier recommendation
- * resolve, batched over resolveOneGroup above. Cron-driven for the same
- * reason backfill is (services/sync/orchestrator.ts runBackfillTick doc
- * comment): no CRON_KEY needed to operate it. Retained for the manual
- * /__sync/resolve-recommendations route and the legacy scheduled() cron
- * path during the Workflows migration soak period
- * (docs/plan-free-plan-migration.md Phase 4) --
+ * resolve, batched over resolveOneGroup above. Retained for the manual
+ * /__sync/resolve-recommendations route (the scheduled() cron this used to
+ * also serve is retired as of docs/plan-free-plan-migration.md Phase 5 --
+ * it was in fact the job that repeatedly exceeded CPU there, per
+ * docs/state-free-plan-migration.md Phase 5) --
  * src-ssr/workflows/recommendationResolveWorkflow.ts calls resolveOneGroup
  * directly instead, chunked into small per-batch steps rather than one
  * wall-time-bounded loop (docs/state-free-plan-migration.md Phase 0 audit:

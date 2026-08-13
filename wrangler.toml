@@ -105,24 +105,21 @@ BACKFILL_PAGE_TO = ""
 # Localhost belongs only in a local override, never in this production value.
 TURNSTILE_HOSTNAMES = "phim.bluesia.net"
 
-# Legacy single cron (docs/plan-free-plan-migration.md Phase 4/5): still
-# drives the old scheduled() handler in src-ssr/index.ts in parallel with
-# the [[workflows]] schedules below during the migration soak period.
-# Remove this trigger (and scheduled() itself) once the Workflows below have
-# been observed stable for a few days -- see the plan's Phase 5.
-[triggers]
-crons = ["*/15 * * * *"]
-
-# Cloudflare Workflows (docs/plan-free-plan-migration.md Phase 3) -- one per
-# job, each step getting its own fresh CPU/subrequest budget instead of all
-# five jobs sharing one scheduled() invocation's (Free-plan cap: 10ms
-# CPU + 50 external subrequests per invocation, confirmed exceeded by two of
-# the five jobs individually -- docs/state-free-plan-migration.md Phase 0).
-# Each Workflow's `schedules` is its own cron budget (up to 100 cron
-# expressions/account), separate from the classic [triggers] Cron Trigger
-# quota above (5/account on Free) -- this is what lets incremental sync run
-# every 30 min while the other three keep their original 15-min cadence,
-# which a single shared Cron Trigger could not do.
+# The legacy single [triggers] cron (drove the old scheduled() handler in
+# src-ssr/index.ts) is retired as of docs/plan-free-plan-migration.md Phase
+# 5 -- docs/state-free-plan-migration.md Phase 0 measured that shape (five
+# jobs, one shared invocation, no per-job budget reset) exceeding the
+# Free-plan 50-external-subrequest cap on two of the jobs individually, and
+# Phase 5 itself was triggered by live production evidence: at a
+# dashboard-configured 10ms CPU limit, recommendation resolve was
+# consistently the job running when the isolate got killed for exceeding
+# CPU. The Cloudflare Workflows below (docs/plan-free-plan-migration.md
+# Phase 3) fully replace it -- one per job, each step getting its own fresh
+# CPU/subrequest budget. Each Workflow's `schedules` is its own cron budget
+# (up to 100 cron expressions/account, separate from the classic Cron
+# Trigger quota that used to gate the single shared trigger) -- this is what
+# lets incremental sync run every 30 min while the other three keep their
+# original 15-min cadence, which a single shared Cron Trigger could not do.
 [[workflows]]
 name = "incremental-sync"
 binding = "INCREMENTAL_SYNC_WORKFLOW"

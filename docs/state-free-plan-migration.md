@@ -195,6 +195,58 @@ compared against `wrangler tail` timestamps for the legacy cron, which needs a l
 observation window than one snapshot. Next check should compare this baseline against
 a reading a day or more later.
 
+## Phase 5 — Legacy cron removed, triggered by live production evidence (2026-08-13)
+
+Soak period ended early, for cause: the operator set the deployed Worker's CPU limit
+to 10ms directly on the Cloudflare dashboard (a real Free-plan-equivalent test, not a
+local simulation) and observed the legacy `scheduled()` cron **actively erroring** —
+not a theoretical risk, happening on real ticks. Two dashboard captures (Cloudflare
+Workers Logs, `$metadata.message` view) confirmed the same failure both times:
+
+```
+13:30:13.251 GMT+7  cron */15 * * * * fired          (10ms CPU budget, 4.44s wall)
+13:30:13.818 GMT+7  "incremental_sync"                (console.info, completed)
+13:30:13.984 GMT+7  "hero_snapshot_refresh"            (console.info, completed)
+13:30:17.658 GMT+7  "Worker exceeded CPU time limit."  (UTC 2026-08-13T06:30:17Z)
+```
+
+A second capture from the prior tick (13:15:13.252 GMT+7) showed the same pattern —
+`incremental_sync` then `hero_snapshot_refresh` logged, then nothing further visible,
+with total CPU already at 93ms (9.3x the 10ms budget).
+
+**Root cause, read directly off the log order:** `src-ssr/index.ts`'s `scheduled()`
+logs `incremental_sync`, then `hero_snapshot_refresh`, then calls
+`runRecommendationResolveTick` (only logs `recommendation_resolve` *after* it
+returns). Since that log line never appears in either capture, recommendation resolve
+is the job running when the isolate gets killed. This matches Phase 0's own finding
+(this exact job measured ~169 external subrequests in one invocation) but adds the
+missing piece: CPU time is a **whole-invocation** budget shared cumulatively across
+all five jobs with no reset between them, so no single job needs to be expensive in
+isolation (manual `GET /__sync/resolve-recommendations` and
+`POST /__sync/refresh-hero?force=true`, tested directly via `wrangler tail` during
+this investigation, showed only 0.29ms and 0.079ms CPU respectively) — the *sum*,
+varying with backlog size tick to tick, is what crosses 10ms.
+
+**Action taken:** removed the legacy path entirely rather than continuing the soak.
+- `src-ssr/index.ts`: `scheduled()` handler and its four job imports deleted. Only
+  `fetch: app.fetch` remains in the default export.
+- `wrangler.toml`: `[triggers] crons = ["*/15 * * * *"]` block removed.
+- Doc comments in `orchestrator.ts` / `recommendationRefresh.ts` referencing "the
+  legacy scheduled() cron path during the migration soak period" updated to reflect
+  it's gone — `runIncrementalSync` and `runRecommendationResolveTick` are retained
+  for their manual `/__sync/*` routes; `runRecommendationRefreshTick` (no manual
+  route ever existed for it) is retained as a thin wrapper purely for
+  `tests/recommendationRefresh.test.mjs`'s coverage of `refreshOneSource`.
+- Verified: `npm run worker:typecheck` clean, `npm run build` succeeds, full test
+  suite (50 tests across 9 suites) passes, `wrangler deploy --dry-run` confirms no
+  `[triggers]` cron remains bound and all 5 Workflow bindings + vars still resolve.
+
+**Going forward**, all sync/catalog work is driven exclusively by the five
+`[[workflows]]` schedules in `wrangler.toml` — no shared invocation, no cumulative
+CPU/subrequest risk across jobs. `BACKFILL_ENABLED`/`BACKFILL_TYPE`/
+`BACKFILL_PAGE_FROM`/`BACKFILL_PAGE_TO` remain dashboard-editable per the original
+requirement.
+
 **Verification done:** `npm run worker:typecheck` clean; `npm run build` succeeds;
 `npx wrangler deploy --dry-run` confirms all 5 `[[workflows]]` bindings resolve to
 their exported classes and all new vars are recognized; full existing test suite
