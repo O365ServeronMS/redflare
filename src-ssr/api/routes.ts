@@ -5,6 +5,7 @@ import { EpisodeRepository } from '../repositories/episodeRepository';
 import { RecommendationRepository } from '../repositories/recommendationRepository';
 import { TaxonomyRepository } from '../repositories/taxonomyRepository';
 import { SearchRepository } from '../repositories/searchRepository';
+import { CatalogStatsRepository } from '../repositories/catalogStatsRepository';
 import { toLegacyItems, toLegacyDetail, toLegacyEpisodes } from './legacyItem';
 import { buildHomeData } from './homeData';
 import { clampPage, buildPagination } from './pagination';
@@ -55,6 +56,7 @@ apiRoute.get('/api/list', async (c) => {
   const type = c.req.query('type');
   const page = clampPage(c.req.query('page'));
   const movieRepo = new MovieRepository(c.env.DB);
+  const catalogStats = new CatalogStatsRepository(c.env.DB);
 
   // §2a: phim-moi-cap-nhat -- FLAT shape, {items, pagination} at the top
   // level, not wrapped in `data`. getNewMovies() in ophim.js reads exactly
@@ -62,7 +64,7 @@ apiRoute.get('/api/list', async (c) => {
   if (type === 'phim-moi-cap-nhat') {
     const [rows, totalItems] = await Promise.all([
       movieRepo.getRecentMoviesOffset(page, PAGE_SIZE),
-      movieRepo.countCatalog(),
+      catalogStats.getTierCount('catalog', () => movieRepo.countCatalog()),
     ]);
     applyApiCache(c, ['type:phim-moi-cap-nhat']);
     return c.json({ items: toLegacyItems(rows), pagination: buildPagination(totalItems, PAGE_SIZE, page) });
@@ -74,7 +76,7 @@ apiRoute.get('/api/list', async (c) => {
 
   const [rows, totalItems] = await Promise.all([
     movieRepo.getPageByTypeOffset(entry.value, page, PAGE_SIZE),
-    movieRepo.countByType(entry.value),
+    catalogStats.getTypeCount(entry.value, () => movieRepo.countByType(entry.value)),
   ]);
 
   applyApiCache(c, [`type:${type}`]);
@@ -96,12 +98,13 @@ apiRoute.get('/api/genre', async (c) => {
   if (!isValidSlug(slug)) return c.text('Not found', 404);
 
   const taxonomy = new TaxonomyRepository(c.env.DB);
+  const catalogStats = new CatalogStatsRepository(c.env.DB);
   const genre = await taxonomy.getGenre(slug);
   if (!genre) return c.text('Not found', 404);
 
   const [rows, totalItems] = await Promise.all([
     taxonomy.getMoviesByGenreOffset(slug, page, PAGE_SIZE),
-    taxonomy.countByGenre(slug),
+    catalogStats.getGenreCount(slug, () => taxonomy.countByGenre(slug)),
   ]);
 
   applyApiCache(c, [`genre:${slug}`]);
@@ -123,12 +126,13 @@ apiRoute.get('/api/country', async (c) => {
   if (!isValidSlug(slug)) return c.text('Not found', 404);
 
   const taxonomy = new TaxonomyRepository(c.env.DB);
+  const catalogStats = new CatalogStatsRepository(c.env.DB);
   const country = await taxonomy.getCountry(slug);
   if (!country) return c.text('Not found', 404);
 
   const [rows, totalItems] = await Promise.all([
     taxonomy.getMoviesByCountryOffset(slug, page, PAGE_SIZE),
-    taxonomy.countByCountry(slug),
+    catalogStats.getCountryCount(slug, () => taxonomy.countByCountry(slug)),
   ]);
 
   applyApiCache(c, [`country:${slug}`]);

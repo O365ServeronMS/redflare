@@ -56,6 +56,15 @@ export class IncrementalSyncWorkflow extends WorkflowEntrypoint<Env> {
       cursorAfter = newest;
     }
 
+    // catalog_stats (migrations/0013_query_optimization.sql) only needs
+    // recomputing when a movie row actually changed -- steady-state ticks
+    // write nothing (docs/state-free-plan-migration.md Phase 4 observed
+    // `written: 0` in typical runs), so this step is skipped far more often
+    // than it runs.
+    if (written > 0) {
+      await step.do('refresh-catalog-stats', () => repos.catalogStats.refresh());
+    }
+
     const result: IncrementalSyncResult = {
       slugsFound: scan.slugs.length,
       fetched: scan.fetched,

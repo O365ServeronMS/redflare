@@ -7,6 +7,7 @@ import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
 import { SearchRepository } from '../../repositories/searchRepository';
 import { SyncStateRepository } from '../../repositories/syncStateRepository';
 import { TmdbOverrideRepository } from '../../repositories/tmdbOverrideRepository';
+import { CatalogStatsRepository } from '../../repositories/catalogStatsRepository';
 import { KkphimClient } from './kkphimClient';
 import { TmdbClient } from './tmdbClient';
 import { syncOneMovie, type SyncOneResult } from './syncMovie';
@@ -138,6 +139,7 @@ export function buildRepos(env: Env) {
     search: new SearchRepository(env.DB),
     syncState: new SyncStateRepository(env.DB),
     tmdbOverride: new TmdbOverrideRepository(env.DB),
+    catalogStats: new CatalogStatsRepository(env.DB),
   };
 }
 
@@ -603,6 +605,25 @@ const CACHE_PURGE_TAGS_PER_CALL = 100;
 // movies actually point at to be worth a whole extra D1 row + TMDB fetch.
 const STUB_MIN_REFCOUNT = 2;
 
+// docs/state-free-plan-migration.md Phase 7: repos.movie.countByTier('stub')
+// was a full table scan (no index on movie.tier, and even with one the
+// scan cost would be proportional to the ~30k catalog rows, not the ~1k
+// stub rows being counted) run on every resolve tick just to check
+// MAX_STUBS headroom. Stubs are only ever created below, in resolveOneGroup
+// -- never deleted or promoted out of tier='stub' -- so a running counter
+// in sync_state is exact, not an approximation. Lazily seeded from one real
+// count the first time this key is missing (e.g. right after this change
+// deploys).
+const STUB_COUNT_KEY = 'movie:stub_count';
+
+export async function getStubCount(repos: Repositories): Promise<number> {
+  const stored = await repos.syncState.get(STUB_COUNT_KEY);
+  if (stored !== null) return Number(stored);
+  const counted = await repos.movie.countByTier('stub');
+  await repos.syncState.set(STUB_COUNT_KEY, String(counted));
+  return counted;
+}
+
 export interface ResolveTickResult {
   groupsSeen: number;
   requeueCandidates: number;
@@ -777,6 +798,7 @@ export async function resolveOneGroup(
       await repos.search.indexMovie(slug, stub.title, stub.originalTitle);
       const cacheTagsPurged = await resolveTarget(repos, targetTmdbId, targetType, slug);
       stubCountRef.count++;
+      await repos.syncState.set(STUB_COUNT_KEY, String(stubCountRef.count));
       return { kind: 'resolved_stub', cacheTagsPurged };
     }
     if (tmdbDetail.kind === 'retryable_error') return { kind: 'retryable', cacheTagsPurged: 0 };
@@ -803,7 +825,7 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
   const clients = buildClients(env, 1);
   const configuredMaxStubs = Number(env.MAX_STUBS ?? '0');
   const maxStubs = Number.isFinite(configuredMaxStubs) ? Math.max(0, Math.floor(configuredMaxStubs)) : 0;
-  const stubCountRef = { count: maxStubs > 0 ? await repos.movie.countByTier('stub') : 0 };
+  const stubCountRef = { count: maxStubs > 0 ? await getStubCount(repos) : 0 };
   const requeue = await requeueOverflowGroups(repos, maxStubs, stubCountRef.count);
   const groups = await repos.recommendation.getUnresolvedGroupedByTarget(RESOLVE_BATCH_SIZE);
   const deadline = Date.now() + RESOLVE_TICK_BUDGET_MS;
@@ -825,6 +847,11 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
     else if (outcome.kind === 'overflow') overflow++;
     else retryable++;
   }
+
+  // Only a new stub changes any catalog_stats count (a stub gets a real
+  // `type` value, see normalizeStubMovie) -- resolving to an existing
+  // target just rewrites a foreign key, never a movie row.
+  if (resolvedToStub > 0) await repos.catalogStats.refresh();
 
   return {
     groupsSeen,

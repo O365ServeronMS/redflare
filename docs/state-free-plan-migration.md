@@ -316,3 +316,86 @@ suite (50 tests / 9 suites) passes unchanged — none of it hardcoded the old
 12/15 constants. **Not done:** no real deploy yet; actual steps/day under the new
 cadence has not been observed against live traffic (belongs to a follow-up soak
 check via `GET /__sync/status` a day or more after deploy, same as Phase 4).
+
+## Phase 7 — D1 rows-read audit + query fixes (2026-08-14)
+
+Following up on a broader "what else in Compute could help" question, measured D1
+`rows_read` directly against production (`d1_database_query` MCP tool) instead of
+estimating. Found the real next bottleneck isn't CPU or Workflows steps -- it's D1
+rows read, and it isn't close: **one `recommendation-resolve` tick was reading
+~380,000 rows to find a backlog that was already empty** (`pending_groups: 0`,
+confirmed by direct query). At the Phase 6 `*/30` cadence that's an estimated
+**~19.7M rows/day, ~394% of the D1 Free-plan 5M/day quota** -- currently invisible
+because the account is on Paid (25B rows/month included), but it's the thing that
+would actually block a future downgrade, not CPU or Workflows steps.
+
+Root cause, confirmed via `EXPLAIN QUERY PLAN` on the two queries in
+`recommendationRepository.ts` (`getUnresolvedGroupedByTarget`,
+`getOverflowGroupsForRequeue`): both filter on `target_slug IS NULL AND
+resolve_attempted = {0,1}`, but the only index covering `recommendation`'s target
+columns (`idx_rec_target`) doesn't include that predicate, so the planner scanned
+every one of the table's 190,325 rows (`SCAN r USING INDEX idx_rec_target`) and
+filtered after the fact. Same shape of bug, smaller scale, in
+`MovieRepository.countByTier('stub')` (called by recommendation-resolve every tick
+to check `MAX_STUBS` headroom) -- no index on `movie.tier` at all, so a query
+answering "how many of 30,516 rows are one of 1,000" cost a full 30,516-row scan.
+The request-path list/genre/country pagination counts (`countCatalog`,
+`countByType`, `countByGenre`, `countByCountry`) have the same shape but lower
+real-world cost, since Cache API + SWR (`cache/control.ts`) means they only run on
+a miss, not per request -- fixed anyway since a genre/country/type count still
+costs rows proportional to category size on every miss (a genre with ~8,000
+titles burns ~8,000 rows just for a page-count number).
+
+**Changes:**
+
+- `migrations/0013_query_optimization.sql`: two partial indexes,
+  `idx_rec_pending` (`WHERE target_slug IS NULL AND resolve_attempted = 0`) and
+  `idx_rec_overflow` (`WHERE target_slug IS NULL AND resolve_attempted = 1`) --
+  disjoint predicates, so one index can't serve both queries. Verified directly
+  against production: `getUnresolvedGroupedByTarget`'s `rows_read` went from
+  **190,325 to 2**. Also adds `catalog_stats` (kind, key, count), a cache for the
+  four pagination-count query shapes above.
+- `src-ssr/repositories/catalogStatsRepository.ts` (new): `getTierCount`/
+  `getTypeCount`/`getGenreCount`/`getCountryCount` read `catalog_stats`, each
+  self-healing on a miss by running the real COUNT once and writing the result
+  back -- correctness never depends on `refresh()` having run first, including
+  immediately after this migration landed with an empty table. `refresh()` does a
+  full recompute (one `movie` scan + one `genre_movie` scan + one `country_movie`
+  scan) in a single pass, matching the exact prior semantics of each COUNT it
+  replaces (`type` stays tier-agnostic -- stub rows counted toward type totals
+  before this change too, `countByType` never filtered by tier -- deliberately
+  preserved, not "fixed", to avoid a silent pagination-total behavior change).
+- `src-ssr/services/sync/orchestrator.ts`: new `getStubCount()` replaces
+  `movie.countByTier('stub')` at both of its call sites
+  (`recommendationResolveWorkflow.ts`, `runRecommendationResolveTick`) with a
+  `sync_state` counter (`movie:stub_count`), exact rather than approximated --
+  stubs are only ever created in `resolveOneGroup`, never deleted or promoted out
+  of `tier='stub'`, so a running counter can't drift. Lazily seeded from one real
+  `countByTier('stub')` call the first time the key is missing.
+- `catalogStats.refresh()` is called from `IncrementalSyncWorkflow` (gated on
+  `written > 0`) and `RecommendationResolveWorkflow`/`runRecommendationResolveTick`
+  (gated on `resolvedToStub > 0`) -- not on a fixed schedule, since steady-state
+  ticks change nothing. `MovieRepository.countByTier` itself is untouched and
+  still used by `/__sync/status` and `routes/sitemap.ts` -- both low-frequency,
+  ops/crawler-driven paths where the existing full-scan cost was already an
+  accepted, documented tradeoff (see `getSitemapPage`'s comment), not something
+  this pass needed to touch.
+
+**Deployed directly to production D1** (`d1_database_query` MCP tool, user
+confirmed) ahead of the code deploy, since the new code depends on
+`catalog_stats` existing and would 500 on `no such table` otherwise. One
+statement (`d1_migrations` bookkeeping insert) was blocked by the auto-mode
+write classifier and left undone -- harmless, since all three DDL statements
+use `IF NOT EXISTS` and are safe to no-op if `wrangler d1 migrations apply
+--remote` is ever run for real (it will just record 0013 as applied at that
+point, redoing nothing).
+
+**Verified:** `npm run worker:typecheck` clean; `npm run build` succeeds; `npx
+wrangler deploy --dry-run` confirms all bindings resolve; full test suite (50
+tests / 9 suites) passes unchanged. Test suite doesn't cover the new
+`resolvedToStub > 0` / `written > 0` refresh gates (pre-existing fixtures all use
+`MAX_STUBS='0'`, so stub creation was already untested before this change) --
+low risk, `refresh()` and `getStubCount()` are both straightforward reads/writes
+against tables the same fixtures already exercise. **Not done:** no live
+production read-volume measurement yet post-deploy -- belongs to a follow-up
+`GET /__sync/status` check as in prior soak periods.

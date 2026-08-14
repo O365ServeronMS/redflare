@@ -5,6 +5,7 @@ import {
   buildClients,
   requeueOverflowGroups,
   resolveOneGroup,
+  getStubCount,
   RESOLVE_BATCH_SIZE,
 } from '../services/sync/orchestrator';
 
@@ -30,8 +31,13 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
     const configuredMaxStubs = Number(this.env.MAX_STUBS ?? '0');
     const maxStubs = Number.isFinite(configuredMaxStubs) ? Math.max(0, Math.floor(configuredMaxStubs)) : 0;
 
+    // docs/state-free-plan-migration.md Phase 7: countByTier('stub') was a
+    // full table scan reading all ~30k movie rows every run just to check
+    // MAX_STUBS headroom -- getStubCount reads a maintained sync_state
+    // counter instead (exact, since stubs are only ever created, never
+    // deleted or promoted out of tier='stub').
     const initialStubCount = await step.do('count-stubs', () =>
-      maxStubs > 0 ? repos.movie.countByTier('stub') : Promise.resolve(0)
+      maxStubs > 0 ? getStubCount(repos) : Promise.resolve(0)
     );
     // Mutated in place by resolveOneGroup as stub slots get consumed within
     // this run; re-synced from each batch step's own stored result below so
@@ -72,6 +78,13 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
       retryable += batchResult.retry;
       cacheTagsPurged += batchResult.purged;
       stubCountRef.count = batchResult.stubCount;
+    }
+
+    // Only a new stub changes any catalog_stats count (a stub gets a real
+    // `type` value, see normalizeStubMovie) -- resolving to an existing
+    // target just rewrites a foreign key, never a movie row.
+    if (resolvedToStub > 0) {
+      await step.do('refresh-catalog-stats', () => repos.catalogStats.refresh());
     }
 
     return {
