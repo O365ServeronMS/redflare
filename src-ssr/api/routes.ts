@@ -16,7 +16,7 @@ export const apiRoute = new Hono<{ Bindings: Env }>();
 
 const PAGE_SIZE = 24;
 const SEARCH_LIMIT = 24;
-const RECOMMENDATION_LIMIT = 12;
+const RECOMMENDATION_LIMIT = 10;
 const MAX_KEYWORD_LENGTH = 100; // ADR-0002 "Security": reject, don't sanitize
 
 // /api/* is JSON, not a cacheable-forever page -- same policy the SSR pages

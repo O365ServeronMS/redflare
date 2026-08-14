@@ -257,3 +257,62 @@ their exported classes and all new vars are recognized; full existing test suite
 this pass:** no real deploy, so Workflow step counts/CPU behavior have not been
 observed against real traffic yet — that belongs to the Phase 4 soak period, once
 the user chooses to deploy.
+
+## Phase 6 — Workflows steps quota audit + cadence/backlog tuning (2026-08-14)
+
+Phase 5 established CPU time is not the binding Free-plan constraint (0.29ms and
+0.079ms measured for the two heaviest jobs, both under 3% of the 10ms budget) —
+the real constraint the account will hit on Free is **Workflows steps**: 3,000/day
+(Free) vs the account's current Paid-tier behavior, billed since 2026-08-10 per
+[Workflows pricing](https://developers.cloudflare.com/workflows/reference/pricing/).
+Reading the five Workflow schedules against real Phase 4 backlog numbers
+(`groupsSeen: 193`, `overflow: 74,843` per tick) put the account at **~3,400–4,100
+steps/day at the old `*/15` cadence** — over quota before ever touching CPU.
+
+Also found in the same pass: `recommendationResolveWorkflow.ts`'s
+`GROUPS_PER_STEP = 15` was silently unsafe. `resolveOneGroup`
+(`orchestrator.ts`) can cost up to ~5 external calls/group in its
+kkphim-not-found → `syncOneMovie` branch (kkphim detail + TMDB detail + season +
+recommendations), so `15 × 5 = 75` — already over the 50-external-subrequest cap
+whenever that branch actually runs. It was only safe by accident: `MAX_STUBS`
+(1,000) is already at its cap, so most groups fall into the cheap 1-call overflow
+branch instead. Would break the moment stub slots free up.
+
+**Changes (user chose to stay on Cloudflare rather than move compute to another
+vendor — see the standalone Vietnamese audit response for the full comparison
+against Vercel/Supabase/Convex/Upstash/GitHub Actions, not reproduced here)**:
+
+- `wrangler.toml`: `hero-snapshot` and `recommendation-refresh` schedules
+  `*/15 * * * *` → `0 * * * *` (hourly). For hero-snapshot specifically this is a
+  net *improvement*, not just a cost cut — at `*/15` the 30-minute success gate
+  meant every other tick was a wasted 1-step skip check (~1,152 steps/day for the
+  same ~24 real runs/day an hourly schedule gets for ~552 steps/day, since every
+  hourly tick lands past the gate and does a real run).
+- `recommendation-resolve` schedule `*/15 * * * *` → `*/30 * * * *` (halves run
+  count; this workflow is the largest single steps consumer given real backlog
+  size).
+- `recommendationResolveWorkflow.ts`: `GROUPS_PER_STEP` 15 → 8, so the worst case
+  (8 × 5 = 40) stays under the 50-external-subrequest-per-step cap instead of
+  relying on the stub-cap coincidence above.
+- `backfill` schedule left untouched (`*/15`) — already inert by default
+  (`BACKFILL_ENABLED = "false"`), costs 1 step/tick regardless.
+- `incremental-sync` schedule left untouched (`*/30`) — already tuned in Phase 2.
+
+Net effect: **~1,900–2,500 steps/day estimated**, vs. the prior ~3,400–4,100,
+comfortably under the 3,000/day Free-plan quota with headroom for backlog spikes.
+
+**Also changed, a separate user request folded into the same pass:** recommendation
+rails only need to show 10 titles, not 12 — `RECOMMENDATION_LIMIT` in
+`src-ssr/api/routes.ts` (the `/api/recommendation/:mediaType/:tmdbId` display cap)
+12 → 10. `syncMovie.ts`'s `TMDB_RECOMMENDATION_CANDIDATES` (15, how many TMDB
+recommendation IDs get ingested as resolve targets per source movie) was
+deliberately left unchanged — it's a supply buffer for the resolve pipeline, not
+the display count, and narrowing it would reduce how often 10 resolved slots
+actually get filled.
+
+**Verified:** `npm run worker:typecheck` clean; `npm run build` succeeds; `npx
+wrangler deploy --dry-run` confirms all 5 Workflow bindings resolve; full test
+suite (50 tests / 9 suites) passes unchanged — none of it hardcoded the old
+12/15 constants. **Not done:** no real deploy yet; actual steps/day under the new
+cadence has not been observed against live traffic (belongs to a follow-up soak
+check via `GET /__sync/status` a day or more after deploy, same as Phase 4).

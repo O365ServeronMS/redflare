@@ -126,23 +126,36 @@ binding = "INCREMENTAL_SYNC_WORKFLOW"
 class_name = "IncrementalSyncWorkflow"
 schedules = ["*/30 * * * *"]
 
+# Hourly, not */15: HERO_REFRESH_INTERVAL_SECONDS's 30-min gate meant a
+# */15 cron alternated real-run/skip ticks (~23 steps + ~1 step each),
+# ~1,152 steps/day. Hourly always lands past the gate, so every tick is a
+# real run (~23 steps) with none wasted on a skip check -- ~552 steps/day,
+# same effective freshness. See docs/state-free-plan-migration.md Phase 6
+# (Workflows steps quota, not CPU, is the binding Free-plan constraint here).
 [[workflows]]
 name = "hero-snapshot"
 binding = "HERO_SNAPSHOT_WORKFLOW"
 class_name = "HeroSnapshotWorkflow"
-schedules = ["*/15 * * * *"]
+schedules = ["0 * * * *"]
 
+# */30, not */15: halves run count against the same backlog-chunking cost
+# per run, keeping this workflow (the largest single step-count consumer)
+# under the Workers Free 3,000-steps/day quota. See
+# docs/state-free-plan-migration.md Phase 6.
 [[workflows]]
 name = "recommendation-resolve"
 binding = "RECOMMENDATION_RESOLVE_WORKFLOW"
 class_name = "RecommendationResolveWorkflow"
-schedules = ["*/15 * * * *"]
+schedules = ["*/30 * * * *"]
 
+# Hourly, not */15: RECOMMENDATION_REFRESH_LIMIT (20 sources/run) doesn't
+# need quarter-hourly cadence to keep D1 `recommendation_freshness` rows
+# from going stale. See docs/state-free-plan-migration.md Phase 6.
 [[workflows]]
 name = "recommendation-refresh"
 binding = "RECOMMENDATION_REFRESH_WORKFLOW"
 class_name = "RecommendationRefreshWorkflow"
-schedules = ["*/15 * * * *"]
+schedules = ["0 * * * *"]
 
 # Scheduled but inert by default (BACKFILL_ENABLED = "false" above) -- each
 # tick costs one cheap D1 read + early return until an operator flips it on.

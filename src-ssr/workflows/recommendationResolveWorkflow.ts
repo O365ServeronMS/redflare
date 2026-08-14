@@ -12,8 +12,13 @@ import {
 // external subrequests in one invocation against a real backlog -- over 3x
 // the Free-plan 50/invocation cap. Chunking groups into small per-step
 // batches instead of one wall-time-bounded loop keeps each step's own
-// external-call count small regardless of backlog size.
-const GROUPS_PER_STEP = 15;
+// external-call count small regardless of backlog size. resolveOneGroup's
+// worst case (kkphim.getByTmdbRef + syncOneMovie's kkphim detail + TMDB
+// detail + season + recommendations) is ~5 external calls/group, so 15
+// was already over the 50/step cap (15*5=75) whenever the overflow-heavy
+// stub-not-full branch actually runs -- 8 keeps the worst case (8*5=40)
+// under it. See docs/state-free-plan-migration.md Phase 6.
+const GROUPS_PER_STEP = 8;
 
 /** Free-plan-safe replacement for orchestrator.ts's runRecommendationResolveTick,
  * which resolves up to RESOLVE_BATCH_SIZE groups in one wall-time-bounded
