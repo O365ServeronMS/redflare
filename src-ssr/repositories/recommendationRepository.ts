@@ -202,20 +202,6 @@ export class RecommendationRepository {
       .bind(group.targetTmdbId, group.targetType)));
   }
 
-  /** Source detail API tags to purge after a target-group edge write commits. */
-  async getSourceCacheTagsForTarget(targetTmdbId: number, targetType: TmdbType): Promise<string[]> {
-    const res = await this.db
-      .prepare(
-        `SELECT DISTINCT m.tmdb_type, m.tmdb_id
-         FROM recommendation r JOIN movie m ON m.slug = r.slug
-         WHERE r.target_tmdb_id = ? AND r.target_type = ?
-           AND m.tmdb_id IS NOT NULL AND m.tmdb_type IN ('movie', 'tv')`
-      )
-      .bind(targetTmdbId, targetType)
-      .all<{ tmdb_type: TmdbType; tmdb_id: number }>();
-    return (res.results ?? []).map((row) => `recommendation:${row.tmdb_type}:${row.tmdb_id}`);
-  }
-
   /** Resolves every edge sharing this (target_tmdb_id, target_type) to a
    * real slug -- either an existing catalog title or a freshly-materialized
    * stub (both already written to `movie` by the caller before this runs). */

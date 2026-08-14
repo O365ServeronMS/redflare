@@ -1,5 +1,3 @@
-import { cache } from 'cloudflare:workers';
-import type { Env } from '../../types/env';
 import { MovieRepository } from '../../repositories/movieRepository';
 import { EpisodeRepository } from '../../repositories/episodeRepository';
 import { RecommendationRepository } from '../../repositories/recommendationRepository';
@@ -101,30 +99,20 @@ export async function syncOneMovie(
       + movie.genres.length * 2
       + movie.countries.length * 2;
 
-    // Purges detail + player (both tagged `movie:<slug>`, Phase 5). List/
-    // genre/country pages that include this title are NOT purged here --
-    // there's no bounded way to know every listing a movie could appear on
-    // without querying them, so those rely on their own 60s max-age to
-    // pick up the change instead of exact invalidation.
-    //
-    // Wrapped in try/catch, not just `.catch()` on the promise -- found
-    // 2026-08-07 (Phase F3 verification) that cache.purge() throws
-    // SYNCHRONOUSLY ("cache.purge is not a function") under
-    // `wrangler dev --remote`, before it ever returns a promise for
-    // `.catch()` to attach to. That crashed every single sync attempted
-    // through dev preview, even though real deployed production has been
-    // writing successfully the whole time (movie count climbing steadily
-    // across this session) -- Workers Caching's purge API isn't fully
-    // simulated in the preview tunnel. A purge failing should never cost a
-    // real write that already succeeded.
-    try {
-      await cache.purge({ tags: [`movie:${slug}`] });
-    } catch {
-      /* best-effort -- see note above */
-    }
-
+    // No per-title cache purge -- a changed title just rides out
+    // cache/control.ts's max-age=60 like every other /api/* response. Exact
+    // invalidation was tried and dropped: it needed per-item purge calls
+    // that risked the Free plan's purge rate limit, and there was no
+    // bounded way to also purge the list/genre/country pages a title
+    // appears on anyway. `GET /__sync/purge-cache` (routes/sync.ts) covers
+    // the "I need it gone right now" case globally instead.
     return { slug, outcome: 'written', rowsWritten };
-  } catch {
+  } catch (err) {
+    console.error(JSON.stringify({
+      message: 'syncOneMovie failed',
+      slug,
+      error: err instanceof Error ? err.message : String(err),
+    }));
     return { slug, outcome: 'error', rowsWritten: 0 };
   }
 }

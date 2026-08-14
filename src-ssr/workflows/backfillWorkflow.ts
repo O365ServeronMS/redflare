@@ -1,5 +1,4 @@
 import { WorkflowEntrypoint, type WorkflowStep, type WorkflowEvent } from 'cloudflare:workers';
-import type { Env } from '../types/env';
 import { runBackfillTick } from '../services/sync/orchestrator';
 
 // Small enough that each step's own external-call count (KKphim listing +

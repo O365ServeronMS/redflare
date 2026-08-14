@@ -1,5 +1,4 @@
 import type { MiddlewareHandler } from 'hono';
-import type { Env } from '../types/env';
 
 // Constant-time compare -- a naive !== leaks key length/prefix via timing.
 // Same gate as the production worker's checkCronKey (worker/index.js), one

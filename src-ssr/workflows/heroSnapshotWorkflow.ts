@@ -1,5 +1,4 @@
 import { WorkflowEntrypoint, type WorkflowStep, type WorkflowEvent } from 'cloudflare:workers';
-import type { Env } from '../types/env';
 import {
   buildDependencies,
   resolveCandidate,

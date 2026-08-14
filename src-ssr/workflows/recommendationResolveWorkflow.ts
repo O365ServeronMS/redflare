@@ -1,5 +1,4 @@
 import { WorkflowEntrypoint, type WorkflowStep, type WorkflowEvent } from 'cloudflare:workers';
-import type { Env } from '../types/env';
 import {
   buildRepos,
   buildClients,
@@ -52,7 +51,6 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
     let resolvedToStub = 0;
     let overflow = 0;
     let retryable = 0;
-    let cacheTagsPurged = 0;
 
     for (let i = 0; i < groups.length; i += GROUPS_PER_STEP) {
       const batch = groups.slice(i, i + GROUPS_PER_STEP);
@@ -61,22 +59,19 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
         let stub = 0;
         let over = 0;
         let retry = 0;
-        let purged = 0;
         for (const group of batch) {
           const outcome = await resolveOneGroup(this.env, repos, clients, group, maxStubs, stubCountRef);
-          purged += outcome.cacheTagsPurged;
           if (outcome.kind === 'resolved_existing') existing++;
           else if (outcome.kind === 'resolved_stub') stub++;
           else if (outcome.kind === 'overflow') over++;
           else retry++;
         }
-        return { existing, stub, over, retry, purged, stubCount: stubCountRef.count };
+        return { existing, stub, over, retry, stubCount: stubCountRef.count };
       });
       resolvedToExisting += batchResult.existing;
       resolvedToStub += batchResult.stub;
       overflow += batchResult.over;
       retryable += batchResult.retry;
-      cacheTagsPurged += batchResult.purged;
       stubCountRef.count = batchResult.stubCount;
     }
 
@@ -95,7 +90,6 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
       resolvedToStub,
       overflow,
       retryable,
-      cacheTagsPurged,
       stubCount: stubCountRef.count,
       maxStubs,
     };

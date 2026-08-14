@@ -1,5 +1,4 @@
 import { Hono, type Context } from 'hono';
-import type { Env } from '../types/env';
 import { MovieRepository } from '../repositories/movieRepository';
 import { EpisodeRepository } from '../repositories/episodeRepository';
 import { RecommendationRepository } from '../repositories/recommendationRepository';
@@ -20,17 +19,10 @@ const SEARCH_LIMIT = 24;
 const RECOMMENDATION_LIMIT = 10;
 const MAX_KEYWORD_LENGTH = 100; // ADR-0002 "Security": reject, don't sanitize
 
-// /api/* is JSON, not a cacheable-forever page -- same policy the SSR pages
-// used (max-age=60, no s-maxage), just applied to a JSON body instead of
-// HTML. See cache/control.ts for why s-maxage is never used here.
-function applyApiCache(c: Context, tags: string[]) {
-  applyPageCache(c, ['api', ...tags]);
-}
-
 // GET /api/home-data (docs/contract-legacy-api.md §1)
 apiRoute.get('/api/home-data', async (c) => {
   const data = await buildHomeData(c.env.DB);
-  applyApiCache(c, ['home']);
+  applyPageCache(c);
   return c.json(data);
 });
 
@@ -44,7 +36,7 @@ apiRoute.get('/api/movie/:slug', async (c) => {
 
   const episodes = await new EpisodeRepository(c.env.DB).getBySlug(slug);
 
-  applyApiCache(c, [`movie:${slug}`]);
+  applyPageCache(c);
   return c.json({
     movie: toLegacyDetail(movie),
     episodes: toLegacyEpisodes(episodes),
@@ -66,7 +58,7 @@ apiRoute.get('/api/list', async (c) => {
       movieRepo.getRecentMoviesOffset(page, PAGE_SIZE),
       catalogStats.getTierCount('catalog', () => movieRepo.countCatalog()),
     ]);
-    applyApiCache(c, ['type:phim-moi-cap-nhat']);
+    applyPageCache(c);
     return c.json({ items: toLegacyItems(rows), pagination: buildPagination(totalItems, PAGE_SIZE, page) });
   }
 
@@ -79,7 +71,7 @@ apiRoute.get('/api/list', async (c) => {
     catalogStats.getTypeCount(entry.value, () => movieRepo.countByType(entry.value)),
   ]);
 
-  applyApiCache(c, [`type:${type}`]);
+  applyPageCache(c);
   return c.json({
     data: {
       items: toLegacyItems(rows),
@@ -107,7 +99,7 @@ apiRoute.get('/api/genre', async (c) => {
     catalogStats.getGenreCount(slug, () => taxonomy.countByGenre(slug)),
   ]);
 
-  applyApiCache(c, [`genre:${slug}`]);
+  applyPageCache(c);
   return c.json({
     data: {
       items: toLegacyItems(rows),
@@ -135,7 +127,7 @@ apiRoute.get('/api/country', async (c) => {
     catalogStats.getCountryCount(slug, () => taxonomy.countByCountry(slug)),
   ]);
 
-  applyApiCache(c, [`country:${slug}`]);
+  applyPageCache(c);
   return c.json({
     data: {
       items: toLegacyItems(rows),
@@ -243,7 +235,7 @@ async function handleRecommendation(c: Context<{ Bindings: Env }>) {
   const mediaType = mediaTypeParam === 'tv' ? 'tv' : 'movie';
 
   if (!Number.isFinite(tmdbId) || tmdbId <= 0) {
-    applyApiCache(c, ['recommendation']);
+    applyPageCache(c);
     return c.json({ items: [] });
   }
 
@@ -252,7 +244,7 @@ async function handleRecommendation(c: Context<{ Bindings: Env }>) {
     ? await new RecommendationRepository(c.env.DB).getResolvedForSlug(movie.slug, RECOMMENDATION_LIMIT)
     : [];
 
-  applyApiCache(c, [`recommendation:${mediaType}:${tmdbId}`]);
+  applyPageCache(c);
   return c.json({ items: toLegacyItems(rows) });
 }
 

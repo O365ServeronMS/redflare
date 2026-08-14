@@ -1,5 +1,4 @@
 import { Hono } from 'hono';
-import type { Env } from '../types/env';
 import { requireCronKey } from '../middleware/cronKey';
 import {
   syncSlugBatch,
@@ -11,7 +10,7 @@ import { SyncStateRepository } from '../repositories/syncStateRepository';
 import { MovieRepository } from '../repositories/movieRepository';
 import { RecommendationRepository } from '../repositories/recommendationRepository';
 import { HeroSnapshotRepository } from '../repositories/heroSnapshotRepository';
-import { applyNoStore } from '../cache/control';
+import { applyNoStore, purgeEverything } from '../cache/control';
 import { SAMPLE_RATE } from '../middleware/requestSampler';
 import { refreshHeroSnapshot } from '../services/sync/heroSnapshot';
 
@@ -81,6 +80,24 @@ syncRoute.get('/__sync/resolve-recommendations', async (c) => {
 syncRoute.post('/__sync/refresh-hero', async (c) => {
   const result = await refreshHeroSnapshot(c.env, { force: c.req.query('force') === 'true' });
   return c.json(result);
+});
+
+// The "Purge Everything" button for this Worker's cache. The Cloudflare
+// dashboard's zone-level Purge Everything does NOT affect Workers Caching
+// ("no zone-level purge ... affects Workers Caching content", Cloudflare
+// docs /workers/cache/purge/) -- that only worked back when this project
+// cached via caches.default. This route is the equivalent, and it runs on
+// the default entrypoint, which is where every /api/* response is actually
+// cached, so the entrypoint scoping is correct by construction.
+//
+//   curl -sH "x-cron-key: $CRON_KEY" https://phim.bluesia.net/__sync/purge-cache
+//
+// A deploy (`git push origin main`) also clears everything on its own --
+// the Worker version is part of the cache key (wrangler.toml [cache]).
+// Use this when you want it cleared WITHOUT shipping a deploy.
+syncRoute.get('/__sync/purge-cache', async (c) => {
+  const ok = await purgeEverything();
+  return c.json({ purgedEverything: ok }, ok ? 200 : 503);
 });
 
 syncRoute.get('/__sync/status', async (c) => {

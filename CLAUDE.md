@@ -200,370 +200,69 @@ if the Git integration is disconnected/reconnected. Don't remove it.
   current `worker/index.js` + `worker/lib/*` is a from-scratch reimplementation
   written for the Worker runtime, not a revert of that old code.
 
-## Data flow & caching (important)
+## Data flow & caching (important) — corrected 2026-08-14
 
-Two different paths, both entirely on Cloudflare — no other server involved:
+**Everything above this point through "Architecture" describes the retired
+`worker/index.js` + `worker/lib/*` design (KV, R2 image mirroring, wsrv.nl,
+the Cache API).** None of that exists in this checkout. ADR-0002
+(`docs/adr/0002-no-vps-ssr-architecture.md`) replaced it: the backend is now
+`src-ssr/` (Hono + TypeScript), storage is **D1 only** (no KV, no R2), and
+images are hotlinked from TMDB/phimimg rather than mirrored. That ADR itself
+says it "supersedes the SPA + JSON-API topology described in CLAUDE.md" —
+the rest of this file was never updated to match. Treat any `worker/`,
+KV-key, or R2/wsrv.nl reference above as historical, not current. **README.md
+is the maintained, accurate reference for the current architecture, API
+contract, ops routes, and cache layers** — read it, not the sections above,
+for anything backend-related. This section replaces just the caching part.
 
-- **Data** (`/api/*`) — same-origin. The frontend calls `phim.bluesia.net/api/*`,
-  which the Worker (`worker/index.js` + `worker/lib/*`) handles directly: it
-  fetches OPhim and TMDB itself, runs enrichment/ranking, and (for
-  recommendations) reads/writes a reverse index in D1. `/api/home-data` is
-  the one exception — it's pre-built by an hourly cron rather than per
-  request, see below. The Cache API sits in front of everything as the hot
-  tier — see "Caching layers" below for exactly how.
-- **Images** — `img.bluesia.net` (R2), never proxied through the
-  Worker at read time. Served from that domain since a 2026-08-04 migration
-  off the original `redflarer2.bluesia.net` (a hard cutover, not a gradual
-  soak — see "Images: 2026-08-04 domain + key-shape migration" below for what
-  that entailed). The Worker mirrors TMDB/OPhim artwork into R2 itself
-  (`worker/lib/mirror.js`): every build enqueues new image URLs into a D1
-  queue (`mirror_queue`), and a cron every 10 minutes drains up to 20 at a
-  time — `env.BUCKET.head()` to skip ones already mirrored, otherwise fetch
-  upstream and `env.BUCKET.put(key, res.body)` streamed straight through (no
-  in-JS hashing). **No lifecycle expiry rule on the bucket** — objects don't
-  expire on their own once mirrored (an earlier version of this doc claimed a
-  150-day TMDB cache-duration expiry; that was never actually configured on
-  the bucket — corrected 2026-08-01).
+### Caching layers, current
 
-  **Every mirrored image is WebP, TMDB and OPhim alike, sourced from
-  wsrv.nl (since 2026-08-06).** Earlier this relied on `image.tmdb.org`'s
-  content negotiation (`Accept: image/webp`) — but TMDB sends **no `Vary:
-  Accept`**, so a JPEG cached anywhere in front of it could be handed back
-  regardless of the header. That made the `.webp` key an unreliable promise:
-  measured 2026-08-06, ~1.7% of already-mirrored objects silently held JPEG
-  bytes under a `.webp` key (browsers render by content-type, not extension,
-  so nothing looked broken until you checked). wsrv.nl
-  (`worker/lib/mirror.js` `wsrvWebpUrl()`, open source, BSD-3-Clause,
-  self-hostable — https://wsrv.nl) makes format a property of the URL
-  (`&output=webp&q=75`) instead of a negotiated header, so it can't disagree
-  with itself. **Invariant, no exceptions: a key ending `.webp` holds WebP
-  bytes, or the row stays queued** — there is no fallback path that saves
-  something else under that key anymore (the old `WEBP_GRACE_MS` grace
-  window / `mirrored-nonwebp` outcome are gone as of the same date; a
-  non-WebP response from wsrv.nl is always `retry`, never saved).
-  `WSRV_ENABLED` in `mirror.js` is a rollback flag — flip to `false` and
-  deploy to fall back to fetching origins directly, no data migration
-  needed.
+One layer for `/api/*`, `/sitemap*.xml`, and `/robots.txt`: **Workers
+Caching**, enabled via `[cache] enabled = true` in `wrangler.toml` — this is
+a cache *owned by the Worker itself*, not the zone's CDN cache. Policy is
+set once in `src-ssr/cache/control.ts` (`applyPageCache`):
+`public, max-age=60, stale-while-revalidate=86400, stale-if-error=604800`.
+No `s-maxage` — deliberately: it implies `proxy-revalidate`, which disables
+`stale-while-revalidate`/`stale-if-error` on the same response (this project
+hit that bug once already, see the ADR and `docs/state-hit-rate.md`).
 
-  wsrv.nl also does the RESIZE in the same pass via `&w=<width>&we`
-  (`&we` = without-enlargement, load-bearing: without it wsrv.nl upscales
-  past native resolution by default when `&w=` exceeds it, which came out
-  *larger* than the old Cloudflare-transform output for OPhim's often-small
-  landscape "poster" images — with it, smaller in every sample tested,
-  TMDB and OPhim alike). TMDB URLs pass no `&w=` — their own path already
-  encodes size (`/t/p/w500/`, `/t/p/w1280/`). **OPhim URLs always pass a
-  width**, because OPhim has no TMDB-style size variants of its own — one
-  URL, one native resolution (sometimes several MB) — so sizing has to
-  happen somewhere, and it now happens once, at mirror time, instead of on
-  every request the way a Cloudflare Image Transformation used to.
+**Invalidation is deploy-time, not tag-based.** `cross_version_cache` is
+left at its default (`false`), so the Worker version is part of the cache
+key — every `git push origin main` starts every cached path from empty
+automatically, at no cost. There is no per-title `Cache-Tag` purging: it was
+built, then removed 2026-08-14 after finding the resolve pipeline could
+issue up to ~300 purge calls in one tick, several times over the Free
+plan's 5-requests/minute purge rate limit — and because `cache.purge()`
+resolves `{success: false}` on rejection rather than throwing, those
+rejected purges were silently being counted as done. A changed title now
+just rides out `max-age=60` like everything else.
 
-  A 4xx/5xx from wsrv.nl doesn't mean the image is gone — `isUpstreamDead()`
-  checks the real origin (TMDB/OPhim) directly before a queue row is ever
-  deleted, so a wsrv.nl hiccup retries instead of wrongly giving up on a
-  still-live image.
+**`GET /__sync/purge-cache`** (`x-cron-key` header, see `routes/sync.ts`)
+purges everything immediately, for when you don't want to wait for a
+deploy. **The Cloudflare dashboard's zone-level "Purge Everything" does
+NOT work for this** — Workers Caching is the Worker's own cache, and "no
+zone-level purge (via the dashboard, API, or Terraform) affects Workers
+Caching content" (Cloudflare docs, `/workers/cache/purge/`). That dashboard
+button only ever worked back when this project cached via `caches.default`
+(pre-ADR-0002); don't reach for it now, use the route above.
 
-  R2 keys **swap** the extension — `t/p/w500/<hash>.jpg` →
-  `t/p/w500/<hash>.webp`, and for OPhim additionally gain a `w<width>/`
-  segment ahead of the path — `ophim/uploads/movies/<name>.jpg` →
-  `ophim/w500/uploads/movies/<name>.webp` (`objectKeyFor` in
-  `worker/lib/images.js`; width is baked into the key precisely so
-  `drainMirrorQueue` can recover it at mirror time without a D1 schema
-  change — TMDB keys need no such segment). The inverse
-  (`upstreamForKey` in `worker/lib/images.js`, `upstreamFallback` in
-  `src/api/ophim.js`) reconstructs the original URL by swapping `.webp`
-  back to `.jpg` (source images are confirmed always `.jpg`, both hosts)
-  and, for OPhim, additionally stripping the `w<width>/` bookkeeping
-  segment — that segment isn't part of the real upstream path. These
-  functions are a load-bearing contract, keep them in lockstep;
-  `webpKeyFor()`/`r2ImageUrl()` are idempotent on a key that's already
-  `.webp`.
+**If `cross_version_cache` ever needs to change** (e.g. to keep a warm
+cache across deploys instead of relying on deploy-time invalidation): it
+was evaluated and rejected in this same change — full reasoning is in the
+`[cache]` block comment in `wrangler.toml`. Re-enabling it means adding
+back a `version_metadata` binding and a way to purge one version's entries
+on rollback (both were built and then removed alongside the tag machinery;
+git history around 2026-08-14 has a working reference implementation if
+this is ever revisited).
 
-  Every `w500` TMDB poster (`thumb_url`) also gets a `w154` sibling mirrored
-  alongside it (`worker/lib/images.js` `addW154Sibling`) — the hero rail
-  (`HeroSlider.js`) renders at 42px/30px wide and would otherwise load a
-  500px poster into a slot 12-16x smaller than the image. OPhim doesn't get
-  a `w154` variant (not in scope — the hero rail rarely shows OPhim-only
-  artwork, since TMDB owns `poster_url`/`thumb_url` whenever it has a match).
+`/api/search` is the one uncacheable endpoint (`applyNoStore` — every
+Turnstile token is single-use) and `/__sync/*` ops routes are always
+`private, no-store`.
 
-  **`posterUrl`/`thumbUrl` in `src/api/ophim.js` are now pure passthroughs**
-  for both hosts. Before 2026-08-06 they wrapped OPhim R2 URLs in a
-  same-zone Cloudflare Image Transformation
-  (`phim.bluesia.net/cdn-cgi/image/width=...,format=auto/<r2-url>`) at
-  serve time — the only way to resize OPhim art, since Image
-  Transformations only accept same-zone sources (a transform request with
-  `image.tmdb.org` or `img.ophim.live` as the source 403s). Resizing moved
-  to mirror time (wsrv.nl `&w=`, above), so the R2 object is already the
-  right size and there's nothing left to wrap. **This project no longer
-  uses Cloudflare Image Transformations at all** — freed intentionally, not
-  because of quota pressure (usage was ~2% of the 5,000/month free tier
-  when this was decided), to reserve the feature for something else later.
-
-  If a mirror hasn't landed yet (or R2 is somehow unreachable) the
-  frontend's `<img onerror>` handler rebuilds the original TMDB/OPhim URL
-  from the R2 URL and retries it directly — see
-  `upstreamFallback`/`attachImageFallback` in `src/api/ophim.js`. This
-  fallback goes straight to the real origin, never through wsrv.nl —
-  wsrv.nl is a mirror-time-only dependency, kept out of the request path a
-  real user's browser ever waits on.
-
-  **Images: 2026-08-04 domain + key-shape migration.** Moved image serving
-  from `redflarer2.bluesia.net` to `img.bluesia.net` in one hard cutover (no
-  dual-domain soak period — R2 lets one bucket answer multiple custom
-  domains, but the old domain was retired the same day rather than kept
-  around, since every reader/writer of the URL lives in this repo's own code
-  and the client-side upstream fallback covers any gap). Bundled into the
-  same deploy: finished a key-shape migration that had stalled partway
-  (`t/p/w500/<hash>.jpg.webp`, an appended suffix from an earlier WebP
-  rollout, swapped to `t/p/w500/<hash>.webp`) since a hard cutover was the
-  only point where redoing that swap was free. Rollout was: repoint
-  `R2_PUBLIC_BASE`/`R2_BASE` and swap `webpKeyFor`/`upstreamForKey`, deploy,
-  then re-mirror every object under the new host+shape (queued directly from
-  D1 `mirrored`, drained via repeated `/__cron/mirror` calls rather than
-  waiting for the 10-min cron), then purge caches that had baked in the old
-  URL — **including D1 `idx`**, easy to miss: it stores each item's full
-  mapped JSON (not just IDs), so recommendation responses kept serving the
-  old domain until `idx` itself was cleared, even after Cache API and D1
-  `recs` were purged. Finished by GC-ing the ~2,300 old-shape R2 objects
-  (temporary `/__cron/gc-old-keys` route, removed once drained).
-
-  One thing that migration got wrong and had to come back and fix: the
-  pre-deploy **Cache API** entries were left to expire on the assumption they
-  would rebuild once someone opened the title. They don't — see "Caching
-  layers" #2. Recommendations kept serving `redflarer2` URLs against a host
-  whose DNS was already gone, so every image in them silently fell through to
-  `attachImageFallback`'s TMDB origin (visibly fine, just unmirrored and
-  un-WebP'd). The takeaway for any future change to how image URLs are built:
-  **Purge Everything on the Cloudflare dashboard as part of that deploy** —
-  the Cache API entries will not fix themselves. See "Caching layers" #2.
-
-  **2026-08-06 wsrv.nl migration.** Full rationale, every number measured,
-  and the phased rollout: `bluesiaOM/context/plan-redflare-webp-wsrv.md` +
-  `context/state-redflare-webp-wsrv.md` (progress/decisions log). Unlike the
-  2026-08-04 domain migration, **R2 keys for TMDB didn't change** (same
-  `.webp` suffix, same host) — only *how* the bytes get there changed, so no
-  re-mirror, no Cache API purge was strictly required for TMDB. OPhim keys
-  DID change shape (gained the `w<width>/` segment above), so the ~38
-  pre-existing OPhim objects were deleted from R2 + D1 `mirrored` outright
-  (not re-mirrored under the old shape — new builds compute the new key from
-  scratch; the client-side fallback covers the gap in between). Also cleaned
-  up ~53 TMDB objects left over from the old grace-window bug (JPEG bytes
-  under a `.webp` key) the same way. **Rollback**, if wsrv.nl ever needs to
-  be pulled out: set `WSRV_ENABLED = false` in `worker/lib/mirror.js` and
-  deploy — TMDB reverts to direct-fetch (content negotiation, no grace
-  window to reinstate — non-WebP responses just retry forever, which is a
-  regression but not a silent one, `RedflareMirrorStuck` on
-  `monitor.bluesia.net` will fire). OPhim reverts to plain-JPEG raw mirrors
-  the same way, but note `posterUrl`/`thumbUrl` no longer apply a
-  Cloudflare Image Transformation — a rollback that also needs images
-  resized again would have to reinstate that serve-time wrapper, not just
-  flip the flag.
-
-### Endpoints the frontend calls
-
-All defined in `src/api/ophim.js`, all same-origin `/api/*`, all built by the
-Worker itself now (no upstream to fall back to). Keep this table in sync when
-adding one.
-
-| Client fn | Endpoint | Notes |
-|---|---|---|
-| `getHomeData` | `GET /api/home-data` | Whole home page in one shot: hero ranking + all rails |
-| `getNewMovies` | `GET /api/list?type=phim-moi-cap-nhat&page=` | |
-| `getMoviesByType` | `GET /api/list?type=&page=` | `phim-le`, `phim-bo`, `hoat-hinh`, `tv-shows` |
-| `getMoviesByGenre` | `GET /api/genre?slug=&page=` | |
-| `getMoviesByCountry` | `GET /api/country?slug=&page=` | |
-| `getMovieDetail` | `GET /api/movie/:slug` | |
-| `searchMovies` | `GET /api/search?keyword=&page=` | |
-| `getRecommendation` | `GET /api/recommendation/:mediaType/:tmdbId` | `mediaType` must be `movie`/`tv` — TMDB ids collide across the two. Legacy `/api/related` alias still served |
-
-### Field ownership: OPhim vs TMDB
-
-A recurring misreading: *"OPhim only tells us which titles exist + their TMDB id,
-TMDB supplies the metadata."* Not how it works. The Worker fetches the **whole
-OPhim record**, then **overrides a fixed set of fields** with TMDB
-(`worker/lib/enrich.js`, ported from the retired `catalog-api/src/tmdb-enrich.js`).
-OPhim is the per-field fallback, so a title that TMDB can't resolve still
-renders — just with OPhim values.
-
-| Field | Owner | Notes |
-|---|---|---|
-| `name` | TMDB vi-VN title → OPhim | See readability rule below |
-| `origin_name` | TMDB `original_title` → OPhim | Same rule; OPhim's is reliably English |
-| `poster_url` | TMDB `w1280` backdrop → OPhim | Wide image. R2-mapped after enrich (`worker/lib/images.js`) |
-| `thumb_url` | TMDB `w500` poster → OPhim | Portrait image. `w154` sibling also mirrored for the hero rail — see "Images" above |
-| `vote_average` | TMDB (1 dp) → OPhim | Detail badge is hardcoded "TMDB" even on fallback |
-| `content` | TMDB `overview` vi-VN → OPhim | **Detail only** — cards never carry it |
-| `year` | TMDB release/first-air → OPhim | Detail only |
-| `actor` | TMDB credits, top 15 by `order` → OPhim | Detail only. Names come back in the original script (Korean, Chinese …) |
-| `trailer_url` | TMDB YouTube trailer → OPhim | Detail only |
-| `director` | **OPhim** | TMDB deliberately not read; no UI renders it either |
-| `category`, `country` | **OPhim** | The taxonomy behind `/the-loai/*` and `/quoc-gia/*`. TMDB genres are never used |
-| `slug`, `_id` | **OPhim** | URL identity — never touch |
-| `episodes[]` (`link_m3u8`, `link_embed`, `server_name`) | **OPhim** | Playback. TMDB has no part in it |
-| `type`, `status`, `quality`, `lang`, `episode_current`, `time` | **OPhim** | Card badges |
-| `tmdb.{id,type,season}`, `imdb.id` | **OPhim** | The join keys that make enrichment possible at all |
-
-Two enrich levels, deliberately different: **detail** (`enrichItem`) takes the
-full set above; **cards / hero / list / search** (`enrichItemCard`) take only
-`name`, `origin_name`, `poster_url`, `thumb_url`, `vote_average` — overview,
-cast and trailer would be wasted bytes on a poster.
-
-**Readability rule (`readableTitle`).** TMDB returns the *original* title when a
-vi-VN translation is missing, which once put Chinese and Thai titles in the
-headline `name` on cards. Any title carrying non-Latin script (Hangul, CJK,
-Thai, Cyrillic …) is dropped so the OPhim value wins — OPhim's `name` is
-always Vietnamese and its `origin_name` is Latin/English. Vietnamese
-diacritics are Latin script, so they pass. Applied inside `mapTmdb`, i.e.
-*before* the 14-day `catalog:c1:meta:*` cache — changing the rule means
-purging those keys.
-
-**Ranking is TMDB, availability is OPhim.** Hero + "Phim Trending" take their
-order from TMDB trending (week / day), but only titles present in the fetched
-OPhim pool can appear — hero often lands short of its 20 slots for that reason.
-Recommendations work the same way: TMDB `/recommendations` (then `/similar`),
-matched back to OPhim by `tmdb.id` + media type.
-
-**Search queries OPhim, displays TMDB.** The keyword goes straight to OPhim's
-index, so a title is findable under OPhim's naming while the card shows the TMDB
-name. Expect the two to disagree occasionally.
-
-### Caching layers
-
-1. **In-page** — `src/api/ophim.js` memoizes every response by URL for **5 min**
-   (`CACHE_TTL`). Cleared on hard reload; nothing else invalidates it.
-2. **Cache API** (`caches.default`, `worker/index.js`) — the hot tier for
-   **every** `/api/*` path, chosen deliberately over Workers KV because it has
-   no daily write-quota (KV's 1,000 writes/day would be blown through by
-   `/api/search`'s unbounded keyword cardinality alone). A hit is served
-   straight from cache with no rebuild; a miss falls through to the Worker's
-   own builder (OPhim + TMDB fetch, enrichment, D1 lookups as needed) and the
-   fresh response is written back to cache before returning. `x-catalog-cache:
-   hit`/`miss` on every response says which happened.
-
-   **A hit returns before the builder runs — so a wrong entry never
-   self-heals by being visited.** It survives until its own TTL expires (up
-   to 30 days for a `full`-tier recommendation), no matter how much traffic
-   it gets. This matters because cached bodies embed **absolute image URLs**:
-   anything that changes those URLs makes every pre-existing entry wrong, not
-   merely stale. **Clearing them is a manual Cloudflare-dashboard step:**
-   Caching → Purge Everything on the `bluesia.net` zone. `caches.default` is
-   the same zone cache the CDN uses, so a dashboard purge does drop these
-   entries; the Cache API key here is the plain request URL
-   (`worker/index.js` `handleApi`), so purge-by-URL matches too. In-code
-   `cache.delete()` (the `/__cron/purge-recs` route) only evicts in the colo
-   that served the purge request — fine for spot-fixing one title, useless
-   for a fleet-wide URL change. A `CACHE_VERSION` key-versioning scheme
-   (`<url>?__v=N`) was tried for this and reverted (`a4826f7`) as redundant
-   with the dashboard purge.
-3. **KV** (`CATALOG_KV`) — one key (`home:current`, plus TTL'd
-   `trending:week`/`trending:day`) written only by the hourly cron, never
-   per-request; `page:v1:*` (12 keys, popularity-ranked warm set,
-   `worker/lib/warm.js`) + `warm:last-run` metadata written every `*/30`;
-   and **several thousand** `meta:*` TMDB-enrichment entries (14-day TTL,
-   `worker/lib/enrich.js`) — measured 2026-08-06: **2,262 and still growing**,
-   not the ~111 an earlier version of this doc assumed (that number was never
-   re-measured after the catalog grew; corrected here since it fed
-   `docs/adr/0001-caching-topology.md`'s KV-write-budget arithmetic, which
-   should be re-derived from the real count before adding anything else to
-   the warm set — see `docs/plan-hit-rate.md` Phase 4/8). `/api/home-data`
-   reads `home:current` directly — no build happens on that request path at
-   all, see below.
-4. **D1** (`redflare-db`) — 6 tables, all live: `stale` (last-known-good copy
-   per path for list/genre/country/movie/recommendation, upserted on every
-   successful build — this is what would get served if OPhim/TMDB itself were
-   ever unreachable, `x-catalog-cache: stale-vps-down` despite the header name
-   predating the VPS's retirement); `idx` (reverse index, OPhim item keyed by
-   `tmdb.id`+media type, built by the hourly-shard cron + on-demand during
-   detail/recommendation builds — this is what makes recommendation matching
-   possible without a full OPhim search); `recs` (TMDB recommendation
-   results, TTL by **result completeness**, not just presence — see
-   "Recommendation cache TTL" below); `mirrored` + `mirror_queue` (R2
-   image-mirror bookkeeping, see "Images" above); `popularity` (sampled
-   request counts per canonical `/api/list|genre|country` cache key —
-   `worker/index.js` `trackPopularity`, drives which pages `worker/lib/warm.js`
-   keeps warm, see `docs/plan-hit-rate.md` Phase 4).
-5. **Cloudflare edge** — assets only (`dist/`), plus whatever CDN caching R2
-   applies to images. `/api/*` JSON never reaches this layer as a distinct
-   cache — that's the Cache API above (also edge-backed, but addressed
-   explicitly via `caches.default` rather than implicit HTTP caching).
-
-**Home page is special: cron-built, never built on request.**
-`/api/home-data` would blow the 10ms CPU / 50-subrequest budget if built
-synchronously (it needs OPhim + TMDB across many categories). Instead an
-hourly cron (`0 * * * *` → `worker/lib/home.js` `runHomeRefresh`) calls 5
-`/__cron/shard/:n` routes (shards 0,1,2,4,5 — 3 was `hoat-hinh`'s card rail,
-removed 2026-08-04 since the Hoạt Hình rail was cut from the homepage; the
-`hoat-hinh` OPhim list is still fetched as part of the 10-URL pool shards 4/5
-match trending against, and shard 4's hero pool additionally filters out
-`item.type === 'hoathinh'` so animation titles don't appear in "Phim Hot
-Trong Tuần" — `/danh-sach/hoat-hinh` itself is unaffected) — each its own
-Worker invocation with its own
-CPU/subrequest budget — via the `SELF` **service binding** (not a public
-`fetch()`; a Worker fetching its own Custom Domain 522s by default, a
-documented Cloudflare behavior), concatenates the resulting JSON without
-reparsing, and writes one KV key. The request path only ever reads that key.
-
-**Nuance added 2026-08-06:** that 522 is the *default*, not an absolute.
-`wrangler.toml` now sets the `global_fetch_strictly_public` compatibility
-flag, under which a global `fetch()` to this Worker's own zone loops back
-through Cloudflare's front door and succeeds. That is deliberately **not**
-how the shard fan-out works and must not be changed to it — service bindings
-skip the public network entirely and are unaffected by the flag, which is
-what keeps the fan-out cheap and loop-free. The flag exists for exactly one
-job: edge-warming (`worker/lib/warm.js` `runEdgeWarm`), where going through
-the front door is the whole point, because that is what populates the zone
-edge cache. See `docs/plan-hit-rate.md` §6.5.1.
-
-**Recommendation cache TTL (`worker/lib/recommendation.js` `classifyTier`/`ttlForTier`).**
-Not just "has results / empty" — a result is `full` (30 days) only if it
-either filled all `RELATED_LIMIT` (8) slots or every TMDB candidate was
-actually attempted (no OPhim-search budget cutoff, no OPhim call failures);
-otherwise `partial` (6 hours, so it self-heals soon instead of freezing a
-short list for a month); truly empty stays 1 hour. Both the D1 `recs` row
-and the Cache API entry in front of it are set from the *same*
-`classifyTier()` call on the same payload — added because they used to
-disagree: a title's D1 cache could get manually corrected while the Cache
-API kept serving the old 30-day-pinned response to real users regardless
-(see bluesiaOM/context/state-sua-loi-recommendation.md Phase 0 for how this
-surfaced — "Gia Tộc Rồng" recommending without "Game of Thrones"). To force
-one title's recommendation cache to rebuild immediately at *both* layers:
-`GET /__cron/purge-recs?type=movie|tv&id=<tmdb id>` (header `x-cron-key:
-<CRON_KEY>`, same gate as the other `/__cron/*` routes).
-
-**To force fresh data:** for `/api/list`/`genre`/`country`/`search`/`movie`,
-purge the Cache API entry from the Cloudflare dashboard (Caching → Purge
-Everything, or purge-by-URL — the key is the plain request URL), use a
-cache-busting query param, or just let the next distinct request rebuild it
-(Cache API misses are cheap, there's no upstream to protect anymore). Recommendation has its own purge
-route, see above. For home, the KV key `home:current` only changes on the
-next hourly cron tick — trigger it on demand with `GET /__cron/refresh-home`
-(header `x-cron-key: <CRON_KEY>`). Changing the enrichment table above needs
-more: TMDB values are frozen in KV `meta:*` for 14 days, and already-built
-recommendation results sit in D1 `recs` (up to 30 days, see the TTL tiers
-above) — both need clearing or stale data resurfaces in
-"Bạn cũng có thể thích".
-
-**Why this shape:** everything runs inside the Workers free tier (10ms CPU,
-50 subrequests/request, 1,000 KV writes/day) — every design choice above
-(Cache API over KV for the hot tier, D1 for the reverse index instead of KV,
-cron-sharded home build instead of per-request, streamed R2 PUT instead of
-in-JS hashing) traces back to one of those three limits. See
-`bluesiaOM/context/plan-redflare-len-cf-worker.md` for the full reasoning per
-constraint, and `bluesiaOM/context/state-redflare-cf-worker.md` for how each
-phase actually turned out (including two platform bugs that ate most of the
-debugging time: D1's undocumented 100-bound-param-per-query cap silently
-rejecting large batch inserts, and `wrangler secret put` not reliably
-attaching unless preceded immediately by a `wrangler deploy`).
-
-**Debugging a data problem:** hit the Worker directly
-(`curl -sD- https://phim.bluesia.net/api/home-data -o /dev/null | grep
-x-catalog-cache` — `hit`/`miss` = normal; `stale-vps-down` = the live build
-failed and D1's last-known-good copy is being served instead, worth
-investigating why OPhim/TMDB itself is failing). `wrangler tail` shows
-requests/responses/exceptions but **not** `console.log` output (verified —
-don't rely on it for tracing logic; return debug info in the response body
-instead). Remember `wrangler kv key list` / `d1 execute` / `r2 object`
-commands need `--remote` to see real data — without it they read an empty
-local simulation and make live resources look empty.
+See README.md's "🛡️ Bảo mật và cache" section for the full cache-layer
+table (including static asset / logo Cache-Control policy from
+`public/_headers`, which this section doesn't repeat) and "🛠️ Vận hành"
+for the full ops-route list.
 
 ## Lazy loading (images + below-fold sections)
 

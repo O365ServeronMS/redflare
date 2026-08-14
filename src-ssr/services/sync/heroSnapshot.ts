@@ -1,4 +1,3 @@
-import type { Env } from '../../types/env';
 import type { HeroRefreshResult, HeroSnapshotEntry } from '../../types/heroSnapshot';
 import type { MovieRow } from '../../types/movie';
 import { HeroSnapshotRepository } from '../../repositories/heroSnapshotRepository';
