@@ -283,7 +283,6 @@ test('requeues a local target at the stub cap, then resolves idempotently withou
   assert.equal(first.resolvedToExisting, 1);
   assert.equal(first.resolvedToStub, 0);
   assert.equal(first.overflow, 0);
-  assert.equal(first.cacheTagsPurged, 1);
   assert.deepEqual(await resolveState(db), { target_slug: 'local-target', resolve_attempted: 0 });
 
   const second = await runRecommendationResolveTick(env);

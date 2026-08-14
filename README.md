@@ -457,6 +457,7 @@ Tất cả route dưới đây cần `x-cron-key` và trả `Cache-Control: priv
 | `POST /__sync/refresh-hero?force=true` | Ép hero snapshot chạy ngay, bỏ qua cổng 30 phút |
 | `GET /__sync/backfill-page?type=&page=` | Sync thử một listing page |
 | `POST /__sync/batch/:n` | Internal shard endpoint; không gọi tay trừ khi debug |
+| `GET /__sync/purge-cache` | Xoá toàn bộ Workers Caching ngay lập tức, không cần đợi deploy |
 
 Đường tự động (không cần gọi tay) là 5 Workflow trong `wrangler.toml [[workflows]]` — các route trên chỉ dùng để test/debug/vận hành thủ công một lần.
 
@@ -494,7 +495,7 @@ CSP tồn tại ở **hai nơi** và phải giữ đồng bộ:
 | API/sitemap Worker response | `max-age=60`, SWR 1 ngày, stale-if-error 7 ngày |
 | SPA API memory cache | 5 phút trong tab/session |
 
-Workers Caching được bật trong `wrangler.toml`. Khi movie đổi, backend best-effort purge tag `movie:<slug>`; list/home tự cập nhật sau max-age ngắn.
+Workers Caching được bật trong `wrangler.toml`, cache thuộc về Worker chứ không phải zone — nút "Purge Everything" trên dashboard Cloudflare **không** xoá được cache này. Không còn purge theo tag từng phim nữa (đã gỡ bỏ vì có tick resolve đủ để vượt rate limit purge của Free plan, ~5 request/phút). Invalidation giờ chỉ có hai cách: mỗi lần deploy tự xoá sạch cache (Worker version nằm trong cache key, `cross_version_cache` để mặc định `false`), hoặc gọi `GET /__sync/purge-cache` để xoá ngay không cần đợi deploy. Một trang đổi dữ liệu sẽ tự cập nhật trong vòng `max-age=60`.
 
 ## 🤖 Luật dành cho AI agent
 

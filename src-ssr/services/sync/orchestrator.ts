@@ -1,5 +1,3 @@
-import { cache } from 'cloudflare:workers';
-import type { Env } from '../../types/env';
 import { MovieRepository } from '../../repositories/movieRepository';
 import { EpisodeRepository } from '../../repositories/episodeRepository';
 import { RecommendationRepository } from '../../repositories/recommendationRepository';
@@ -110,10 +108,14 @@ export async function commitRecentCursor(env: Env, cursor: RecentCursor): Promis
 export async function persistRecentSummary(repos: ReturnType<typeof buildRepos>, result: IncrementalSyncResult): Promise<void> {
   try {
     await repos.syncState.set('recent:last_run', JSON.stringify({ ...result, recordedAt: new Date().toISOString() }));
-  } catch {
-    // Observability must never turn a completed sync into a failed sync. The
-    // structured console log remains available when this best-effort write is
-    // unavailable (for example during a transient D1 outage).
+  } catch (err) {
+    // Observability must never turn a completed sync into a failed sync --
+    // the structured console log below is the only trace this failure
+    // leaves; /__sync/status's recentSync field will just look stale.
+    console.error(JSON.stringify({
+      message: 'persistRecentSummary failed',
+      error: err instanceof Error ? err.message : String(err),
+    }));
   }
 }
 
@@ -385,7 +387,16 @@ export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResul
     try {
       await repos.syncState.set('cursor:recent', JSON.stringify(newest));
       cursorAfter = newest;
-    } catch {
+    } catch (err) {
+      // Genuinely worth knowing about: every slug in this tick synced
+      // cleanly, but the cursor itself failed to persist, so the same
+      // window gets rescanned next tick (see stopReason below) -- not a
+      // silent no-op like the D1-unavailable branches elsewhere in this
+      // file that fall back to a documented safe default.
+      console.error(JSON.stringify({
+        message: 'commitRecentCursor failed',
+        error: err instanceof Error ? err.message : String(err),
+      }));
       cursorWriteFailed = true;
       totals.failed++;
     }
@@ -600,7 +611,6 @@ export const RESOLVE_BATCH_SIZE = 300;
 // smaller page keeps D1 writes and cache invalidation bounded per cron.
 const REQUEUE_BATCH_SIZE = 100;
 const REQUEUE_CURSOR_KEY = 'recommendation:requeue_cursor';
-const CACHE_PURGE_TAGS_PER_CALL = 100;
 // ADR-0002 Finding 3: only materialize a stub for a target enough catalog
 // movies actually point at to be worth a whole extra D1 row + TMDB fetch.
 const STUB_MIN_REFCOUNT = 2;
@@ -632,7 +642,6 @@ export interface ResolveTickResult {
   resolvedToStub: number;
   overflow: number;
   retryable: number;
-  cacheTagsPurged: number;
   stubCount: number;
   maxStubs: number;
   durationMs: number;
@@ -699,35 +708,6 @@ export async function requeueOverflowGroups(repos: Repositories, maxStubs: numbe
   return { candidates: candidates.length, requeued: requeue.length };
 }
 
-async function purgeRecommendationCache(repos: Repositories, targetTmdbId: number, targetType: 'movie' | 'tv') {
-  const tags = await repos.recommendation.getSourceCacheTagsForTarget(targetTmdbId, targetType);
-  let purged = 0;
-  for (let i = 0; i < tags.length; i += CACHE_PURGE_TAGS_PER_CALL) {
-    try {
-      const chunk = tags.slice(i, i + CACHE_PURGE_TAGS_PER_CALL);
-      await cache.purge({ tags: chunk });
-      purged += chunk.length;
-    } catch {
-      break; // edge commit is already durable; the normal 60s TTL is safe fallback
-    }
-  }
-  return purged;
-}
-
-async function resolveTarget(
-  repos: Repositories,
-  targetTmdbId: number,
-  targetType: 'movie' | 'tv',
-  slug: string
-): Promise<number> {
-  await repos.recommendation.markResolved(targetTmdbId, targetType, slug);
-  try {
-    return await purgeRecommendationCache(repos, targetTmdbId, targetType);
-  } catch {
-    return 0;
-  }
-}
-
 export interface ResolveGroup {
   targetTmdbId: number;
   targetType: 'movie' | 'tv';
@@ -736,7 +716,6 @@ export interface ResolveGroup {
 
 export interface ResolveGroupOutcome {
   kind: 'resolved_existing' | 'resolved_stub' | 'overflow' | 'retryable';
-  cacheTagsPurged: number;
 }
 
 /** One (target_tmdb_id, target_type) group's worth of the three-tier
@@ -770,21 +749,21 @@ export async function resolveOneGroup(
 
   const local = await repos.movie.getCanonicalTargetByTmdbRef(targetType, targetTmdbId);
   if (local) {
-    const cacheTagsPurged = await resolveTarget(repos, targetTmdbId, targetType, local.slug);
-    return { kind: 'resolved_existing', cacheTagsPurged };
+    await repos.recommendation.markResolved(targetTmdbId, targetType, local.slug);
+    return { kind: 'resolved_existing' };
   }
 
   const onKkphim = await clients.kkphim.getByTmdbRef(targetType, targetTmdbId);
-  if (onKkphim.kind === 'retryable_error') return { kind: 'retryable', cacheTagsPurged: 0 };
+  if (onKkphim.kind === 'retryable_error') return { kind: 'retryable' };
   if (onKkphim.kind === 'found') {
     const synced = await syncOneMovie(env, onKkphim.data.movie.slug, clients, repos);
     if (synced.outcome !== 'written' && synced.outcome !== 'unchanged') {
-      return { kind: 'retryable', cacheTagsPurged: 0 };
+      return { kind: 'retryable' };
     }
     const target = await repos.movie.getBySlug(onKkphim.data.movie.slug);
-    if (!target) return { kind: 'retryable', cacheTagsPurged: 0 };
-    const cacheTagsPurged = await resolveTarget(repos, targetTmdbId, targetType, target.slug);
-    return { kind: 'resolved_existing', cacheTagsPurged };
+    if (!target) return { kind: 'retryable' };
+    await repos.recommendation.markResolved(targetTmdbId, targetType, target.slug);
+    return { kind: 'resolved_existing' };
   }
 
   if (maxStubs > 0 && refCount >= STUB_MIN_REFCOUNT && stubCountRef.count < maxStubs) {
@@ -796,16 +775,16 @@ export async function resolveOneGroup(
       const hash = hashMovie(stub);
       await repos.movie.upsertMany([{ movie: stub, hash }]);
       await repos.search.indexMovie(slug, stub.title, stub.originalTitle);
-      const cacheTagsPurged = await resolveTarget(repos, targetTmdbId, targetType, slug);
+      await repos.recommendation.markResolved(targetTmdbId, targetType, slug);
       stubCountRef.count++;
       await repos.syncState.set(STUB_COUNT_KEY, String(stubCountRef.count));
-      return { kind: 'resolved_stub', cacheTagsPurged };
+      return { kind: 'resolved_stub' };
     }
-    if (tmdbDetail.kind === 'retryable_error') return { kind: 'retryable', cacheTagsPurged: 0 };
+    if (tmdbDetail.kind === 'retryable_error') return { kind: 'retryable' };
   }
 
   await repos.recommendation.markAttempted(targetTmdbId, targetType);
-  return { kind: 'overflow', cacheTagsPurged: 0 };
+  return { kind: 'overflow' };
 }
 
 /** Phase 4 (plan §4, ADR-0002 Finding 3) -- the three-tier recommendation
@@ -834,14 +813,12 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
   let resolvedToStub = 0;
   let overflow = 0;
   let retryable = 0;
-  let cacheTagsPurged = 0;
   let groupsSeen = 0;
 
   for (const group of groups) {
     if (Date.now() >= deadline) break;
     groupsSeen++;
     const outcome = await resolveOneGroup(env, repos, clients, group, maxStubs, stubCountRef);
-    cacheTagsPurged += outcome.cacheTagsPurged;
     if (outcome.kind === 'resolved_existing') resolvedToExisting++;
     else if (outcome.kind === 'resolved_stub') resolvedToStub++;
     else if (outcome.kind === 'overflow') overflow++;
@@ -861,7 +838,6 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
     resolvedToStub,
     overflow,
     retryable,
-    cacheTagsPurged,
     stubCount: stubCountRef.count,
     maxStubs,
     durationMs: Date.now() - startedAt,

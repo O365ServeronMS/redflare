@@ -1,3 +1,3 @@
 export const cache = {
-  purge: async () => undefined,
+  purge: async () => ({ success: true, errors: [] }),
 };

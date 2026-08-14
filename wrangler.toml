@@ -29,6 +29,25 @@ main = "src-ssr/index.ts"
 # title used to mean N simultaneous D1 hits. src-ssr/cache/control.ts sets
 # Cache-Control/Cache-Tag per response; src-ssr/services/sync/syncMovie.ts
 # purges by tag when a title's data actually changes.
+#
+# NOTE, easy to get wrong: this is the WORKER's cache, not the zone's. "No
+# zone-level purge (via the dashboard, API, or Terraform) affects Workers
+# Caching content" (Cloudflare docs, /workers/cache/purge/). Caching ->
+# Purge Everything on the bluesia.net zone does NOT clear /api/* anymore --
+# that procedure was correct only while this project used caches.default
+# (the Cache API, which IS the zone cache) and stopped being correct at the
+# Phase 5 migration. The only ways to invalidate now are from inside the
+# Worker: GET /__sync/purge-cache (purge everything, see routes/sync.ts),
+# the per-title tag purges in the sync pipeline, or a deploy (below).
+#
+# cross_version_cache deliberately LEFT AT ITS DEFAULT (false): the Worker
+# version stays part of the cache key, so each deploy starts from a clean
+# cache. That makes `git push origin main` an automatic full invalidation --
+# the simplest, most reliable purge available here, costing nothing and
+# subject to no purge rate limit. Setting it to true was evaluated and
+# rejected: it buys a warmer cache across deploys, but the D1 read it saves
+# is one indexed 24-row page per distinct path, which is noise against the
+# Free plan's 5M rows/day -- not worth giving up deploy-time invalidation.
 [cache]
 enabled = true
 
@@ -79,11 +98,20 @@ database_id = "40c364b3-10a8-4d03-bd51-60debe94610a"
 # hostname needs cleaning up too.
 
 # BACKFILL_MODE: "free" applies the D1 daily-write governor; "burst" is the
-# explicit Workers Paid mode and bypasses that governor. Burst remains bound
-# by the project's aggregate upstream limit (KKPhim 25 RPS, TMDB 40 RPS),
-# Cron wall time, and D1's Paid-plan 10GB per-database platform limit.
-# F2 pilot: materialize only highly shared TMDB targets, bounded at 1,000
-# total stub rows while cron health and D1 growth are observed.
+# explicit Workers Paid mode and bypasses that governor. Reverted to "free"
+# here per docs/plan-free-plan-migration.md Phase 6 -- the initial catalog
+# backfill is complete (backfill.done, docs/state-free-plan-migration.md
+# Phase 0) and BACKFILL_ENABLED is "false" below, so nothing currently
+# writes fast enough to need burst's bypass; steady-state D1 writes are the
+# few-hundred-to-few-thousand-rows/day the governor is sized for
+# (MAX_ROWS_PER_DAY = 85_000 in orchestrator.ts). Flip back to "burst" only
+# for a future large, time-boxed re-crawl, and only while actually on
+# Workers Paid -- burst has no governor at all, so it is not Free-plan-safe
+# on its own. Verify via /__sync/status rowsWrittenToday for a few days
+# after any BACKFILL_ENABLED re-crawl before treating this as settled
+# (plan Phase 7); actually downgrading the Cloudflare subscription itself
+# (plan Phase 8) is a real-account action gated on explicit sign-off from
+# the project owner, not something either mode here decides.
 #
 # BACKFILL_ENABLED/BACKFILL_TYPE/BACKFILL_PAGE_FROM/BACKFILL_PAGE_TO
 # (docs/plan-free-plan-migration.md Phase 3): all four are plain [vars], so
@@ -95,7 +123,7 @@ database_id = "40c364b3-10a8-4d03-bd51-60debe94610a"
 # future targeted re-crawl. See services/sync/orchestrator.ts
 # runBackfillTick for exact semantics.
 [vars]
-BACKFILL_MODE = "burst"
+BACKFILL_MODE = "free"
 MAX_STUBS = "1000"
 BACKFILL_ENABLED = "false"
 BACKFILL_TYPE = ""
@@ -175,3 +203,12 @@ service = "redflare"
 
 [observability]
 enabled = true
+
+# head_sampling_rate = 1 (100%) made explicit rather than left to the
+# implicit default -- this Worker's own console.error calls are already
+# low-volume (the unhandled-exception boundary in index.ts, plus a handful
+# of swallowed-error sites in the sync pipeline; see their own comments), so
+# nothing here is high-cardinality enough yet to need downsampling. Revisit
+# if per-request logging is ever added to the hot /api/* path.
+[observability.logs]
+head_sampling_rate = 1

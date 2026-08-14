@@ -1,5 +1,4 @@
 import { WorkflowEntrypoint, type WorkflowStep, type WorkflowEvent } from 'cloudflare:workers';
-import type { Env } from '../types/env';
 import { RecommendationRepository } from '../repositories/recommendationRepository';
 import { RecommendationFreshnessRepository } from '../repositories/recommendationFreshnessRepository';
 import { RateLimiter, TMDB_AGGREGATE_RPS } from '../services/sync/throttle';
@@ -34,7 +33,6 @@ export class RecommendationRefreshWorkflow extends WorkflowEntrypoint<Env> {
     let refreshed = 0;
     let validEmpty = 0;
     let retryable = 0;
-    let cacheTagsPurged = 0;
 
     for (let i = 0; i < sources.length; i += SOURCES_PER_STEP) {
       const batch = sources.slice(i, i + SOURCES_PER_STEP);
@@ -42,22 +40,19 @@ export class RecommendationRefreshWorkflow extends WorkflowEntrypoint<Env> {
         let ok = 0;
         let empty = 0;
         let retry = 0;
-        let purged = 0;
         for (const source of batch) {
           const outcome = await refreshOneSource(freshness, recommendation, tmdb, source);
-          purged += outcome.cacheTagsPurged;
           if (outcome.kind === 'refreshed') ok++;
           else if (outcome.kind === 'valid_empty') { ok++; empty++; }
           else retry++;
         }
-        return { ok, empty, retry, purged };
+        return { ok, empty, retry };
       });
       refreshed += batchResult.ok;
       validEmpty += batchResult.empty;
       retryable += batchResult.retry;
-      cacheTagsPurged += batchResult.purged;
     }
 
-    return { due: sources.length, refreshed, validEmpty, retryable, cacheTagsPurged };
+    return { due: sources.length, refreshed, validEmpty, retryable };
   }
 }

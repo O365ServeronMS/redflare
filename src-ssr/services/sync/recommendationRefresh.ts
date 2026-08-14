@@ -1,5 +1,3 @@
-import { cache } from 'cloudflare:workers';
-import type { Env } from '../../types/env';
 import { RecommendationRepository } from '../../repositories/recommendationRepository';
 import { RecommendationFreshnessRepository, type RecommendationRefreshCandidate } from '../../repositories/recommendationFreshnessRepository';
 import { RateLimiter, TMDB_AGGREGATE_RPS } from './throttle';
@@ -14,17 +12,17 @@ export interface RecommendationRefreshTickResult {
   refreshed: number;
   validEmpty: number;
   retryable: number;
-  cacheTagsPurged: number;
 }
 
 export interface RefreshSourceOutcome {
   kind: 'refreshed' | 'valid_empty' | 'retryable';
-  cacheTagsPurged: number;
 }
 
 /** One source's worth of the refresh tick, extracted so a caller wanting
  * per-source step boundaries (src-ssr/workflows/recommendationRefreshWorkflow.ts)
- * can wrap this single TMDB call + writes in its own step. */
+ * can wrap this single TMDB call + writes in its own step. No cache purge --
+ * a refreshed source rides out cache/control.ts's max-age=60 like everything
+ * else; see syncMovie.ts for why per-item purging was tried and dropped. */
 export async function refreshOneSource(
   freshness: RecommendationFreshnessRepository,
   recommendation: RecommendationRepository,
@@ -34,21 +32,14 @@ export async function refreshOneSource(
   const result = await tmdb.getRecommendationIds(source.tmdbType, source.tmdbId, 15);
   if (result.kind === 'retryable_error') {
     await freshness.markAttempt(source.slug, 'retryable_error');
-    return { kind: 'retryable', cacheTagsPurged: 0 };
+    return { kind: 'retryable' };
   }
   await recommendation.replaceTargetsPreservingResolvedForSlug(
     source.slug,
     result.ids.map((targetTmdbId, sortOrder) => ({ targetTmdbId, targetType: source.tmdbType, sortOrder }))
   );
   await freshness.markAttempt(source.slug, result.ids.length === 0 ? 'valid_empty' : 'success');
-  let cacheTagsPurged = 0;
-  try {
-    await cache.purge({ tags: [`recommendation:${source.tmdbType}:${source.tmdbId}`] });
-    cacheTagsPurged = 1;
-  } catch {
-    // Edge write succeeded; the normal API TTL remains a safe fallback.
-  }
-  return { kind: result.ids.length === 0 ? 'valid_empty' : 'refreshed', cacheTagsPurged };
+  return { kind: result.ids.length === 0 ? 'valid_empty' : 'refreshed' };
 }
 
 /** Refreshes source recommendation IDs without fetching KKPhim/movie detail,
@@ -72,15 +63,13 @@ export async function runRecommendationRefreshTick(env: Env): Promise<Recommenda
   let refreshed = 0;
   let validEmpty = 0;
   let retryable = 0;
-  let cacheTagsPurged = 0;
 
   for (const source of sources) {
     const outcome = await refreshOneSource(freshness, recommendation, tmdb, source);
-    cacheTagsPurged += outcome.cacheTagsPurged;
     if (outcome.kind === 'refreshed') refreshed++;
     else if (outcome.kind === 'valid_empty') { refreshed++; validEmpty++; }
     else retryable++;
   }
 
-  return { due: sources.length, refreshed, validEmpty, retryable, cacheTagsPurged };
+  return { due: sources.length, refreshed, validEmpty, retryable };
 }

@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import type { Env } from './types/env';
+import { HTTPException } from 'hono/http-exception';
 import { apiRoute } from './api/routes';
 import { sitemapRoute } from './routes/sitemap';
 import { syncRoute } from './routes/sync';
@@ -28,6 +28,25 @@ const SPA_DOCUMENT_PATHS = [
 
 app.use('*', securityHeaders);
 app.use('*', requestSampler);
+
+// Explicit error boundary (no ctx.passThroughOnException -- this project has
+// no "origin" to fall back to anyway) so an unhandled exception anywhere in
+// a route gets a structured log line instead of only Hono's default plain-
+// text 500. HTTPException (thrown deliberately by a route, e.g. Hono's own
+// validators) is passed through as its own response/status; anything else
+// is an unexpected bug and always logged + reported as a generic 500 so
+// internal error text never reaches a client.
+app.onError((err, c) => {
+  if (err instanceof HTTPException) return err.getResponse();
+  console.error(JSON.stringify({
+    message: 'unhandled error',
+    error: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+    method: c.req.method,
+    path: c.req.path,
+  }));
+  return c.text('Internal server error', 500);
+});
 
 // Only routes listed in wrangler.toml assets.run_worker_first reach this
 // Worker. Static files still bypass it; browser document requests pass
