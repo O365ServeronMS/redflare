@@ -90,7 +90,7 @@ syncRoute.post('/__sync/refresh-hero', async (c) => {
 // the default entrypoint, which is where every /api/* response is actually
 // cached, so the entrypoint scoping is correct by construction.
 //
-//   curl -sH "x-cron-key: $CRON_KEY" https://phim.bluesia.net/__sync/purge-cache
+//   curl -sH "x-cron-key: $CRON_KEY" https://film.bluesia.net/__sync/purge-cache
 //
 // A deploy (`git push origin main`) also clears everything on its own --
 // the Worker version is part of the cache key (wrangler.toml [cache]).

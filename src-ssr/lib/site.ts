@@ -1,1 +1,1 @@
-export const SITE_ORIGIN = 'https://phim.bluesia.net';
+export const SITE_ORIGIN = 'https://film.bluesia.net';

@@ -11,7 +11,7 @@ compatibility_flags = ["nodejs_compat"]
 # Pin the custom domain in config so each deploy re-attaches it — avoids the site
 # going down when the Git integration is disconnected/reconnected.
 routes = [
-  { pattern = "phim.bluesia.net", custom_domain = true },
+  { pattern = "film.bluesia.net", custom_domain = true },
 ]
 
 # src-ssr/index.ts now owns only JSON APIs, sitemap/robots, sync routes and

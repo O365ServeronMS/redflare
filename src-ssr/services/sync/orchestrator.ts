@@ -350,7 +350,7 @@ export async function runIncrementalSync(env: Env): Promise<IncrementalSyncResul
       // this Worker regardless of what URL is given (same pattern as
       // worker/lib/home.js's SELF usage). Kept as the real prod hostname
       // for consistency with that file, not because it's reachable.
-      env.SELF.fetch(`https://phim.bluesia.net/__sync/batch/${n}`, {
+      env.SELF.fetch(`https://film.bluesia.net/__sync/batch/${n}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-cron-key': env.CRON_KEY ?? '' },
         body: JSON.stringify({ slugs: batch }),

@@ -15,7 +15,7 @@ export default defineConfig({
     // straight to the live production Worker to keep "npm run dev hits the
     // live backend" true.
     proxy: {
-      '/api': { target: 'https://phim.bluesia.net', changeOrigin: true },
+      '/api': { target: 'https://film.bluesia.net', changeOrigin: true },
     },
   },
   preview: {
@@ -23,7 +23,7 @@ export default defineConfig({
     // the VPS-era catalog host; that name is the R2 image bucket now and has
     // no /api/* route, so preview served no catalog data at all.)
     proxy: {
-      '/api': { target: 'https://phim.bluesia.net', changeOrigin: true },
+      '/api': { target: 'https://film.bluesia.net', changeOrigin: true },
     },
   },
 });
