@@ -172,16 +172,12 @@ Body là `application/x-www-form-urlencoded`:
 
 - `keyword`: từ khoá tìm kiếm.
 - `page`: mặc định 1; overlay không có phân trang.
-- `cf-turnstile-response`: token Turnstile action `search`, bắt buộc và single-use.
 
-Worker gọi Siteverify trước khi chạy FTS5, yêu cầu `success === true`, action `search`
-và hostname nằm trong `TURNSTILE_HOSTNAMES`. Thiếu/sai/hết hạn/replay token trả
-`403 forbidden`; response luôn `private, no-store`. Khi hợp lệ, response giữ nguyên
-shape §2b. SearchOverlay debounce 400ms, huỷ request cũ bằng `AbortController`, rồi
-chạy Invisible Turnstile theo `execution: "execute"` chỉ khi debounce hoàn tất. Widget
-không chiếm layout; nếu keyword thay đổi trong lúc challenge/request đang chạy, chỉ
-keyword mới nhất được giữ lại. Sau mỗi attempt, widget reset để request kế tiếp nhận
-token single-use mới.
+Response luôn `private, no-store` vì keyword là free-text input theo từng người dùng.
+Khi hợp lệ, response giữ nguyên shape §2b. SearchOverlay debounce 400ms, huỷ request cũ
+bằng `AbortController`, rồi gọi thẳng `/api/search` khi debounce hoàn tất — không còn
+bước xác minh Turnstile (gỡ bỏ 2026-08-17; widget, `TURNSTILE_SECRET`/`TURNSTILE_HOSTNAMES`
+và endpoint Siteverify không còn được dùng nữa).
 
 ## 6. `GET /api/recommendation/:mediaType/:tmdbId` (+ alias `/api/related/:mediaType/:tmdbId`)
 

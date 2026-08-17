@@ -10,31 +10,6 @@ import { renderPosterCard } from '../PosterCard/PosterCard.js';
 const RECENT_SEARCHES_KEY = 'bluesia-recent-searches';
 const MAX_RECENT = 8; // Increased slightly for pills layout
 const DEBOUNCE_MS = 400;
-const TURNSTILE_SITEKEY = '0x4AAAAAAEMrWp9ESv4_-T5g';
-const TURNSTILE_ACTION = 'search';
-const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-
-let turnstileLoadPromise = null;
-
-function loadTurnstile() {
-  if (window.turnstile) return Promise.resolve(window.turnstile);
-  if (turnstileLoadPromise) return turnstileLoadPromise;
-
-  turnstileLoadPromise = new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = TURNSTILE_SCRIPT_URL;
-    script.async = true;
-    script.defer = true;
-    script.addEventListener('load', () => {
-      if (window.turnstile) resolve(window.turnstile);
-      else reject(new Error('Turnstile API unavailable'));
-    }, { once: true });
-    script.addEventListener('error', () => reject(new Error('Turnstile API failed to load')), { once: true });
-    document.head.appendChild(script);
-  });
-
-  return turnstileLoadPromise;
-}
 
 // ---------------------------------------------------------------------------
 // Recent searches helpers
@@ -160,26 +135,13 @@ export function renderSearchOverlay(container) {
   content.appendChild(resultsGrid);
   content.appendChild(emptyState);
 
-  const turnstileContainer = document.createElement('div');
-  turnstileContainer.className = 'search-overlay__turnstile';
-
-  const verificationError = document.createElement('p');
-  verificationError.className = 'search-overlay__verification-error';
-  verificationError.setAttribute('aria-live', 'polite');
-  verificationError.hidden = true;
-
   overlay.appendChild(header);
-  overlay.appendChild(turnstileContainer);
-  overlay.appendChild(verificationError);
   overlay.appendChild(content);
   container.appendChild(overlay);
 
   // ---- Internal state ----
   let debounceTimer = null;
   let abortController = null;
-  let widgetId = null;
-  let challengePending = false;
-  let pendingKeyword = '';
 
   // ---- Helpers ----
 
@@ -192,15 +154,12 @@ export function renderSearchOverlay(container) {
   function close() {
     overlay.classList.remove('search-overlay--open');
     input.value = '';
-    pendingKeyword = '';
-    setVerificationError('');
     clearResults();
     if (debounceTimer) {
       clearTimeout(debounceTimer);
       debounceTimer = null;
     }
     if (abortController) abortController.abort();
-    resetTurnstile();
   }
 
   function clearResults() {
@@ -277,54 +236,18 @@ export function renderSearchOverlay(container) {
     resultsGrid.appendChild(createSkeletonCards(10));
   }
 
-  function setVerificationError(message) {
-    verificationError.textContent = message;
-    verificationError.hidden = !message;
-  }
-
-  function resetTurnstile() {
-    challengePending = false;
-    if (widgetId !== null && window.turnstile) {
-      window.turnstile.reset(widgetId);
-    }
-  }
-
-  function executePendingSearch() {
-    if (
-      !pendingKeyword
-      || widgetId === null
-      || challengePending
-      || abortController
-      || !overlay.classList.contains('search-overlay--open')
-    ) {
-      return;
-    }
-
-    challengePending = true;
-    setVerificationError('');
-    try {
-      window.turnstile.execute(widgetId);
-    } catch {
-      challengePending = false;
-      setVerificationError('Không thể xác minh. Vui lòng thử lại.');
-    }
-  }
-
   function queueSearch(keyword) {
     const normalized = keyword?.trim() ?? '';
     if (!normalized) {
-      pendingKeyword = '';
       showRecent();
       return;
     }
 
-    pendingKeyword = normalized;
-    executePendingSearch();
+    void performSearch(normalized);
   }
 
-  async function performSearch(keyword, token) {
-    // Cancel any in-flight request. Its token may already have been redeemed,
-    // so every completed attempt resets the widget before another search.
+  async function performSearch(keyword) {
+    // Cancel any in-flight request before starting another.
     if (abortController) abortController.abort();
     const controller = new AbortController();
     abortController = controller;
@@ -332,7 +255,7 @@ export function renderSearchOverlay(container) {
     showSkeletons();
 
     try {
-      const { items } = await searchMovies(keyword, token, { signal: controller.signal });
+      const { items } = await searchMovies(keyword, { signal: controller.signal });
 
       // Guard against stale results (user may have typed something else)
       if (input.value.trim() !== keyword) return;
@@ -362,54 +285,8 @@ export function renderSearchOverlay(container) {
       emptyState.style.display = 'flex';
     } finally {
       if (abortController === controller) abortController = null;
-      resetTurnstile();
-      if (pendingKeyword && overlay.classList.contains('search-overlay--open')) {
-        queueMicrotask(executePendingSearch);
-      }
     }
   }
-
-  loadTurnstile()
-    .then((turnstile) => {
-      if (!overlay.isConnected || widgetId !== null) return;
-      widgetId = turnstile.render(turnstileContainer, {
-        sitekey: TURNSTILE_SITEKEY,
-        action: TURNSTILE_ACTION,
-        theme: 'dark',
-        execution: 'execute',
-        callback(token) {
-          challengePending = false;
-          setVerificationError('');
-          const keyword = pendingKeyword;
-          pendingKeyword = '';
-          if (!keyword || !overlay.classList.contains('search-overlay--open')) {
-            resetTurnstile();
-            return;
-          }
-          void performSearch(keyword, token);
-        },
-        'expired-callback'() {
-          resetTurnstile();
-          if (pendingKeyword) queueMicrotask(executePendingSearch);
-        },
-        'error-callback'() {
-          resetTurnstile();
-          setVerificationError('Không thể xác minh. Vui lòng thử lại.');
-        },
-        'timeout-callback'() {
-          resetTurnstile();
-          setVerificationError('Xác minh đã hết thời gian. Vui lòng thử lại.');
-        },
-        'unsupported-callback'() {
-          resetTurnstile();
-          setVerificationError('Trình duyệt này không hỗ trợ xác minh bảo mật.');
-        },
-      });
-      executePendingSearch();
-    })
-    .catch(() => {
-      setVerificationError('Không thể tải xác minh bảo mật. Vui lòng tải lại trang.');
-    });
 
   // ---- Event handlers ----
 
@@ -428,9 +305,6 @@ export function renderSearchOverlay(container) {
       clearTimeout(debounceTimer);
       debounceTimer = null;
     }
-    pendingKeyword = '';
-    setVerificationError('');
-    if (challengePending) resetTurnstile();
     if (abortController) abortController.abort();
     const keyword = input.value;
 
@@ -467,7 +341,6 @@ export function renderSearchOverlay(container) {
     input.removeEventListener('input', handleInput);
     if (debounceTimer) clearTimeout(debounceTimer);
     if (abortController) abortController.abort();
-    if (widgetId !== null && window.turnstile) window.turnstile.remove(widgetId);
     overlay.remove();
   };
 }

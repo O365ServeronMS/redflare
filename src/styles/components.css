@@ -1870,22 +1870,6 @@
   margin-bottom: 48px;
 }
 
-.search-overlay__turnstile {
-  position: absolute;
-  inset: 0 auto auto 0;
-  pointer-events: none;
-}
-
-.search-overlay__verification-error {
-  margin: -24px 0 24px;
-  color: #ff8a8f;
-  font-size: 14px;
-}
-
-.search-overlay__verification-error[hidden] {
-  display: none;
-}
-
 .search-overlay__input-wrapper {
   flex: 1;
   display: flex;

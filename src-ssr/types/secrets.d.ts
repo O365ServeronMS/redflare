@@ -5,11 +5,10 @@
 // TypeScript treats it as a global script and merges its `Env` declaration
 // into the generated one instead of shadowing it -- every binding/var stays
 // defined in exactly one place (the generated file), secrets in this one.
-// All three are optional: unset in local `.dev.vars`, or (CRON_KEY,
-// TURNSTILE_SECRET) intentionally treated as "feature off" when absent by
-// their own gates (middleware/cronKey.ts, api/routes.ts search handler).
+// Both are optional: unset in local `.dev.vars`, or (CRON_KEY) intentionally
+// treated as "feature off" when absent by its own gate
+// (middleware/cronKey.ts).
 interface Env {
   CRON_KEY?: string;
   TMDB_API_TOKEN?: string;
-  TURNSTILE_SECRET?: string;
 }

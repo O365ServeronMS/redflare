@@ -93,17 +93,15 @@ export async function getMovieDetail(slug) {
 
 /**
  * Search movies by keyword. Search intentionally bypasses the shared GET
- * cache because every Turnstile token can be redeemed only once.
+ * cache since results are keyed by free-text user input.
  * @param {string} keyword
- * @param {string} turnstileToken
  * @param {{page?: number, signal?: AbortSignal}} [options]
  * @returns {Promise<{items: Array, pagination: Object}>}
  */
-export async function searchMovies(keyword, turnstileToken, { page = 1, signal } = {}) {
+export async function searchMovies(keyword, { page = 1, signal } = {}) {
   const body = new URLSearchParams({
     keyword,
     page: String(page),
-    'cf-turnstile-response': turnstileToken,
   });
   const res = await fetch(`${CATALOG_BASE}/api/search`, {
     method: 'POST',

@@ -129,9 +129,6 @@ BACKFILL_ENABLED = "false"
 BACKFILL_TYPE = ""
 BACKFILL_PAGE_FROM = ""
 BACKFILL_PAGE_TO = ""
-# Siteverify must match the hostname of the frontend that produced the token.
-# Localhost belongs only in a local override, never in this production value.
-TURNSTILE_HOSTNAMES = "phim.bluesia.net"
 
 # The legacy single [triggers] cron (drove the old scheduled() handler in
 # src-ssr/index.ts) is retired as of docs/plan-free-plan-migration.md Phase

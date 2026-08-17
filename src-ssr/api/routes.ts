@@ -139,69 +139,13 @@ apiRoute.get('/api/country', async (c) => {
   });
 });
 
-// POST /api/search (docs/contract-legacy-api.md §5). Search is the only
-// visitor-authored request in this read-only application, so it is gated by
-// Turnstile before the existing FTS query runs. The response is private and
-// uncacheable because every token is single-use.
+// POST /api/search (docs/contract-legacy-api.md §5). The response is
+// private and uncacheable since it's keyed by free-text user input.
 apiRoute.post('/api/search', async (c) => {
   let form: FormData;
   try {
     form = await c.req.raw.formData();
   } catch {
-    applyNoStore(c);
-    return c.text('forbidden', 403);
-  }
-
-  const token = form.get('cf-turnstile-response');
-  const expectedAction = 'search';
-  const expectedHostnames = new Set(
-    (c.env.TURNSTILE_HOSTNAMES ?? '')
-      .split(',')
-      .map((hostname) => hostname.trim())
-      .filter(Boolean),
-  );
-
-  if (
-    typeof c.env.TURNSTILE_SECRET !== 'string'
-    || c.env.TURNSTILE_SECRET.length === 0
-    || typeof token !== 'string'
-    || token.length === 0
-    || token.length > 2048
-    || expectedHostnames.size === 0
-  ) {
-    applyNoStore(c);
-    return c.text('forbidden', 403);
-  }
-
-  let verification: { success?: boolean; action?: string; hostname?: string };
-  try {
-    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      signal: AbortSignal.timeout(10_000),
-      body: new URLSearchParams({
-        secret: c.env.TURNSTILE_SECRET,
-        response: token,
-        remoteip: c.req.header('CF-Connecting-IP') ?? '',
-      }),
-    });
-    if (!response.ok) throw new Error(`siteverify ${response.status}`);
-    const payload: unknown = await response.json();
-    if (payload === null || typeof payload !== 'object') {
-      throw new Error('invalid siteverify response');
-    }
-    verification = payload as { success?: boolean; action?: string; hostname?: string };
-  } catch {
-    applyNoStore(c);
-    return c.text('forbidden', 403);
-  }
-
-  if (
-    verification.success !== true
-    || verification.action !== expectedAction
-    || typeof verification.hostname !== 'string'
-    || !expectedHostnames.has(verification.hostname)
-  ) {
     applyNoStore(c);
     return c.text('forbidden', 403);
   }
