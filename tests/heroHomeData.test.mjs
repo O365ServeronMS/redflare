@@ -17,7 +17,7 @@ async function setup() {
   });
   instances.push(mf);
   const db = await mf.getD1Database('DB');
-  for (const name of ['0005_ssr_schema.sql', '0008_recommendation_resolve.sql', '0009_actor_popularity.sql', '0010_hero_snapshot.sql']) {
+  for (const name of ['0005_ssr_schema.sql', '0008_recommendation_resolve.sql', '0009_actor_popularity.sql', '0010_hero_snapshot.sql', '0014_upstream_modified.sql']) {
     const sql = await readFile(new URL(`../migrations/${name}`, import.meta.url), 'utf8');
     const statements = sql
       .replaceAll(/--.*$/gm, '')

@@ -45,19 +45,21 @@ export class CatalogStatsRepository {
 
   /** Full recompute of every tracked count in one pass, replacing
    * catalog_stats wholesale. Matches the exact semantics of the COUNT
-   * queries it replaces: 'type' is tier-agnostic (movie.type = ?, any
-   * tier -- MovieRepository.countByType never filtered by tier either, so
-   * stub rows count toward type totals the same as before this table
-   * existed); 'tier' is movie.tier = 'catalog'; 'genre'/'country' mirror
-   * TaxonomyRepository.countByGenre/countByCountry (also tier-agnostic).
-   * Called only when the underlying counts could actually have changed
-   * (IncrementalSyncWorkflow after a tick that wrote rows,
-   * RecommendationResolveWorkflow after a tick that created a stub) --
-   * never on a fixed schedule, since steady-state ticks write nothing. */
+   * queries it replaces: 'type' is now tier-filtered (movie.type = ? AND
+   * tier = 'catalog') to match MovieRepository.getPageByTypeOffset/
+   * countByType, which exclude stub rows from /api/list's rail and
+   * pagination total (a stub has no stream, nothing to watch); 'tier' is
+   * movie.tier = 'catalog'; 'genre'/'country' mirror
+   * TaxonomyRepository.countByGenre/countByCountry (still tier-agnostic --
+   * out of scope for this fix). Called only when the underlying counts
+   * could actually have changed (IncrementalSyncWorkflow after a tick that
+   * wrote rows, RecommendationResolveWorkflow after a tick that created a
+   * stub) -- never on a fixed schedule, since steady-state ticks write
+   * nothing. */
   async refresh(): Promise<void> {
     const [tierRow, typeRes, genreRes, countryRes] = await Promise.all([
       this.db.prepare("SELECT COUNT(*) AS n FROM movie WHERE tier = 'catalog'").first<{ n: number }>(),
-      this.db.prepare('SELECT type, COUNT(*) AS n FROM movie GROUP BY type').all<{ type: string; n: number }>(),
+      this.db.prepare("SELECT type, COUNT(*) AS n FROM movie WHERE tier = 'catalog' GROUP BY type").all<{ type: string; n: number }>(),
       this.db.prepare('SELECT genre_slug, COUNT(*) AS n FROM genre_movie GROUP BY genre_slug').all<{ genre_slug: string; n: number }>(),
       this.db.prepare('SELECT country_slug, COUNT(*) AS n FROM country_movie GROUP BY country_slug').all<{ country_slug: string; n: number }>(),
     ]);

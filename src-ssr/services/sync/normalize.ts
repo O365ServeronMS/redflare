@@ -118,11 +118,17 @@ export function normalizeMovie(
       : undefined,
     actors: m.actor ?? [],
     popularity: tmdb?.popularity ?? null,
+    modifiedAt: parseModifiedAt(m.modified?.time),
   };
 }
 
 function stripHtml(html: string | undefined): string {
   return (html ?? '').replace(/<[^>]+>/g, '').trim();
+}
+
+function parseModifiedAt(time: string | undefined): number | null {
+  const ms = time ? Date.parse(time) : NaN;
+  return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
 }
 
 /** Stub tier (ADR-0002 Finding 3, plan §4) -- a TMDB-only title that isn't
@@ -173,6 +179,7 @@ export function normalizeStubMovie(slug: string, tmdb: TmdbDetail, tmdbId: numbe
     recommendationTargets: [],
     actors: [], // no KKPhim record exists for a stub -- nothing to source cast from
     popularity: tmdb.popularity ?? null,
+    modifiedAt: null, // no upstream KKPhim record for a stub
   };
 }
 

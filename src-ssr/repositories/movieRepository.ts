@@ -8,9 +8,9 @@ export interface Page<T> {
 }
 
 // Columns bound per row in the upsert below. At D1's 100-param cap that's
-// still 3 rows/statement (29 cols x 3 = 87, x4 would be 116 -- over) -- see
+// still 3 rows/statement (30 cols x 3 = 90, x4 would be 120 -- over) -- see
 // db/chunk.ts. Re-check this arithmetic before adding another column.
-const MOVIE_COLUMNS = 29;
+const MOVIE_COLUMNS = 30;
 
 function toRow(m: NormalizedMovie, hash: string, now: number) {
   return [
@@ -43,6 +43,7 @@ function toRow(m: NormalizedMovie, hash: string, now: number) {
     now,
     JSON.stringify(m.actors),
     m.popularity,
+    m.modifiedAt,
   ] as const;
 }
 
@@ -52,7 +53,7 @@ INSERT INTO movie (
   poster_path, thumb_path, poster_host, release_year, runtime, vote_average,
   vote_count, status, episode_current, quality, lang, type, genres_json,
   countries_json, has_stream, stream_count, youtube_trailer_key, tier,
-  source_hash, last_synced, actor_json, popularity
+  source_hash, last_synced, actor_json, popularity, upstream_modified
 ) VALUES ${'(' + Array(MOVIE_COLUMNS).fill('?').join(',') + ')'}
 ON CONFLICT(slug) DO UPDATE SET
   tmdb_id = excluded.tmdb_id,
@@ -82,7 +83,8 @@ ON CONFLICT(slug) DO UPDATE SET
   source_hash = excluded.source_hash,
   last_synced = excluded.last_synced,
   actor_json = excluded.actor_json,
-  popularity = excluded.popularity
+  popularity = excluded.popularity,
+  upstream_modified = excluded.upstream_modified
 `;
 
 export class MovieRepository {
@@ -216,13 +218,18 @@ export class MovieRepository {
     return res.results ?? [];
   }
 
-  /** Home page (/) -- most-recently-synced catalog titles, single flat
-   * query, no pagination (the home page is a fixed-size showcase, not a
-   * listing -- see /danh-sach/:type for the paginated version of "recent
-   * titles"). */
+  /** Home page (/) -- most-recently-*upstream*-updated catalog titles,
+   * single flat query, no pagination (the home page is a fixed-size
+   * showcase, not a listing -- see /danh-sach/:type for the paginated
+   * version of "recent titles"). Ordered by upstream_modified (the
+   * source's own modified.time), not last_synced: last_synced is when
+   * THIS Worker wrote the row, which drifts independent of upstream
+   * freshness whenever the hero snapshot refresh (every 30 min) re-syncs a
+   * trending title and its vote_average/vote_count happens to have moved
+   * -- that used to push hero titles to the top of this rail too. */
   async getRecentMovies(limit: number): Promise<MovieRow[]> {
     const res = await this.db
-      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY last_synced DESC LIMIT ?")
+      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY COALESCE(upstream_modified, last_synced) DESC LIMIT ?")
       .bind(limit)
       .all<MovieRow>();
     return res.results ?? [];
@@ -261,10 +268,12 @@ export class MovieRepository {
   // (src-ssr/api/routes.ts) -- worst case 200 x 24 = 4,800 rows scanned,
   // trivial against the 5M rows-read/day quota.
 
-  /** `/api/list?type=phim-moi-cap-nhat` -- newest across every type. */
+  /** `/api/list?type=phim-moi-cap-nhat` -- newest across every type. Same
+   * upstream_modified ordering as getRecentMovies above, so the paginated
+   * "see all" view stays consistent with the home rail. */
   async getRecentMoviesOffset(page: number, limit: number): Promise<MovieRow[]> {
     const res = await this.db
-      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY last_synced DESC LIMIT ? OFFSET ?")
+      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY COALESCE(upstream_modified, last_synced) DESC LIMIT ? OFFSET ?")
       .bind(limit, (page - 1) * limit)
       .all<MovieRow>();
     return res.results ?? [];
@@ -274,18 +283,26 @@ export class MovieRepository {
     return this.countByTier('catalog');
   }
 
-  /** `/api/list?type=<phim-le|phim-bo|hoat-hinh|tv-shows>` */
+  /** `/api/list?type=<phim-le|phim-bo|hoat-hinh|tv-shows>`. `tier =
+   * 'catalog'` excludes TMDB-only stubs (no stream, nothing to watch) from
+   * ever appearing in a browsable rail -- previously missing here even
+   * though getRecentMovies already had it. */
   async getPageByTypeOffset(type: string, page: number, limit: number): Promise<MovieRow[]> {
     const res = await this.db
-      .prepare('SELECT * FROM movie WHERE type = ? ORDER BY last_synced DESC LIMIT ? OFFSET ?')
+      .prepare(
+        "SELECT * FROM movie WHERE type = ? AND tier = 'catalog' ORDER BY COALESCE(upstream_modified, last_synced) DESC LIMIT ? OFFSET ?"
+      )
       .bind(type, limit, (page - 1) * limit)
       .all<MovieRow>();
     return res.results ?? [];
   }
 
+  /** Tier-filtered to match getPageByTypeOffset above -- a stub counted
+   * here without being counted there would make /api/list's pagination
+   * total overshoot the actual number of pages it can serve. */
   async countByType(type: string): Promise<number> {
     const row = await this.db
-      .prepare('SELECT COUNT(*) as n FROM movie WHERE type = ?')
+      .prepare("SELECT COUNT(*) as n FROM movie WHERE type = ? AND tier = 'catalog'")
       .bind(type)
       .first<{ n: number }>();
     return row?.n ?? 0;

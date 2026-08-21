@@ -69,6 +69,14 @@ export interface NormalizedMovie {
    * anything else about the title, and hashing it would force a rewrite of
    * every synced movie on every tick. */
   popularity: number | null;
+  /** Upstream KKPhim `modified.time`, epoch seconds. Drives rail ordering
+   * (getRecentMovies/getPageByTypeOffset) instead of `last_synced` -- the
+   * hero snapshot refresh re-syncs trending titles every 30 minutes and
+   * their vote_average/vote_count drift often enough to change last_synced
+   * without the upstream title actually being new. Not hashed, same
+   * reasoning as popularity: a TMDB-only stub has no upstream record, so
+   * this is null there. */
+  modifiedAt: number | null;
 }
 
 export interface MovieRow {
@@ -101,4 +109,5 @@ export interface MovieRow {
   last_synced: number;
   actor_json: string;
   popularity: number | null;
+  upstream_modified: number | null;
 }

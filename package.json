@@ -13,6 +13,7 @@
     "test:hero-snapshot": "node --test tests/heroSnapshotRepository.test.mjs",
     "test:hero-refresh": "esbuild tests/heroSnapshotRefresh.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/heroSnapshotRefresh.bundle.mjs && node --test tests/heroSnapshotRefresh.bundle.mjs && node -e \"require('fs').rmSync('tests/heroSnapshotRefresh.bundle.mjs', { force: true })\"",
     "test:hero-home-data": "esbuild tests/heroHomeData.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/heroHomeData.bundle.mjs && node --test tests/heroHomeData.bundle.mjs && node -e \"require('fs').rmSync('tests/heroHomeData.bundle.mjs', { force: true })\"",
+    "test:home-rail-ordering": "esbuild tests/homeRailOrdering.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/homeRailOrdering.bundle.mjs && node --test tests/homeRailOrdering.bundle.mjs && node -e \"require('fs').rmSync('tests/homeRailOrdering.bundle.mjs', { force: true })\"",
     "test:recommendation-safety": "esbuild tests/recommendationFailureSafety.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/recommendationFailureSafety.bundle.mjs && node --test tests/recommendationFailureSafety.bundle.mjs && node -e \"require('fs').rmSync('tests/recommendationFailureSafety.bundle.mjs', { force: true })\"",
     "test:recommendation-refresh": "esbuild tests/recommendationRefresh.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/recommendationRefresh.bundle.mjs && node --test tests/recommendationRefresh.bundle.mjs && node -e \"require('fs').rmSync('tests/recommendationRefresh.bundle.mjs', { force: true })\"",
     "test:recommendation-client": "node --test tests/recommendationClient.test.mjs",
@@ -32,5 +33,9 @@
     "artplayer": "^5.4.0",
     "hls.js": "^1.6.17",
     "hono": "^4.13.1"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260801.1": true
   }
 }

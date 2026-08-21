@@ -51,7 +51,7 @@ export function toLegacyItem(row: MovieRow): LegacyItem {
     tmdb: { id: row.tmdb_id, type: row.tmdb_type, season: row.tmdb_season },
     imdb: {},
     vote_average: row.vote_average,
-    modified: { time: new Date(row.last_synced * 1000).toISOString() },
+    modified: { time: new Date((row.upstream_modified ?? row.last_synced) * 1000).toISOString() },
   };
 }
 
