@@ -20,6 +20,7 @@
     "test:incremental-sync": "esbuild tests/incrementalSyncSafety.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/incrementalSyncSafety.bundle.mjs && node --test tests/incrementalSyncSafety.bundle.mjs && node -e \"require('fs').rmSync('tests/incrementalSyncSafety.bundle.mjs', { force: true })\"",
     "test:season-poster": "esbuild tests/seasonPoster.test.mjs --bundle --platform=node --format=esm --outfile=tests/seasonPoster.bundle.mjs && node --test tests/seasonPoster.bundle.mjs && node -e \"require('fs').rmSync('tests/seasonPoster.bundle.mjs', { force: true })\"",
     "test:image-policy": "node --test tests/imagePolicy.test.mjs",
+    "test:search": "esbuild tests/search.test.mjs --bundle --platform=node --format=esm --alias:cloudflare:workers=./tests/cloudflareWorkersMock.mjs --external:miniflare --outfile=tests/search.bundle.mjs && node --test tests/search.bundle.mjs && node -e \"require('fs').rmSync('tests/search.bundle.mjs', { force: true })\"",
     "db:migrate": "wrangler d1 migrations apply redflare-db --remote"
   },
   "devDependencies": {

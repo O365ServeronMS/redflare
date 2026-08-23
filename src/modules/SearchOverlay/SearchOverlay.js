@@ -131,8 +131,20 @@ export function renderSearchOverlay(container) {
     <p>Không tìm thấy kết quả nào</p>
   `;
 
+  // "Load more" — /api/search paginates, so results are no longer capped
+  // at the first page.
+  const moreWrapper = document.createElement('div');
+  moreWrapper.className = 'search-overlay__more';
+  moreWrapper.style.display = 'none';
+  const moreBtn = document.createElement('button');
+  moreBtn.type = 'button';
+  moreBtn.className = 'search-overlay__more-btn';
+  moreBtn.textContent = 'Xem thêm kết quả';
+  moreWrapper.appendChild(moreBtn);
+
   content.appendChild(recentSection);
   content.appendChild(resultsGrid);
+  content.appendChild(moreWrapper);
   content.appendChild(emptyState);
 
   overlay.appendChild(header);
@@ -142,6 +154,12 @@ export function renderSearchOverlay(container) {
   // ---- Internal state ----
   let debounceTimer = null;
   let abortController = null;
+  // Paging state for the active query. `loadedKeyword` is what the
+  // currently-rendered results belong to, so a "load more" click can never
+  // append page N of an older query to a newer one's grid.
+  let loadedKeyword = '';
+  let loadedPage = 0;
+  let totalPages = 1;
 
   // ---- Helpers ----
 
@@ -166,6 +184,20 @@ export function renderSearchOverlay(container) {
     resultsGrid.innerHTML = '';
     emptyState.style.display = 'none';
     recentSection.style.display = 'none';
+    moreWrapper.style.display = 'none';
+    loadedKeyword = '';
+    loadedPage = 0;
+    totalPages = 1;
+  }
+
+  function appendResults(items, startIndex) {
+    items.forEach((movie, index) => {
+      const cardWrapper = document.createElement('div');
+      cardWrapper.className = 'search-overlay__result-item fade-up';
+      cardWrapper.style.animationDelay = `${Math.min((startIndex + index) * 0.05, 0.5)}s`;
+      renderPosterCard(cardWrapper, movie);
+      resultsGrid.appendChild(cardWrapper);
+    });
   }
 
   function showRecent() {
@@ -255,13 +287,14 @@ export function renderSearchOverlay(container) {
     showSkeletons();
 
     try {
-      const { items } = await searchMovies(keyword, { signal: controller.signal });
+      const { items, pagination } = await searchMovies(keyword, { signal: controller.signal });
 
       // Guard against stale results (user may have typed something else)
       if (input.value.trim() !== keyword) return;
 
       resultsGrid.innerHTML = '';
       recentSection.style.display = 'none';
+      moreWrapper.style.display = 'none';
 
       if (!items || items.length === 0) {
         emptyState.style.display = 'flex';
@@ -269,13 +302,12 @@ export function renderSearchOverlay(container) {
       }
 
       emptyState.style.display = 'none';
-      items.forEach((movie, index) => {
-        const cardWrapper = document.createElement('div');
-        cardWrapper.className = 'search-overlay__result-item fade-up';
-        cardWrapper.style.animationDelay = `${Math.min(index * 0.05, 0.5)}s`;
-        renderPosterCard(cardWrapper, movie);
-        resultsGrid.appendChild(cardWrapper);
-      });
+      appendResults(items, 0);
+
+      loadedKeyword = keyword;
+      loadedPage = 1;
+      totalPages = pagination?.totalPages ?? 1;
+      if (totalPages > loadedPage) moreWrapper.style.display = 'flex';
 
       saveRecentSearch(keyword);
     } catch (err) {
@@ -285,6 +317,32 @@ export function renderSearchOverlay(container) {
       emptyState.style.display = 'flex';
     } finally {
       if (abortController === controller) abortController = null;
+    }
+  }
+
+  async function loadMore() {
+    if (!loadedKeyword || loadedPage >= totalPages) return;
+    const keyword = loadedKeyword;
+    const nextPage = loadedPage + 1;
+    const startIndex = resultsGrid.children.length;
+
+    moreBtn.disabled = true;
+    moreBtn.textContent = 'Đang tải…';
+    try {
+      // Deliberately not sharing `abortController` with performSearch: that
+      // one is aborted on every keystroke, which would cancel this too.
+      const { items } = await searchMovies(keyword, { page: nextPage });
+      // A new query may have replaced these results while this was in flight.
+      if (loadedKeyword !== keyword) return;
+
+      appendResults(items ?? [], startIndex);
+      loadedPage = nextPage;
+      if (loadedPage >= totalPages) moreWrapper.style.display = 'none';
+    } catch {
+      // Leave the button in place so the user can retry.
+    } finally {
+      moreBtn.disabled = false;
+      moreBtn.textContent = 'Xem thêm kết quả';
     }
   }
 
@@ -331,6 +389,7 @@ export function renderSearchOverlay(container) {
   window.addEventListener('route-changed', handleRouteChange);
   closeBtn.addEventListener('click', close);
   input.addEventListener('input', handleInput);
+  moreBtn.addEventListener('click', loadMore);
 
   // ---- Cleanup ----
   return function cleanup() {
@@ -339,6 +398,7 @@ export function renderSearchOverlay(container) {
     window.removeEventListener('route-changed', handleRouteChange);
     closeBtn.removeEventListener('click', close);
     input.removeEventListener('input', handleInput);
+    moreBtn.removeEventListener('click', loadMore);
     if (debounceTimer) clearTimeout(debounceTimer);
     if (abortController) abortController.abort();
     overlay.remove();

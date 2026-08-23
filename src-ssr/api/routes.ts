@@ -139,8 +139,12 @@ apiRoute.get('/api/country', async (c) => {
   });
 });
 
-// POST /api/search (docs/contract-legacy-api.md §5). The response is
-// private and uncacheable since it's keyed by free-text user input.
+// POST /api/search (docs/contract-legacy-api.md §5). Kept `no-store`: the
+// response is keyed by free-text user input, so caching it buys little and
+// stores what someone typed. (The original reason in this comment -- that
+// each Turnstile token is single-use -- stopped applying when the Turnstile
+// gate was removed in f76fa71; the no-store decision was re-affirmed on its
+// own merits rather than left resting on a retired one.)
 apiRoute.post('/api/search', async (c) => {
   let form: FormData;
   try {
@@ -159,13 +163,14 @@ apiRoute.post('/api/search', async (c) => {
     return c.json({ data: { items: [], params: { pagination: buildPagination(0, SEARCH_LIMIT, 1) } } });
   }
 
-  const rows = page === 1 ? await new SearchRepository(c.env.DB).search(keyword, SEARCH_LIMIT) : [];
+  const { items, total } = await new SearchRepository(c.env.DB)
+    .search(keyword, SEARCH_LIMIT, (page - 1) * SEARCH_LIMIT);
 
   applyNoStore(c);
   return c.json({
     data: {
-      items: toLegacyItems(rows),
-      params: { pagination: buildPagination(rows.length, SEARCH_LIMIT, 1) },
+      items: toLegacyItems(items),
+      params: { pagination: buildPagination(total, SEARCH_LIMIT, page) },
     },
   });
 });

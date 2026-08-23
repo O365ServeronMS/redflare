@@ -2041,6 +2041,35 @@
   color: #e50914;
 }
 
+.search-overlay__more {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 24px;
+}
+
+.search-overlay__more-btn {
+  background: transparent;
+  color: #b3b3b3;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  height: 40px;
+  padding: 0 24px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.search-overlay__more-btn:hover:not(:disabled) {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.search-overlay__more-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .search-overlay__empty {
   display: flex;
   flex-direction: column;
