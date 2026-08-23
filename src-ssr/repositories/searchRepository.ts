@@ -1,10 +1,14 @@
 import { normalizeVietnamese } from '../lib/vietnamese';
 import type { MovieRow } from '../types/movie';
 
-export interface SearchPage {
-  items: MovieRow[];
-  total: number;
-}
+// The UI caps search at 2 pages (48 results) -- past that a searcher is
+// better served refining the query than paging further. Capping the fetch
+// itself, not just the display, means `search()` needs no COUNT(*): the
+// single LIMIT MAX_RESULTS read tells us both the page contents and
+// whether a second page exists (results.length > SEARCH_LIMIT).
+export const SEARCH_LIMIT = 24;
+export const SEARCH_MAX_PAGES = 2;
+const MAX_RESULTS = SEARCH_LIMIT * SEARCH_MAX_PAGES;
 
 // bm25 weights, in fts_movie column order (title, original_title, alias).
 // The alias column is slug-derived and therefore noisy -- it repeats the
@@ -14,11 +18,8 @@ export interface SearchPage {
 // but a Vietnamese user searching Vietnamese text wants `title` first.
 const BM25 = 'bm25(fts_movie, 10.0, 2.0, 3.0)';
 
-const SELECT_PAGE = `SELECT m.* FROM fts_movie f JOIN movie m ON m.slug = f.slug
-   WHERE fts_movie MATCH ? ORDER BY ${BM25} LIMIT ? OFFSET ?`;
-
-const SELECT_COUNT = `SELECT COUNT(*) AS n FROM fts_movie f JOIN movie m ON m.slug = f.slug
-   WHERE fts_movie MATCH ?`;
+const SELECT_TOP = `SELECT m.* FROM fts_movie f JOIN movie m ON m.slug = f.slug
+   WHERE fts_movie MATCH ? ORDER BY ${BM25} LIMIT ?`;
 
 export class SearchRepository {
   constructor(private readonly db: D1Database) {}
@@ -45,19 +46,54 @@ export class SearchRepository {
    * some FTS5 docs/examples imply.
    *
    * Runs buildTieredQueries' strategies in order and answers from the
-   * first one that matches anything. Tier selection is a pure function of
-   * the query text and the index, so paging through a result set stays on
-   * one tier and cannot interleave two different strategies. */
-  async search(query: string, limit: number, offset = 0): Promise<SearchPage> {
+   * first one that matches anything, capped at MAX_RESULTS total (the
+   * caller slices this into pages -- see SEARCH_MAX_PAGES above). Tier
+   * selection is a pure function of the query text and the index, so a
+   * fixed-size top-N fetch cannot straddle two different strategies the
+   * way a separate COUNT-then-OFFSET-page pair could (an offset landing
+   * past a tier's row count used to silently fall through to the next
+   * tier mid-pagination). */
+  async search(query: string): Promise<MovieRow[]> {
     for (const match of buildTieredQueries(query)) {
-      const counted = await this.db.prepare(SELECT_COUNT).bind(match).first<{ n: number }>();
-      const total = counted?.n ?? 0;
-      if (total === 0) continue;
-      const res = await this.db.prepare(SELECT_PAGE).bind(match, limit, offset).all<MovieRow>();
-      return { items: res.results ?? [], total };
+      const res = await this.db.prepare(SELECT_TOP).bind(match, MAX_RESULTS).all<MovieRow>();
+      const rows = res.results ?? [];
+      if (rows.length === 0) continue;
+      return rerankExactMatches(query, rows);
     }
-    return { items: [], total: 0 };
+    return [];
   }
+}
+
+/** bm25 folds diacritics along with everything else, so it cannot tell
+ * "Vợ Tôi" from "Vô Tội" apart -- measured on production, "vợ tôi"
+ * returned "Người vô tội"/"Suy Đoán Vô Tội" ranked above every real "Vợ
+ * Tôi …" title. This re-ranks the (already tier-selected, already
+ * bm25-ordered) rows by how faithfully each title matches what the user
+ * actually typed, diacritics included. Stable within a score band: ties
+ * keep bm25's relative order rather than being re-sorted again. */
+function rerankExactMatches(query: string, rows: MovieRow[]): MovieRow[] {
+  const raw = query.trim().toLowerCase();
+  const folded = normalizeVietnamese(raw);
+  if (!raw) return rows;
+  return rows
+    .map((row, index) => ({ row, index, score: matchScore(row, raw, folded) }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.row);
+}
+
+// 3: the title itself contains the query verbatim, diacritics and all --
+//    as exact a match as this catalog's data can express.
+// 2: only true once diacritics are stripped from both sides -- still a
+//    real title match, just not one the user's own spelling pinned down.
+// 1: the query only shows up in the slug-derived alias (see
+//    migrations/0015_search_alias.sql) -- found the right row, but not by
+//    matching anything a person would call the title.
+// 0: matched some other way (a different tier's OR-of-terms, etc).
+function matchScore(row: MovieRow, raw: string, folded: string): number {
+  if (row.title.toLowerCase().includes(raw)) return 3;
+  if (normalizeVietnamese(row.title).includes(folded)) return 2;
+  if (row.slug.replace(/-/g, ' ').includes(folded)) return 1;
+  return 0;
 }
 
 /** The slug is already normalized text (see migrations/0015_search_alias.sql)

@@ -12,10 +12,10 @@ export interface LegacyPagination {
 // §Phase F2: worst case MAX_PAGE x PAGE_SIZE rows scanned per request).
 export const MAX_PAGE = 200;
 
-export function clampPage(raw: string | undefined): number {
+export function clampPage(raw: string | undefined, maxPage: number = MAX_PAGE): number {
   const n = Number.parseInt(raw ?? '1', 10);
   if (!Number.isFinite(n) || n < 1) return 1;
-  return Math.min(n, MAX_PAGE);
+  return Math.min(n, maxPage);
 }
 
 export function buildPagination(totalItems: number, itemsPerPage: number, currentPage: number): LegacyPagination {

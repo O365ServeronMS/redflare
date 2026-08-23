@@ -3,7 +3,7 @@ import { MovieRepository } from '../repositories/movieRepository';
 import { EpisodeRepository } from '../repositories/episodeRepository';
 import { RecommendationRepository } from '../repositories/recommendationRepository';
 import { TaxonomyRepository } from '../repositories/taxonomyRepository';
-import { SearchRepository } from '../repositories/searchRepository';
+import { SearchRepository, SEARCH_LIMIT, SEARCH_MAX_PAGES } from '../repositories/searchRepository';
 import { CatalogStatsRepository } from '../repositories/catalogStatsRepository';
 import { toLegacyItems, toLegacyDetail, toLegacyEpisodes } from './legacyItem';
 import { buildHomeData } from './homeData';
@@ -15,7 +15,6 @@ import { applyPageCache, applyNoStore } from '../cache/control';
 export const apiRoute = new Hono<{ Bindings: Env }>();
 
 const PAGE_SIZE = 24;
-const SEARCH_LIMIT = 24;
 const RECOMMENDATION_LIMIT = 10;
 const MAX_KEYWORD_LENGTH = 100; // ADR-0002 "Security": reject, don't sanitize
 
@@ -157,20 +156,23 @@ apiRoute.post('/api/search', async (c) => {
   const keywordValue = form.get('keyword');
   const pageValue = form.get('page');
   const keyword = typeof keywordValue === 'string' ? keywordValue.trim() : '';
-  const page = clampPage(typeof pageValue === 'string' ? pageValue : undefined);
+  // Capped at SEARCH_MAX_PAGES (2): a searcher is better served refining
+  // the query than paging deep into it, and SearchRepository.search only
+  // ever fetches that many pages' worth of rows in the first place.
+  const page = clampPage(typeof pageValue === 'string' ? pageValue : undefined, SEARCH_MAX_PAGES);
   if (!keyword || keyword.length > MAX_KEYWORD_LENGTH) {
     applyNoStore(c);
     return c.json({ data: { items: [], params: { pagination: buildPagination(0, SEARCH_LIMIT, 1) } } });
   }
 
-  const { items, total } = await new SearchRepository(c.env.DB)
-    .search(keyword, SEARCH_LIMIT, (page - 1) * SEARCH_LIMIT);
+  const allResults = await new SearchRepository(c.env.DB).search(keyword);
+  const items = allResults.slice((page - 1) * SEARCH_LIMIT, page * SEARCH_LIMIT);
 
   applyNoStore(c);
   return c.json({
     data: {
       items: toLegacyItems(items),
-      params: { pagination: buildPagination(total, SEARCH_LIMIT, page) },
+      params: { pagination: buildPagination(allResults.length, SEARCH_LIMIT, page) },
     },
   });
 });
