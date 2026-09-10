@@ -1,0 +1,13 @@
+-- D1 rows-read cut, 2026-09-10 audit in docs/plan-incremental-sync-stall.md
+-- (Q4) -- the country_movie twin of migrations/0016. country_movie's
+-- PRIMARY KEY is (country_slug, slug) and idx_cm_list covers the same
+-- order, so `DELETE FROM country_movie WHERE slug = ?`
+-- (TaxonomyRepository.syncMovieTaxonomy, once per changed title) SCANs:
+--   EXPLAIN QUERY PLAN DELETE FROM country_movie WHERE slug = 'x'
+--     -> SCAN country_movie   (verified on production)
+-- Measured ~33,700 rows read per delete, ~14.9M over 7 days. With this
+-- index: `SEARCH country_movie USING INDEX idx_cm_slug`.
+--
+-- idx_cm_list is left in place (redundant-index cleanup is deferred -- see
+-- docs/state-incremental-sync-stall.md).
+CREATE INDEX IF NOT EXISTS idx_cm_slug ON country_movie(slug);

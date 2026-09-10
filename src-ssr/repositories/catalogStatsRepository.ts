@@ -8,6 +8,16 @@
  * kind/key never seen before) falls back to the real COUNT query and
  * writes the result back, so correctness never depends on refresh() having
  * run first. */
+// refresh() scans all of movie + genre_movie + country_movie (~140k rows
+// read/call -- Q8 in docs/plan-incremental-sync-stall.md). Three callers
+// (IncrementalSyncWorkflow, RecommendationResolveWorkflow, orchestrator's
+// runRecommendationResolveTick) can each invoke it in a tick, so it's rate
+// limited here rather than in every caller. The pagination totals it
+// maintains being up to 6h stale is acceptable -- they only feed page-count
+// numbers on /api/list|genre|country.
+const REFRESH_MIN_INTERVAL_SECONDS = 6 * 60 * 60;
+const REFRESH_STAMP_KEY = 'catalog_stats:refreshed_at';
+
 export class CatalogStatsRepository {
   constructor(private readonly db: D1Database) {}
 
@@ -57,6 +67,13 @@ export class CatalogStatsRepository {
    * stub) -- never on a fixed schedule, since steady-state ticks write
    * nothing. */
   async refresh(): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    const stamp = await this.db
+      .prepare('SELECT value FROM sync_state WHERE key = ?')
+      .bind(REFRESH_STAMP_KEY)
+      .first<{ value: string }>();
+    if (stamp && now - Number(stamp.value) < REFRESH_MIN_INTERVAL_SECONDS) return;
+
     const [tierRow, typeRes, genreRes, countryRes] = await Promise.all([
       this.db.prepare("SELECT COUNT(*) AS n FROM movie WHERE tier = 'catalog'").first<{ n: number }>(),
       this.db.prepare("SELECT type, COUNT(*) AS n FROM movie WHERE tier = 'catalog' GROUP BY type").all<{ type: string; n: number }>(),
@@ -77,5 +94,12 @@ export class CatalogStatsRepository {
         this.db.prepare('INSERT INTO catalog_stats (kind, key, count) VALUES (?, ?, ?)').bind(r.kind, r.key, r.count)
       ),
     ]);
+
+    await this.db
+      .prepare(
+        'INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at'
+      )
+      .bind(REFRESH_STAMP_KEY, String(now), now)
+      .run();
   }
 }

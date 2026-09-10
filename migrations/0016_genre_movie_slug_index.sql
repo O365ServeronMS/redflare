@@ -1,0 +1,17 @@
+-- D1 rows-read cut, driven by the 2026-09-10 audit in
+-- docs/plan-incremental-sync-stall.md (Q2). TaxonomyRepository.syncMovieTaxonomy
+-- runs `DELETE FROM genre_movie WHERE slug = ?` for every movie whose hash
+-- changed. genre_movie's PRIMARY KEY is (genre_slug, slug) and idx_gm_list
+-- covers the same (genre_slug, slug) order, so a delete keyed on `slug`
+-- alone has no usable index and SCANs the whole table:
+--   EXPLAIN QUERY PLAN DELETE FROM genre_movie WHERE slug = 'x'
+--     -> SCAN genre_movie   (verified on production)
+-- Measured ~77,600 rows read per delete, ~37.5M over 7 days -- and every
+-- synced title pays it, so ~35 synced titles alone burned the Free plan's
+-- 5M rows-read/day cap. With this index the same plan becomes
+-- `SEARCH genre_movie USING INDEX idx_gm_slug`.
+--
+-- idx_gm_list is left in place even though it duplicates the PK prefix --
+-- removing redundant indexes is tracked as cleanup-for-later in
+-- docs/state-incremental-sync-stall.md, out of scope here.
+CREATE INDEX IF NOT EXISTS idx_gm_slug ON genre_movie(slug);

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { afterEach, test } from 'node:test';
 import { Miniflare } from 'miniflare';
-import { SearchRepository, SEARCH_LIMIT, SEARCH_MAX_PAGES, buildTieredQueries, parseTerms } from '../src-ssr/repositories/searchRepository.ts';
+import { SearchRepository, SEARCH_LIMIT, SEARCH_MAX_PAGES, buildTieredQueries, parseTerms, buildAliasMatch } from '../src-ssr/repositories/searchRepository.ts';
 import { apiRoute } from '../src-ssr/api/routes.ts';
 
 // Every case here is a query that was reproduced failing (or ranking
@@ -207,4 +207,38 @@ test('FTS5 operators in user input are inert, not injected', async () => {
   assert.deepEqual(buildTieredQueries(''), []);
   assert.deepEqual(buildTieredQueries('sat'), ['sat*']);
   assert.deepEqual(buildTieredQueries('sat thu'), ['"sat thu"', 'sat* thu*', 'sat* OR thu*']);
+});
+
+test('buildAliasMatch turns a slug into the alias phrase indexMovie deletes by', () => {
+  // Q5 in docs/plan-incremental-sync-stall.md -- the MATCH string that
+  // replaces `DELETE FROM fts_movie WHERE slug = ?` (a full index scan).
+  assert.equal(
+    buildAliasMatch('cuoc-goi-khan-cap-9-1-1-phan-9'),
+    'alias : "cuoc goi khan cap 9 1 1 phan 9"'
+  );
+  // Digits are their own tokens, kept verbatim.
+  assert.equal(buildAliasMatch('phim-2026'), 'alias : "phim 2026"');
+  // Anything outside [a-z0-9] is a token break, same as the tokenizer.
+  assert.equal(buildAliasMatch('a_b.c!d'), 'alias : "a b c d"');
+  // No usable tokens -> null, so indexMovie falls back to WHERE slug = ?.
+  assert.equal(buildAliasMatch(''), null);
+  assert.equal(buildAliasMatch('---'), null);
+});
+
+test('re-indexing a movie replaces its FTS row instead of leaving a stale one', async () => {
+  const { db, search } = await setup();
+  await seed(db, search, 'doi-ten-phim', 'Quả Báo');
+
+  // Same slug, new title -- syncMovie.ts calls indexMovie again on every
+  // hash change. The MATCH-based delete must clear the old row.
+  await search.indexMovie('doi-ten-phim', 'Ánh Sáng Cuối Đường', '');
+
+  const { count } = await db
+    .prepare('SELECT COUNT(*) AS count FROM fts_movie WHERE slug = ?')
+    .bind('doi-ten-phim')
+    .first();
+  assert.equal(count, 1, 'exactly one FTS row survives a re-index');
+
+  assert.equal((await search.search('anh sang cuoi duong'))[0]?.slug, 'doi-ten-phim');
+  assert.deepEqual(await search.search('qua bao'), [], 'the old title no longer matches');
 });

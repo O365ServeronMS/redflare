@@ -29,10 +29,25 @@ export class SearchRepository {
    * UPDATE, because FTS5 has no natural unique key to upsert against.
    * `alias` is derived from the slug here rather than passed in, so the
    * sync pipeline (services/sync/syncMovie.ts) needs no change to keep the
-   * alias column in step with migrations/0015_search_alias.sql's backfill. */
+   * alias column in step with migrations/0015_search_alias.sql's backfill.
+   *
+   * The delete finds the row via an FTS5 MATCH on the slug-derived `alias`
+   * phrase, then deletes by rowid, instead of `DELETE FROM fts_movie WHERE
+   * slug = ?`: `slug` is UNINDEXED, so the plain form scanned the whole
+   * index (~30,700 rows read/delete -- Q5 in
+   * docs/plan-incremental-sync-stall.md). The MATCH form uses VIRTUAL TABLE
+   * INDEX and reads ~1 row (measured on production). buildAliasMatch
+   * returns null for a slug with no usable tokens, in which case we fall
+   * back to the scan (never happens for a valid `[a-z0-9-]` slug). */
   async indexMovie(slug: string, title: string, originalTitle: string): Promise<void> {
+    const aliasMatch = buildAliasMatch(slug);
+    const del = aliasMatch
+      ? this.db
+          .prepare('DELETE FROM fts_movie WHERE rowid IN (SELECT rowid FROM fts_movie WHERE fts_movie MATCH ? AND slug = ?)')
+          .bind(aliasMatch, slug)
+      : this.db.prepare('DELETE FROM fts_movie WHERE slug = ?').bind(slug);
     await this.db.batch([
-      this.db.prepare('DELETE FROM fts_movie WHERE slug = ?').bind(slug),
+      del,
       this.db
         .prepare('INSERT INTO fts_movie (title, original_title, alias, slug) VALUES (?, ?, ?, ?)')
         .bind(normalizeVietnamese(title), normalizeVietnamese(originalTitle), slugToSearchText(slug), slug),
@@ -100,6 +115,19 @@ function matchScore(row: MovieRow, raw: string, folded: string): number {
  * -- hyphens are the only thing standing between it and a token stream. */
 function slugToSearchText(slug: string): string {
   return slug.replace(/-/g, ' ');
+}
+
+/** FTS5 MATCH string that pins exactly one movie's row for indexMovie's
+ * delete: a phrase query on the `alias` column, whose contents are
+ * slugToSearchText(slug) at insert time (migrations/0015_search_alias.sql).
+ * Tokens come from the same source and are then reduced to `[a-z0-9]+` runs
+ * -- the character class FTS5's unicode61 tokenizer keeps -- so the phrase
+ * always matches the alias it was built from. Returns null when the slug
+ * yields no tokens (empty, or all punctuation) so the caller can fall back
+ * to the plain `WHERE slug = ?` delete. */
+export function buildAliasMatch(slug: string): string | null {
+  const tokens = slugToSearchText(slug).toLowerCase().match(/[a-z0-9]+/g);
+  return tokens && tokens.length > 0 ? `alias : "${tokens.join(' ')}"` : null;
 }
 
 /** Splits user input into FTS5-safe terms. Everything that isn't

@@ -43,7 +43,10 @@ function toRow(m: NormalizedMovie, hash: string, now: number) {
     now,
     JSON.stringify(m.actors),
     m.popularity,
-    m.modifiedAt,
+    // Never bind NULL: upstream_modified is now the sole rail sort key (no
+    // COALESCE fallback), so a NULL here would sink the row to the bottom
+    // of every rail. `now` matches what last_synced gets on this same row.
+    m.modifiedAt ?? now,
   ] as const;
 }
 
@@ -113,21 +116,30 @@ export class MovieRepository {
   }
 
   /** Phase 4's cheapest resolve step -- check the local catalog before
-   * ever calling KKPhim's /tmdb/ lookup. Uses idx_movie_tmdb
-   * (migrations/0005_ssr_schema.sql), the same index that exists
-   * specifically because tmdb_id isn't unique (ADR-0002 Finding 1). */
+   * ever calling KKPhim's /tmdb/ lookup. Two index-driven searches UNION
+   * ALL'd rather than one `OR` across a LEFT JOIN: the OR form could use no
+   * index for either side and SCANned `movie` in full (~30,800 rows
+   * read/call, ~175M over 7 days -- Q1 in
+   * docs/plan-incremental-sync-stall.md). The first branch uses idx_movie_tmdb
+   * (migrations/0005_ssr_schema.sql, exists because tmdb_id isn't unique --
+   * ADR-0002 Finding 1); the second joins tmdb_override -> movie by the
+   * slug PK. UNION ALL can return the same row twice when a title matches
+   * both branches, but LIMIT 1 after the ORDER BY makes that harmless.
+   * EXPLAIN QUERY PLAN on production: `SEARCH m USING INDEX idx_movie_tmdb`. */
   async getCanonicalTargetByTmdbRef(tmdbType: 'movie' | 'tv', tmdbId: number): Promise<MovieRow | null> {
     return this.db
       .prepare(
-        `SELECT m.* FROM movie m
-         LEFT JOIN tmdb_override o ON o.slug = m.slug
-         WHERE (m.tmdb_type = ? AND m.tmdb_id = ?)
-            OR (o.tmdb_type = ? AND o.tmdb_id = ?)
+        `SELECT * FROM (
+           SELECT m.* FROM movie m WHERE m.tmdb_type = ? AND m.tmdb_id = ?
+           UNION ALL
+           SELECT m.* FROM tmdb_override o JOIN movie m ON m.slug = o.slug
+            WHERE o.tmdb_type = ? AND o.tmdb_id = ?
+         )
          ORDER BY CASE tier WHEN 'catalog' THEN 0 ELSE 1 END,
                   CASE WHEN has_stream = 1 THEN 0 ELSE 1 END,
-                  CASE WHEN m.tmdb_season = 1 THEN 0 ELSE 1 END,
-                  CASE WHEN m.tmdb_season IS NULL THEN 1 ELSE 0 END,
-                  m.tmdb_season ASC, m.slug ASC
+                  CASE WHEN tmdb_season = 1 THEN 0 ELSE 1 END,
+                  CASE WHEN tmdb_season IS NULL THEN 1 ELSE 0 END,
+                  tmdb_season ASC, slug ASC
          LIMIT 1`
       )
       .bind(tmdbType, tmdbId, tmdbType, tmdbId)
@@ -226,10 +238,17 @@ export class MovieRepository {
    * THIS Worker wrote the row, which drifts independent of upstream
    * freshness whenever the hero snapshot refresh (every 30 min) re-syncs a
    * trending title and its vote_average/vote_count happens to have moved
-   * -- that used to push hero titles to the top of this rail too. */
+   * -- that used to push hero titles to the top of this rail too.
+   *
+   * Plain `ORDER BY upstream_modified DESC`, no COALESCE: it lets the
+   * planner use idx_movie_upstream_modified instead of building a temp
+   * B-tree (Q7 in docs/plan-incremental-sync-stall.md, 25-60k rows/miss).
+   * upsertMany binds `modifiedAt ?? now`, so the column is never NULL for a
+   * synced row and the COALESCE(upstream_modified, last_synced) fallback
+   * has nothing left to do. */
   async getRecentMovies(limit: number): Promise<MovieRow[]> {
     const res = await this.db
-      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY COALESCE(upstream_modified, last_synced) DESC LIMIT ?")
+      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY upstream_modified DESC LIMIT ?")
       .bind(limit)
       .all<MovieRow>();
     return res.results ?? [];
@@ -269,11 +288,12 @@ export class MovieRepository {
   // trivial against the 5M rows-read/day quota.
 
   /** `/api/list?type=phim-moi-cap-nhat` -- newest across every type. Same
-   * upstream_modified ordering as getRecentMovies above, so the paginated
-   * "see all" view stays consistent with the home rail. */
+   * plain `upstream_modified DESC` ordering as getRecentMovies above (see
+   * that comment for why no COALESCE), so the paginated "see all" view
+   * stays consistent with the home rail. */
   async getRecentMoviesOffset(page: number, limit: number): Promise<MovieRow[]> {
     const res = await this.db
-      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY COALESCE(upstream_modified, last_synced) DESC LIMIT ? OFFSET ?")
+      .prepare("SELECT * FROM movie WHERE tier = 'catalog' ORDER BY upstream_modified DESC LIMIT ? OFFSET ?")
       .bind(limit, (page - 1) * limit)
       .all<MovieRow>();
     return res.results ?? [];
@@ -286,11 +306,12 @@ export class MovieRepository {
   /** `/api/list?type=<phim-le|phim-bo|hoat-hinh|tv-shows>`. `tier =
    * 'catalog'` excludes TMDB-only stubs (no stream, nothing to watch) from
    * ever appearing in a browsable rail -- previously missing here even
-   * though getRecentMovies already had it. */
+   * though getRecentMovies already had it. Plain `upstream_modified DESC`
+   * (see getRecentMovies) uses idx_movie_type_upstream_modified. */
   async getPageByTypeOffset(type: string, page: number, limit: number): Promise<MovieRow[]> {
     const res = await this.db
       .prepare(
-        "SELECT * FROM movie WHERE type = ? AND tier = 'catalog' ORDER BY COALESCE(upstream_modified, last_synced) DESC LIMIT ? OFFSET ?"
+        "SELECT * FROM movie WHERE type = ? AND tier = 'catalog' ORDER BY upstream_modified DESC LIMIT ? OFFSET ?"
       )
       .bind(type, limit, (page - 1) * limit)
       .all<MovieRow>();
