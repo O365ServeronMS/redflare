@@ -40,7 +40,7 @@
 - 🗂️ **Danh mục, thể loại, quốc gia** với URL sạch và phân trang `?page=N`.
 - 📱 **Responsive desktop/mobile**, gồm cả chế độ mobile landscape.
 - ⚡ **Request người dùng không gọi KKPhim/TMDB**: browser chỉ đọc dữ liệu đã chuẩn hóa trong D1.
-- 🤖 **5 Cloudflare Workflows tự nuôi catalog**: incremental sync, hero snapshot, resolve/refresh recommendation, backfill — mỗi job một lịch riêng, mỗi step tự ngân sách CPU/subrequest riêng.
+- 🤖 **5 Cloudflare Workflows tự nuôi catalog**: incremental sync, hero snapshot, resolve/refresh recommendation, backfill — mỗi job một lịch riêng, mỗi step tự ngân sách CPU riêng (trên Free, 50 subrequest ra ngoài là ngân sách chung của **cả instance**).
 
 ## 🏗️ Kiến trúc hiện tại
 
@@ -58,7 +58,7 @@ flowchart LR
     U -->|"browser pages + /assets/*"| A
     U -->|"/api/*, sitemap, robots"| W
     W -->|"runtime reads only"| D
-    C -->|"step-by-step, own CPU/subrequest budget each"| D
+    C -->|"step-by-step, own CPU budget each; 50 external subrequests per instance"| D
     C -->|"sync-time only"| K
     C -->|"sync-time only"| T
     U -->|"hotlink artwork"| I
@@ -224,11 +224,11 @@ Nếu không có TMDB token, sync vẫn ghi được catalog KKPhim nhưng thi�
 
 ### 5 Cloudflare Workflows nuôi catalog
 
-Không còn một Cron Trigger `scheduled()` duy nhất chạy tuần tự nhiều job (thiết kế cũ bị Cloudflare kill vì cộng dồn CPU time khi test ở giới hạn 10ms — xem `docs/state-free-plan-migration.md` Phase 5). Mỗi job giờ là một [Cloudflare Workflow](https://developers.cloudflare.com/workflows/) riêng (`src-ssr/workflows/*.ts`, khai báo ở `wrangler.toml` `[[workflows]]`), tự lịch chạy riêng, và **mỗi `step.do()` bên trong một Workflow tự có ngân sách CPU/subrequest riêng** — không cộng dồn qua các step hay qua các job khác.
+Không còn một Cron Trigger `scheduled()` duy nhất chạy tuần tự nhiều job (thiết kế cũ bị Cloudflare kill vì cộng dồn CPU time khi test ở giới hạn 10ms — xem `docs/state-free-plan-migration.md` Phase 5). Mỗi job giờ là một [Cloudflare Workflow](https://developers.cloudflare.com/workflows/) riêng (`src-ssr/workflows/*.ts`, khai báo ở `wrangler.toml` `[[workflows]]`), tự lịch chạy riêng, và **mỗi `step.do()` bên trong một Workflow tự có ngân sách CPU riêng**. **Subrequest thì khác:** trên Free, 50 external subrequest là ngân sách chung của **cả một Workflow instance**, không phải của từng step (sự cố 2026-09-11, xem `docs/state-incremental-sync-stall.md`). Vì vậy incremental chỉ sync số phim vừa ngân sách (`syncBudgetForPages`), còn hero bỏ qua re-sync với phim đã có trong D1.
 
 | Workflow | Lịch | Việc làm |
 |---|---|---|
-| `IncrementalSyncWorkflow` | `*/30 * * * *` | Quét 2 trang gần nhất của feed phim mới; mỗi slug mới/đổi là một step riêng gọi `syncOneMovie` |
+| `IncrementalSyncWorkflow` | `*/30 * * * *` | Quét feed phim mới tới trang đã biết hết (tối đa `RECENT_PAGE_CAP`, mặc định 12); mỗi slug mới/đổi là một step riêng gọi `syncOneMovie`, mỗi tick tối đa `(50 − số trang) / 5` phim, phần còn lại để tick sau |
 | `HeroSnapshotWorkflow` | `*/15 * * * *` (cổng 30 phút, nên thực chạy ~mỗi giờ) | Lấy TMDB trending; mỗi candidate là một step riêng |
 | `RecommendationResolveWorkflow` | `*/15 * * * *` | Resolve target chưa có slug, ưu tiên target được nhiều phim tham chiếu; chia batch ~15 group/step |
 | `RecommendationRefreshWorkflow` | `*/15 * * * *` | Làm mới danh sách recommendation ID từ TMDB; chia batch ~5 source/step |

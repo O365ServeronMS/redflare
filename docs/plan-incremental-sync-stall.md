@@ -236,7 +236,8 @@ nhưng chỉ để chẩn đoán (`/__sync/status` đọc nó).
 2. **`src-ssr/services/sync/orchestrator.ts`**:
    - Xoá `RECENT_PAGE_LIMIT = 2`. Thêm `DEFAULT_RECENT_PAGE_CAP = 30`, kèm comment
      giải thích: 720 slug + ~4 step < 1.024 step/instance trên Free; 30 lần
-     fetch < 50 external subrequest mỗi step.
+     fetch < 50 external subrequest mỗi step. *(Sai: trên Free, 50 là quota
+     của cả instance. Đã sửa ở 5.2b trong state doc; mặc định hạ về 12.)*
    - Cho phép override bằng biến `[vars] RECENT_PAGE_CAP`: parse số nguyên và
      kẹp vào khoảng `[1, 40]`. Giá trị không hợp lệ thì dùng default.
    - Thêm `'known_page'` vào `IncrementalStopReason`.

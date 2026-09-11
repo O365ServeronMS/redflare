@@ -14,7 +14,9 @@ import type { HeroSnapshotEntry } from '../types/heroSnapshot';
  * docs/state-free-plan-migration.md Phase 0 measured this exact job at
  * ~60+ external subrequests when it actually runs (not skipped by the
  * 30-minute gate), over the Free-plan 50/invocation cap on its own. Here
- * each candidate gets its own step instead. Keeps the same 30-minute gate
+ * each candidate gets its own step instead -- but on Free the 50-subrequest
+ * cap is per instance, not per step, so resolveCandidate skips re-syncing
+ * candidates already in D1. Keeps the same 30-minute gate
  * (HERO_REFRESH_INTERVAL_SECONDS) so a real run only happens roughly once
  * per hour even under a tighter cron schedule, bounding step count. */
 export class HeroSnapshotWorkflow extends WorkflowEntrypoint<Env> {

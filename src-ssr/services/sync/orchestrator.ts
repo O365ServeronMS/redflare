@@ -29,11 +29,11 @@ const PER_SHARD_CONCURRENCY = 6; // Workers free/paid: 6 simultaneous outgoing c
 // /danh-sach/phim-moi-cap-nhat newest-first and normally stops at the first
 // page every item of which is already in D1 with a matching upstream_modified
 // ('known_page'). This cap is the safety stop for when that never happens
-// (a large backlog after an outage, or a bug): 30 pages ~= 720 slugs, each
-// getting its own Workflow step -- well under the Free plan's 1,024
-// steps/instance -- and 30 feed fetches, under the 50-external-subrequest
-// cap that applies per step. Overridable via [vars] RECENT_PAGE_CAP.
-const DEFAULT_RECENT_PAGE_CAP = 30;
+// (a large backlog after an outage, or a bug). Every page is one external
+// fetch out of the instance's 50 (see syncBudgetForPages below), so 12
+// pages still leaves room to sync 7 titles in that tick. Overridable via
+// [vars] RECENT_PAGE_CAP.
+const DEFAULT_RECENT_PAGE_CAP = 12;
 const RECENT_PAGE_CAP_MIN = 1;
 const RECENT_PAGE_CAP_MAX = 40;
 
@@ -43,6 +43,21 @@ function resolveRecentPageCap(env: Env): number {
   const parsed = Number.parseInt((env.RECENT_PAGE_CAP ?? '').trim(), 10);
   if (!Number.isFinite(parsed)) return DEFAULT_RECENT_PAGE_CAP;
   return Math.min(RECENT_PAGE_CAP_MAX, Math.max(RECENT_PAGE_CAP_MIN, parsed));
+}
+
+// Workers Free allows 50 external subrequests per Workflow *instance*, not
+// per step (Workflows limits page). The first cron tick on Free
+// (2026-09-11) synced 11 titles, then every later fetch failed.
+// syncOneMovie makes at most 5: KKPhim detail, one canonical-alias
+// re-fetch, then TMDB detail + season + recommendations.
+const INSTANCE_SUBREQUEST_BUDGET = 50;
+const MAX_FETCHES_PER_SYNC = 5;
+
+/** How many titles one Workflow instance can still sync after its feed scan
+ * spent `pagesScanned` fetches. The rest stay "unknown" in D1 and are
+ * picked up by the next tick. */
+export function syncBudgetForPages(pagesScanned: number): number {
+  return Math.max(0, Math.floor((INSTANCE_SUBREQUEST_BUDGET - pagesScanned) / MAX_FETCHES_PER_SYNC));
 }
 
 /** Versioned cursor for the recent feed. `slug` is a deterministic

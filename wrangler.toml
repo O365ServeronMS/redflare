@@ -147,9 +147,10 @@ RECOMMENDATION_JOBS_ENABLED = "false"
 # the Cloudflare dashboard ("Variables and secrets") without a redeploy, so
 # a one-off large backlog after an outage can be drained by bumping this
 # (parsed as an int, clamped to [1, 40]; anything unparseable falls back to
-# the built-in default of 30). Steady state stops at 'known_page' after 1-2
-# pages and never approaches this.
-RECENT_PAGE_CAP = "30"
+# the built-in default of 12). Steady state stops at 'known_page' after 1-2
+# pages and never approaches this. Each page costs one of the instance's 50
+# external subrequests (Free), leaving less room to sync titles that tick.
+RECENT_PAGE_CAP = "12"
 
 # Single classic Cron Trigger -- the ONLY scheduler now
 # (docs/plan-incremental-sync-stall.md Phase 3). Each Workflow below used to

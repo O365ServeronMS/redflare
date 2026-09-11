@@ -255,6 +255,34 @@ chưa từng chạy → 503 + age `null`. `test:hero-home-data` (đang hit
   quy trình khi sync ngừng, ghi chú F3); sửa comment `wrangler.toml` còn
   nói "account is on Paid"; điền số liệu thật vào doc này.
 
+### 5.2b — Sự cố quota subrequest theo instance (2026-09-11)
+
+- **Tick đầu** (`incremental-1789113655000`, 08:00 UTC): quét 9 trang, dừng
+  ở `known_page`, tìm ra 169 slug, nhưng chỉ `written: 11`, `failed: 158`.
+  11 phim đầu ghi được, sau đó mọi phim đều lỗi, trong khi phimapi vẫn trả
+  200 cho các slug lỗi. Hero cùng tick: 19 candidate ổn, candidate thứ 20
+  `retryable_error` → cả snapshot bị bỏ → `/api/health/sync` 503.
+- **Nguyên nhân:** tài liệu Workflows Limits ghi Free = **50 external
+  subrequest cho mỗi Workflow instance**; plan (Phase 2) và README lại giả
+  định là cho mỗi step. 9 trang + 11 phim × ~3,7 fetch ≈ 50. Trên Paid,
+  giới hạn là 10.000 nên lỗi chưa từng lộ ra.
+- **Sửa:**
+  - `orchestrator.ts` thêm `syncBudgetForPages(pages) =
+    floor((50 − pages) / 5)` (5 = KKPhim detail + 1 lần re-fetch alias + TMDB
+    detail/season/recs).
+  - `IncrementalSyncWorkflow` chỉ sync `slice(0, budget)`, phần còn lại để
+    tick sau (vẫn "chưa biết" trong D1), và chỉ advance cursor khi
+    `deferred === 0`.
+  - `DEFAULT_RECENT_PAGE_CAP` / `[vars] RECENT_PAGE_CAP` 30 → 12.
+  - Hero `resolveCandidate` bỏ qua `syncCanonical` khi D1 đã có đúng hàng
+    catalog của `tmdb_id` đó.
+- **Thông lượng:** 1–2 trang/tick → 9 phim/tick ≈ 430 phim/ngày, trong khi
+  KKPhim cập nhật khoảng 40–50 phim/ngày. Backlog 158 phim tự hết sau
+  khoảng 20 tick (~10h).
+- **Test:** `test:incremental-sync` thêm ca Workflow (10 trang → sync 8,
+  tổng 18 fetch); `test:hero-refresh` thêm ca "chỉ sync candidate chưa có
+  trong D1".
+
 ### Dead code phát sinh (dọn sau, ngoài scope)
 
 - `MovieRepository.getHashesBySlugs` — sau Phase 2 không còn caller trong

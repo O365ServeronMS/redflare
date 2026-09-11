@@ -503,3 +503,29 @@ test('syncOneMovie bumps upstream_modified alone when only modified.time moved (
   });
   assert.deepEqual(noop, { slug: 'catch-up-slug', outcome: 'unchanged', rowsWritten: 0 });
 });
+
+test('the Workflow syncs only what the per-instance subrequest budget allows (Free: 50/instance)', async () => {
+  const { IncrementalSyncWorkflow } = await import('../src-ssr/workflows/incrementalSyncWorkflow.ts');
+  const newItems = Array.from({ length: 9 * 24 }, (_, i) => item(`new-${i}`, T1));
+  const knownItems = Array.from({ length: 24 }, (_, i) => item(`old-${i}`, T0));
+  const db = new MockDb({ known: Object.fromEntries(knownItems.map((it) => [it.slug, seconds(T0)])) });
+  const fetched = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    fetched.push(url.pathname);
+    if (url.pathname === '/danh-sach/phim-moi-cap-nhat') {
+      const page = Number(url.searchParams.get('page'));
+      return json({ status: true, items: page <= 9 ? newItems.slice((page - 1) * 24, page * 24) : knownItems });
+    }
+    return json({ status: false }, 404);
+  };
+
+  const workflow = new IncrementalSyncWorkflow({}, { DB: db, TMDB_API_TOKEN: '' });
+  const result = await workflow.run({}, { do: async (_name, fn) => fn() });
+
+  assert.equal(result.pagesScanned, 10);
+  assert.equal(result.stopReason, 'known_page');
+  assert.equal(result.slugsFound, 216);
+  assert.equal(result.processed, 8); // (50 - 10 page fetches) / 5 fetches per title
+  assert.equal(fetched.length, 18);
+});

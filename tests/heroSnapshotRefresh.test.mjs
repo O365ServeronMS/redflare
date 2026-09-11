@@ -110,7 +110,8 @@ test('uses only the first 20 TMDB results and persists the seven valid KKPhim mo
     tmdbCount: 20, matchedCount: 7, notFoundCount: 13, failedCount: 0,
   });
   assert.deepEqual(lookedUp.sort((a, b) => a - b), Array.from({ length: 20 }, (_, index) => index + 1));
-  assert.deepEqual(synced.sort(), Array.from({ length: 7 }, (_, index) => `film-${index + 1}`));
+  // All seven are already catalog rows in D1 -- no re-sync (Free: 50 subrequests/instance).
+  assert.deepEqual(synced, []);
   assert.deepEqual(
     (await db.prepare('SELECT rank, tmdb_id, slug FROM hero_snapshot ORDER BY rank').all()).results,
     Array.from({ length: 7 }, (_, index) => ({ rank: index + 1, tmdb_id: index + 1, slug: `film-${index + 1}` }))
@@ -183,6 +184,26 @@ test('filters non-single, no-stream, and no-backdrop candidates after exact KKPh
   assert.equal(result.filteredNoStream, 1);
   assert.equal(result.filteredNoBackdrop, 1);
   assert.deepEqual((await db.prepare('SELECT rank, slug FROM hero_snapshot').all()).results, [{ rank: 4, slug: 'valid' }]);
+});
+
+test('syncs only candidates not already in D1 as that catalog movie', async () => {
+  const { db, synced, deps } = await setup();
+  await seedMovie(db, 'already-here', 1);
+  deps.syncCanonical = async (slug) => {
+    synced.push(slug);
+    await seedMovie(db, slug, 2);
+    return { outcome: 'written' };
+  };
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.includes('/trending/movie/week')) return json({ results: [1, 2].map((id) => ({ id, media_type: 'movie' })) });
+    const id = Number(value.match(/\/tmdb\/movie\/(\d+)/)?.[1]);
+    return json(kkMovie(id, id === 1 ? 'already-here' : 'brand-new'));
+  };
+
+  const result = await refreshHeroSnapshot({}, { now: 5_000, dependencies: deps });
+  assert.equal(result.matched, 2);
+  assert.deepEqual(synced, ['brand-new']);
 });
 
 test('a KKPhim retryable error records the attempt but keeps the prior snapshot unchanged', async () => {

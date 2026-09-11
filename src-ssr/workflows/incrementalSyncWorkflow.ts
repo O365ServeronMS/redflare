@@ -3,6 +3,7 @@ import {
   scanRecentSlugs,
   commitRecentCursor,
   persistRecentSummary,
+  syncBudgetForPages,
   buildRepos,
   buildClients,
   type IncrementalSyncResult,
@@ -12,8 +13,9 @@ import { syncOneMovie } from '../services/sync/syncMovie';
 /** Free-plan-safe replacement for orchestrator.ts's runIncrementalSync
  * SELF-fan-out shape (docs/plan-free-plan-migration.md Phase 3): one step
  * scans the recent feed, then every candidate slug gets its own step --
- * each step gets a fresh CPU/subrequest budget instead of all of them
- * sharing one invocation's (docs/state-free-plan-migration.md Phase 0
+ * each step gets a fresh CPU budget, but on Free the 50 external
+ * subrequests are shared by the whole instance, so a tick only syncs what
+ * syncBudgetForPages allows (docs/state-free-plan-migration.md Phase 0
  * measured this exact invocation shape blowing the Free-plan subrequest cap
  * for the other jobs sharing the old scheduled() invocation). Scheduled
  * independently (wrangler.toml [[workflows]] schedules) so this one's
@@ -33,7 +35,11 @@ export class IncrementalSyncWorkflow extends WorkflowEntrypoint<Env> {
     let unchanged = 0;
     let failed = 0;
     let rowsWritten = 0;
-    for (const slug of scan.slugs) {
+    // Deferred slugs are still "unknown" in D1, so the next tick's scan
+    // returns them again.
+    const toSync = scan.slugs.slice(0, syncBudgetForPages(scan.pagesScanned));
+    const deferred = scan.slugs.length - toSync.length;
+    for (const slug of toSync) {
       const result = await step.do(`sync-${slug}`, () => syncOneMovie(this.env, slug, clients, repos));
       if (result.outcome === 'written') {
         written++;
@@ -51,7 +57,7 @@ export class IncrementalSyncWorkflow extends WorkflowEntrypoint<Env> {
     // cursor). Still advanced on a clean full pass so /__sync/status can
     // show how far the last good scan reached.
     let cursorAfter = scan.cursorBefore;
-    if (!scan.scanFailed && scan.scanComplete && failed === 0 && scan.newest) {
+    if (!scan.scanFailed && scan.scanComplete && failed === 0 && deferred === 0 && scan.newest) {
       const newest = scan.newest;
       await step.do('advance-cursor', () => commitRecentCursor(this.env, newest));
       cursorAfter = newest;
@@ -69,7 +75,7 @@ export class IncrementalSyncWorkflow extends WorkflowEntrypoint<Env> {
     const result: IncrementalSyncResult = {
       slugsFound: scan.slugs.length,
       fetched: scan.fetched,
-      processed: scan.slugs.length,
+      processed: toSync.length,
       written,
       unchanged,
       failed: failed + (scan.scanFailed ? 1 : 0),

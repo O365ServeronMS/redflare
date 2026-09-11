@@ -136,18 +136,27 @@ export async function resolveCandidate(candidate: TmdbTrendingMovie, deps: HeroR
   if (lookup.data.movie.type !== 'single') return { kind: 'filtered_type' };
   if (!hasPlayableEpisode(lookup.data)) return { kind: 'filtered_no_stream' };
 
-  const synced = await deps.syncCanonical(lookup.data.movie.slug);
-  if (synced.outcome === 'error') return { kind: 'retryable_error' };
-
-  const movie = await deps.movie.getBySlug(lookup.data.movie.slug);
-  if (!movie || movie.tmdb_id !== candidate.id || movie.tmdb_type !== 'movie' || movie.tier !== 'catalog') {
-    return { kind: 'retryable_error' };
+  // Workers Free: 50 external subrequests per Workflow instance. A full
+  // syncOneMovie costs up to 5, so re-syncing all ~20 candidates blew the
+  // cap (2026-09-11). A row already in D1 as this exact catalog movie is
+  // kept fresh by incremental sync; only sync the ones that aren't.
+  const slug = lookup.data.movie.slug;
+  let movie = await deps.movie.getBySlug(slug);
+  if (!isCatalogMovie(movie, candidate.id)) {
+    const synced = await deps.syncCanonical(slug);
+    if (synced.outcome === 'error') return { kind: 'retryable_error' };
+    movie = await deps.movie.getBySlug(slug);
   }
+  if (!isCatalogMovie(movie, candidate.id)) return { kind: 'retryable_error' };
   if (movie.type !== 'single') return { kind: 'filtered_type' };
   if (movie.has_stream !== 1) return { kind: 'filtered_no_stream' };
   if (!hasBackdrop(movie)) return { kind: 'filtered_no_backdrop' };
 
   return { kind: 'matched', row: { rank: candidate.rank, tmdbId: candidate.id, slug: movie.slug } };
+}
+
+function isCatalogMovie(movie: MovieRow | null, tmdbId: number): movie is MovieRow {
+  return movie !== null && movie.tmdb_id === tmdbId && movie.tmdb_type === 'movie' && movie.tier === 'catalog';
 }
 
 function isExactMovieMatch(detail: KkphimDetailResponse, tmdbId: number): boolean {
