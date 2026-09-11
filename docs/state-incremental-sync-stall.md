@@ -262,6 +262,19 @@ chưa từng chạy → 503 + age `null`. `test:hero-home-data` (đang hit
   11 phim đầu ghi được, sau đó mọi phim đều lỗi, trong khi phimapi vẫn trả
   200 cho các slug lỗi. Hero cùng tick: 19 candidate ổn, candidate thứ 20
   `retryable_error` → cả snapshot bị bỏ → `/api/health/sync` 503.
+- **Tick 08:30 (vẫn chạy bản cũ) lặp lại y hệt:** 158 slug, `written: 11`,
+  `failed: 147`. Hai tick liền đều dừng đúng ở 11 phim, xác nhận trần
+  ~50 fetch/instance (tail log không bắt được dòng nào).
+- **Deploy fix:** `git push origin df9de3d:main` (`771932c..df9de3d`) lúc
+  ~08:35 UTC, deployment `cfb12cb6`. Smoke test (`/`, `/api/home-data`,
+  `/phim/rf-smoke`, `/sitemap.xml`, `/robots.txt`) đều 200.
+- **Tick 09:00 UTC (code mới) — đạt:**
+  - Incremental: `slugsFound: 168`, `pagesScanned: 9`, `processed: 8`,
+    `written: 8`, `failed: 0` (đúng `floor((50 − 9) / 5) = 8`).
+  - Hero: `failedCount: 0`, `matchedCount: 10`, `hero:last_success_at` =
+    1789117271.
+  - `/api/health/sync` → **200** `{"ok":true,"incrementalAgeSeconds":100,"heroAgeSeconds":123}`.
+  - Backlog còn ~160 phim, mỗi tick 8 phim → khoảng 20 tick (~10h) là hết.
 - **Nguyên nhân:** tài liệu Workflows Limits ghi Free = **50 external
   subrequest cho mỗi Workflow instance**; plan (Phase 2) và README lại giả
   định là cho mỗi step. 9 trang + 11 phim × ~3,7 fetch ≈ 50. Trên Paid,
