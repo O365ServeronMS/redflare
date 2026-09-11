@@ -132,17 +132,15 @@ BACKFILL_PAGE_TO = ""
 
 # RECOMMENDATION_JOBS_ENABLED (docs/plan-incremental-sync-stall.md Phase 3):
 # gates whether the cron dispatcher starts the recommendation-resolve and
-# recommendation-refresh Workflows. Default "false" -- their D1 rows-read
+# recommendation-refresh Workflows. Was "false" because their D1 rows-read
 # cost (Q3: CTE requeue ~77k rows/tick; Q6: getDueSources ~33k rows/tick)
 # was un-optimised, and on Free that alone can exceed the 5M rows-read/day
-# cap. Recommendation rails keep serving already-resolved data while this
-# is off; only the refresh/resolve of new edges pauses.
-# docs/plan-recommendation-d1-reads.md (Phases 1-5) fixes Q3/Q6 and lands
-# the D1 read/write budget the jobs need to run safely -- still "false"
-# here because Phase 6 (migration apply + one-tick smoke test + 24h
-# monitoring) needs the project owner's sign-off at each step before this
-# flips. Plain [var], flip on the dashboard once Phase 6 clears.
-RECOMMENDATION_JOBS_ENABLED = "false"
+# cap. docs/plan-recommendation-d1-reads.md (Phases 1-5) fixed Q3/Q6 and
+# landed the D1 read/write budget the jobs need; Phase 6's migration apply,
+# catch-up, and one-tick manual trial (docs/state-recommendation-d1-reads.md)
+# passed project-owner sign-off 2026-09-12 -- flipped to "true" here.
+# Rollback: set back to "false" + deploy if 24h monitoring shows a problem.
+RECOMMENDATION_JOBS_ENABLED = "true"
 
 # RECENT_PAGE_CAP (docs/plan-incremental-sync-stall.md Phase 2): safety
 # stop for the clock-free feed scan in services/sync/orchestrator.ts --
