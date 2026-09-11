@@ -101,6 +101,17 @@ export async function syncOneMovie(
     }
     await repos.taxonomy.syncMovieTaxonomy(slug, movie.genres, movie.countries);
     await repos.search.indexMovie(slug, movie.title, movie.originalTitle);
+    // Q3 fix (docs/plan-recommendation-d1-reads.md Phase 1): this movie's
+    // TMDB identity may be exactly what an overflow edge elsewhere has been
+    // waiting for -- reopen just that group instead of relying on the
+    // periodic full-table scan. Only reachable on the `written` branch
+    // (this function's own tmdb_id/tmdb_type are not part of hashMovie, so
+    // a title whose TMDB identity changes with nothing else hash-relevant
+    // changing stays `unchanged` and won't retrigger this -- accepted,
+    // extremely rare).
+    if (tmdbId && tmdbType) {
+      await repos.recommendation.requeueTarget(tmdbType, tmdbId);
+    }
 
     const rowsWritten =
       written

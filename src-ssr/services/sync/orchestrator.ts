@@ -637,6 +637,14 @@ export const RESOLVE_BATCH_SIZE = 300;
 // smaller page keeps D1 writes and cache invalidation bounded per cron.
 const REQUEUE_BATCH_SIZE = 100;
 const REQUEUE_CURSOR_KEY = 'recommendation:requeue_cursor';
+// Q3 fix (docs/plan-recommendation-d1-reads.md Phase 1): getOverflowGroupsForRequeue's
+// CTE scans the whole overflow set (~77k rows, ~94k rows read/call). The
+// only branch it can still do that requeueTarget's event-driven hook in
+// syncMovie.ts doesn't already cover is reopening stub-eligible candidates
+// when MAX_STUBS headroom frees up -- worth checking at most once a day,
+// not once a tick.
+const REQUEUE_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const REQUEUE_SCAN_AT_KEY = 'recommendation:requeue_scan_at';
 // ADR-0002 Finding 3: only materialize a stub for a target enough catalog
 // movies actually point at to be worth a whole extra D1 row + TMDB fetch.
 const STUB_MIN_REFCOUNT = 2;
@@ -699,6 +707,17 @@ function parseRequeueCursor(value: string | null) {
 }
 
 export async function requeueOverflowGroups(repos: Repositories, maxStubs: number, stubCount: number) {
+  // No stub headroom -> branch 2 (stub-eligible) is dead and branch 1
+  // (target now in catalog) is already handled by requeueTarget. Skip
+  // without touching D1 at all.
+  if (maxStubs <= stubCount) return { candidates: 0, requeued: 0 };
+
+  // Raising MAX_STUBS reopens this scan; the first run after that happens
+  // within REQUEUE_SCAN_INTERVAL_MS, not instantly -- delete
+  // recommendation:requeue_scan_at from sync_state to force it sooner.
+  const lastScanAt = Number((await repos.syncState.get(REQUEUE_SCAN_AT_KEY)) ?? '0');
+  if (Date.now() - lastScanAt < REQUEUE_SCAN_INTERVAL_MS) return { candidates: 0, requeued: 0 };
+
   let cursor = parseRequeueCursor(await repos.syncState.get(REQUEUE_CURSOR_KEY));
   const includeStubEligible = maxStubs > stubCount;
   let candidates = await repos.recommendation.getOverflowGroupsForRequeue(
@@ -730,6 +749,7 @@ export async function requeueOverflowGroups(repos: Repositories, maxStubs: numbe
   } else {
     await repos.syncState.delete(REQUEUE_CURSOR_KEY);
   }
+  await repos.syncState.set(REQUEUE_SCAN_AT_KEY, String(Date.now()));
 
   return { candidates: candidates.length, requeued: requeue.length };
 }

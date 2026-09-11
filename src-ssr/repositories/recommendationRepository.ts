@@ -191,6 +191,23 @@ export class RecommendationRepository {
     }));
   }
 
+  /** Event-driven replacement for the periodic overflow scan (Q3 in
+   * docs/plan-recommendation-d1-reads.md: the CTE in getOverflowGroupsForRequeue
+   * read ~94k rows/tick to find groups reopened by a target landing in the
+   * catalog -- normally just a handful). Called from syncOneMovie right
+   * after a movie with this TMDB identity is written, so only this one
+   * group's rows are touched via idx_rec_overflow. */
+  async requeueTarget(targetType: TmdbType, targetTmdbId: number): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE recommendation SET resolve_attempted = 0
+         WHERE target_tmdb_id = ? AND target_type = ?
+           AND target_slug IS NULL AND resolve_attempted = 1`
+      )
+      .bind(targetTmdbId, targetType)
+      .run();
+  }
+
   async requeueAttemptedGroups(groups: readonly RecommendationTargetGroup[]): Promise<void> {
     if (groups.length === 0) return;
     await this.db.batch(groups.map((group) => this.db

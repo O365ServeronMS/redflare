@@ -5,7 +5,7 @@ import { Miniflare } from 'miniflare';
 import { TmdbClient } from '../src-ssr/services/sync/tmdbClient.ts';
 import { RateLimiter } from '../src-ssr/services/sync/throttle.ts';
 import { syncOneMovie } from '../src-ssr/services/sync/syncMovie.ts';
-import { runRecommendationResolveTick } from '../src-ssr/services/sync/orchestrator.ts';
+import { runRecommendationResolveTick, buildRepos, requeueOverflowGroups } from '../src-ssr/services/sync/orchestrator.ts';
 import { MovieRepository } from '../src-ssr/repositories/movieRepository.ts';
 import { RecommendationRepository } from '../src-ssr/repositories/recommendationRepository.ts';
 
@@ -95,6 +95,7 @@ test('preserves last-good targets when the TMDB recommendation request is retrya
         { targetTmdbId: 702, targetType: 'movie', sortOrder: 1 },
       ],
       replaceTargetsForSlug: async (...args) => replaced.push(args),
+      requeueTarget: async () => undefined,
     },
     taxonomy: { syncMovieTaxonomy: async () => undefined },
     search: { indexMovie: async () => undefined },
@@ -131,6 +132,7 @@ test('replaces targets with an empty list only after a valid TMDB empty result',
         throw new Error('must not read last-good targets for a valid empty result');
       },
       replaceTargetsForSlug: async (...args) => replaced.push(args),
+      requeueTarget: async () => undefined,
     },
     taxonomy: { syncMovieTaxonomy: async () => undefined },
     search: { indexMovie: async () => undefined },
@@ -158,7 +160,7 @@ test('uses a verified TMDB override when the upstream record has no TMDB identit
   const repos = {
     movie: { getSyncMarkersBySlugs: async () => new Map([['tro-choi-vuong-quyen-phan-1', { sourceHash: 'old', upstreamModified: null }]]), upsertMany: async (rows) => { written.push(...rows); return 1; } },
     episode: { replaceForSlug: async () => undefined },
-    recommendation: { replaceTargetsForSlug: async () => undefined, getTargetsForSlug: async () => [] },
+    recommendation: { replaceTargetsForSlug: async () => undefined, getTargetsForSlug: async () => [], requeueTarget: async () => undefined },
     taxonomy: { syncMovieTaxonomy: async () => undefined },
     search: { indexMovie: async () => undefined },
     tmdbOverride: { getBySlug: async () => ({ tmdbId: 1399, tmdbType: 'tv', tmdbSeason: 1, source: 'override' }) },
@@ -265,7 +267,7 @@ test('TMDB retryable failure while building a stub leaves the target pending', a
   });
   assert.deepEqual(await resolveState(db), { target_slug: null, resolve_attempted: 0 });
 });
-test('requeues a local target at the stub cap, then resolves idempotently without upstream', async () => {
+test('requeues a local target event-driven at the stub cap, then resolves idempotently without upstream', async () => {
   const { db, env } = await setupResolver('1');
   await db.batch([
     db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tmdb_season, has_stream, tier) VALUES (?, 9000, ?, NULL, 0, ?)').bind('full-cap-stub', 'movie', 'stub'),
@@ -277,18 +279,85 @@ test('requeues a local target at the stub cap, then resolves idempotently withou
     throw new Error('local resolution must not fetch upstream');
   };
 
+  // (a) Stub cap already full (1/1): requeueOverflowGroups's own scan is
+  // fully gated off (Phase 1.3) -- the target stays overflow until
+  // something event-driven reopens it.
   const first = await runRecommendationResolveTick(env);
-  assert.equal(first.requeueCandidates, 1);
-  assert.equal(first.requeued, 1);
-  assert.equal(first.resolvedToExisting, 1);
-  assert.equal(first.resolvedToStub, 0);
-  assert.equal(first.overflow, 0);
+  assert.equal(first.requeueCandidates, 0);
+  assert.equal(first.requeued, 0);
+  assert.equal(first.resolvedToExisting, 0);
+  assert.deepEqual(await resolveState(db), { target_slug: null, resolve_attempted: 1 });
+
+  // (b) The event syncOneMovie fires when a movie with this TMDB identity
+  // is written -- exercised directly here since 'local-target' already
+  // exists in `movie` from the batch above.
+  await new RecommendationRepository(db).requeueTarget('movie', 42);
+
+  // (c) Now pending again and resolvable locally -- no upstream fetch.
+  const second = await runRecommendationResolveTick(env);
+  assert.equal(second.resolvedToExisting, 1);
+  assert.equal(second.resolvedToStub, 0);
+  assert.equal(second.overflow, 0);
   assert.deepEqual(await resolveState(db), { target_slug: 'local-target', resolve_attempted: 0 });
 
-  const second = await runRecommendationResolveTick(env);
-  assert.equal(second.groupsSeen, 0);
-  assert.equal(second.requeued, 0);
-  assert.equal(second.resolvedToExisting, 0);
+  // (d) Nothing left to do.
+  const third = await runRecommendationResolveTick(env);
+  assert.equal(third.groupsSeen, 0);
+  assert.equal(third.requeued, 0);
+  assert.equal(third.resolvedToExisting, 0);
+});
+
+test('syncOneMovie requeues an overflow edge event-driven when its own tmdb identity lands', async () => {
+  const { db } = await setupResolver();
+  // Overflow edge from an unrelated source, predating this movie ever syncing.
+  await db.prepare(
+    "INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order, resolve_attempted) VALUES ('other-source', NULL, 42, 'movie', 0, 1)"
+  ).run();
+
+  const detail = kkDetail('new-title');
+  detail.movie.tmdb = { id: '42', type: 'movie', season: null };
+  const repos = {
+    movie: { getSyncMarkersBySlugs: async () => new Map(), upsertMany: async () => 1 },
+    episode: { replaceForSlug: async () => undefined },
+    recommendation: new RecommendationRepository(db),
+    taxonomy: { syncMovieTaxonomy: async () => undefined },
+    search: { indexMovie: async () => undefined },
+    tmdbOverride: { getBySlug: async () => null },
+  };
+  const clients = {
+    kkphim: { getDetail: async () => detail },
+    tmdb: {
+      getDetail: async () => null,
+      getSeasonDetail: async () => null,
+      getRecommendationIds: async () => ({ kind: 'success', ids: [] }),
+    },
+  };
+
+  const result = await syncOneMovie({}, 'new-title', clients, repos);
+  assert.equal(result.outcome, 'written');
+  assert.deepEqual(
+    await db.prepare(
+      'SELECT resolve_attempted FROM recommendation WHERE slug = ? AND target_tmdb_id = ? AND target_type = ?'
+    ).bind('other-source', 42, 'movie').first(),
+    { resolve_attempted: 0 }
+  );
+});
+
+test('requeueOverflowGroups scans at most once per 24h once stub headroom opens', async () => {
+  const { db, env } = await setupResolver('2');
+  await db.batch([
+    db.prepare('UPDATE recommendation SET resolve_attempted = 1 WHERE slug = ?').bind('source'),
+    db.prepare(
+      "INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order, resolve_attempted) VALUES ('second-source', NULL, 42, 'movie', 0, 1)"
+    ),
+  ]);
+  const repos = buildRepos(env);
+
+  const first = await requeueOverflowGroups(repos, 2, 0);
+  assert.deepEqual(first, { candidates: 1, requeued: 1 });
+
+  const second = await requeueOverflowGroups(repos, 2, 0);
+  assert.deepEqual(second, { candidates: 0, requeued: 0 });
 });
 test('dry-run selects only overflow groups eligible under the bounded-stub policy', async () => {
   const { db } = await setupResolver();
