@@ -82,7 +82,7 @@ test('preserves last-good targets when the TMDB recommendation request is retrya
   const written = [];
   const repos = {
     movie: {
-      getHashesBySlugs: async () => new Map([['source', 'old-hash']]),
+      getSyncMarkersBySlugs: async () => new Map([['source', { sourceHash: 'old-hash', upstreamModified: null }]]),
       upsertMany: async (rows) => {
         written.push(...rows);
         return 1;
@@ -122,7 +122,7 @@ test('replaces targets with an empty list only after a valid TMDB empty result',
   const replaced = [];
   const repos = {
     movie: {
-      getHashesBySlugs: async () => new Map([['source', 'old-hash']]),
+      getSyncMarkersBySlugs: async () => new Map([['source', { sourceHash: 'old-hash', upstreamModified: null }]]),
       upsertMany: async () => 1,
     },
     episode: { replaceForSlug: async () => undefined },
@@ -156,7 +156,7 @@ test('uses a verified TMDB override when the upstream record has no TMDB identit
   const detail = kkDetail('tro-choi-vuong-quyen-phan-1');
   detail.movie.tmdb = { id: null, type: null, season: null };
   const repos = {
-    movie: { getHashesBySlugs: async () => new Map([['tro-choi-vuong-quyen-phan-1', 'old']]), upsertMany: async (rows) => { written.push(...rows); return 1; } },
+    movie: { getSyncMarkersBySlugs: async () => new Map([['tro-choi-vuong-quyen-phan-1', { sourceHash: 'old', upstreamModified: null }]]), upsertMany: async (rows) => { written.push(...rows); return 1; } },
     episode: { replaceForSlug: async () => undefined },
     recommendation: { replaceTargetsForSlug: async () => undefined, getTargetsForSlug: async () => [] },
     taxonomy: { syncMovieTaxonomy: async () => undefined },

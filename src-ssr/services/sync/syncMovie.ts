@@ -78,8 +78,18 @@ export async function syncOneMovie(
     const movie = normalizeMovie(detail, tmdbDetail, tmdbSeasonDetail, recIds, tmdbRef);
     const hash = hashMovie(movie);
 
-    const existingHash = (await repos.movie.getHashesBySlugs([slug])).get(slug);
-    if (existingHash === hash) return { slug, outcome: 'unchanged', rowsWritten: 0 };
+    const marker = (await repos.movie.getSyncMarkersBySlugs([slug])).get(slug);
+    if (marker?.sourceHash === hash) {
+      // Nothing hash-relevant changed, but KKPhim's modified.time may have
+      // moved (F4: hashMovie deliberately excludes modifiedAt). Bump
+      // upstream_modified alone -- one indexed write, no full upsert -- so
+      // the row's rail position keeps tracking the feed.
+      if (movie.modifiedAt !== null && movie.modifiedAt !== marker.upstreamModified) {
+        await repos.movie.setUpstreamModified(slug, movie.modifiedAt);
+        return { slug, outcome: 'unchanged', rowsWritten: 1 };
+      }
+      return { slug, outcome: 'unchanged', rowsWritten: 0 };
+    }
 
     const written = await repos.movie.upsertMany([{ movie, hash }]);
     await repos.episode.replaceForSlug(slug, movie.episodes);

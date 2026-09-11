@@ -130,65 +130,75 @@ BACKFILL_TYPE = ""
 BACKFILL_PAGE_FROM = ""
 BACKFILL_PAGE_TO = ""
 
-# The legacy single [triggers] cron (drove the old scheduled() handler in
-# src-ssr/index.ts) is retired as of docs/plan-free-plan-migration.md Phase
-# 5 -- docs/state-free-plan-migration.md Phase 0 measured that shape (five
-# jobs, one shared invocation, no per-job budget reset) exceeding the
-# Free-plan 50-external-subrequest cap on two of the jobs individually, and
-# Phase 5 itself was triggered by live production evidence: at a
-# dashboard-configured 10ms CPU limit, recommendation resolve was
-# consistently the job running when the isolate got killed for exceeding
-# CPU. The Cloudflare Workflows below (docs/plan-free-plan-migration.md
-# Phase 3) fully replace it -- one per job, each step getting its own fresh
-# CPU/subrequest budget. Each Workflow's `schedules` is its own cron budget
-# (up to 100 cron expressions/account, separate from the classic Cron
-# Trigger quota that used to gate the single shared trigger) -- this is what
-# lets incremental sync run every 30 min while the other three keep their
-# original 15-min cadence, which a single shared Cron Trigger could not do.
+# RECOMMENDATION_JOBS_ENABLED (docs/plan-incremental-sync-stall.md Phase 3):
+# gates whether the cron dispatcher starts the recommendation-resolve and
+# recommendation-refresh Workflows. Default "false" -- their D1 rows-read
+# cost (Q3: CTE requeue ~77k rows/tick; Q6: getDueSources ~33k rows/tick)
+# is still un-optimised, and on Free that alone can exceed the 5M
+# rows-read/day cap. Recommendation rails keep serving already-resolved
+# data while this is off; only the refresh/resolve of new edges pauses.
+# Plain [var], flip on the dashboard once a dedicated Q3/Q6 plan lands.
+RECOMMENDATION_JOBS_ENABLED = "false"
+
+# RECENT_PAGE_CAP (docs/plan-incremental-sync-stall.md Phase 2): safety
+# stop for the clock-free feed scan in services/sync/orchestrator.ts --
+# max pages of /danh-sach/phim-moi-cap-nhat to walk before giving up on a
+# tick when no page ever comes back "fully known". Plain [var], editable on
+# the Cloudflare dashboard ("Variables and secrets") without a redeploy, so
+# a one-off large backlog after an outage can be drained by bumping this
+# (parsed as an int, clamped to [1, 40]; anything unparseable falls back to
+# the built-in default of 30). Steady state stops at 'known_page' after 1-2
+# pages and never approaches this.
+RECENT_PAGE_CAP = "30"
+
+# Single classic Cron Trigger -- the ONLY scheduler now
+# (docs/plan-incremental-sync-stall.md Phase 3). Each Workflow below used to
+# carry its own `schedules` cron expression; the 2026-09-10 audit found all
+# five had silently stopped creating instances at 2026-09-07 00:00 UTC,
+# exactly when the account's Workers Paid plan lapsed -- `next_instance`
+# kept advancing but `triggered_on` froze and no scheduled/workflow event
+# fired for three days. Classic [triggers] crons DO run on the Free plan
+# (the account was using 0 of its 5). src-ssr/index.ts's scheduled() handler
+# fans this one tick out into Workflow.create() calls
+# (src-ssr/services/sync/dispatch.ts): incremental every tick, hero hourly,
+# recommendation resolve/refresh only if RECOMMENDATION_JOBS_ENABLED,
+# backfill only if BACKFILL_ENABLED. Keep this the sole trigger -- if the
+# account ever returns to Paid, re-adding the per-Workflow `schedules` on
+# top of this would double every job.
+[triggers]
+crons = ["*/30 * * * *"]
+
+# NOTE: no `schedules` on any [[workflows]] block below (see [triggers]
+# above). Cadence is decided in src-ssr/services/sync/dispatch.ts:
+#  - incremental-sync: every */30 tick
+#  - hero-snapshot: hourly (was `0 * * * *`)
+#  - recommendation-resolve: every tick, recommendation-refresh: hourly --
+#    both gated behind RECOMMENDATION_JOBS_ENABLED (default off, D1 cost)
+#  - backfill: every tick, gated behind BACKFILL_ENABLED (default off)
 [[workflows]]
 name = "incremental-sync"
 binding = "INCREMENTAL_SYNC_WORKFLOW"
 class_name = "IncrementalSyncWorkflow"
-schedules = ["*/30 * * * *"]
 
-# Hourly, not */15: HERO_REFRESH_INTERVAL_SECONDS's 30-min gate meant a
-# */15 cron alternated real-run/skip ticks (~23 steps + ~1 step each),
-# ~1,152 steps/day. Hourly always lands past the gate, so every tick is a
-# real run (~23 steps) with none wasted on a skip check -- ~552 steps/day,
-# same effective freshness. See docs/state-free-plan-migration.md Phase 6
-# (Workflows steps quota, not CPU, is the binding Free-plan constraint here).
 [[workflows]]
 name = "hero-snapshot"
 binding = "HERO_SNAPSHOT_WORKFLOW"
 class_name = "HeroSnapshotWorkflow"
-schedules = ["0 * * * *"]
 
-# */30, not */15: halves run count against the same backlog-chunking cost
-# per run, keeping this workflow (the largest single step-count consumer)
-# under the Workers Free 3,000-steps/day quota. See
-# docs/state-free-plan-migration.md Phase 6.
 [[workflows]]
 name = "recommendation-resolve"
 binding = "RECOMMENDATION_RESOLVE_WORKFLOW"
 class_name = "RecommendationResolveWorkflow"
-schedules = ["*/30 * * * *"]
 
-# Hourly, not */15: RECOMMENDATION_REFRESH_LIMIT (20 sources/run) doesn't
-# need quarter-hourly cadence to keep D1 `recommendation_freshness` rows
-# from going stale. See docs/state-free-plan-migration.md Phase 6.
 [[workflows]]
 name = "recommendation-refresh"
 binding = "RECOMMENDATION_REFRESH_WORKFLOW"
 class_name = "RecommendationRefreshWorkflow"
-schedules = ["0 * * * *"]
 
-# Scheduled but inert by default (BACKFILL_ENABLED = "false" above) -- each
-# tick costs one cheap D1 read + early return until an operator flips it on.
 [[workflows]]
 name = "backfill"
 binding = "BACKFILL_WORKFLOW"
 class_name = "BackfillWorkflow"
-schedules = ["*/15 * * * *"]
 
 # SELF: service binding used by services/sync/orchestrator.ts to fan out
 # /__sync/batch/:n shards without a same-zone fetch() 522ing (same reasoning

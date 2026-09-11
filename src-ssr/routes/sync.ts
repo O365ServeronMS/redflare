@@ -13,6 +13,7 @@ import { HeroSnapshotRepository } from '../repositories/heroSnapshotRepository';
 import { applyNoStore, purgeEverything } from '../cache/control';
 import { SAMPLE_RATE } from '../middleware/requestSampler';
 import { refreshHeroSnapshot } from '../services/sync/heroSnapshot';
+import { INCREMENTAL_STALE_SECONDS, HERO_STALE_SECONDS } from '../services/sync/dispatch';
 
 const FREE_PLAN_DAILY_REQUEST_LIMIT = 100_000;
 
@@ -135,9 +136,31 @@ syncRoute.get('/__sync/status', async (c) => {
   // per-request.
   const estimatedRequestsToday = sampledRequests * SAMPLE_RATE;
 
+  // Phase 4: surface how long since each job last succeeded, and a
+  // straight stale/not-stale verdict, so a stall like 2026-09-07's shows
+  // here instead of only in a diff of catalogMovieCount weeks later.
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const recent = parseStoredJson(recentLastRun);
+  const recordedAtMs =
+    recent && typeof recent === 'object' && typeof (recent as Record<string, unknown>).recordedAt === 'string'
+      ? Date.parse((recent as Record<string, unknown>).recordedAt as string)
+      : Number.NaN;
+  const incrementalAgeSeconds = Number.isNaN(recordedAtMs)
+    ? null
+    : Math.max(0, nowSeconds - Math.floor(recordedAtMs / 1000));
+  const heroAgeSeconds = heroRefresh.lastSuccessAt === null
+    ? null
+    : Math.max(0, nowSeconds - heroRefresh.lastSuccessAt);
+
   return c.json({
     cursorRecent: cursor,
-    recentSync: parseStoredJson(recentLastRun),
+    recentSync: recent && typeof recent === 'object'
+      ? { ...(recent as Record<string, unknown>), ageSeconds: incrementalAgeSeconds }
+      : recent,
+    stale: {
+      incremental: incrementalAgeSeconds === null || incrementalAgeSeconds > INCREMENTAL_STALE_SECONDS,
+      hero: heroAgeSeconds === null || heroAgeSeconds > HERO_STALE_SECONDS,
+    },
     rowsWrittenToday: rowsToday,
     backfillMode: c.env.BACKFILL_MODE ?? 'free',
     catalogMovieCount: catalogCount,

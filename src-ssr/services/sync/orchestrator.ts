@@ -25,14 +25,25 @@ const MAX_ROWS_PER_DAY = 85_000;
 // worker/lib/mirror.js) rather than inventing a new one.
 const SHARD_COUNT = 5;
 const PER_SHARD_CONCURRENCY = 6; // Workers free/paid: 6 simultaneous outgoing connections/invocation
-// Backfill is complete (docs/plan-free-plan-migration.md) -- steady state only
-// needs to catch what's new since the last tick, not walk deep into history. 2,
-// not 1: cheap insurance against a single-page miss (feed reorder, a burst of
-// >1 page's worth of new titles in one 30-min window) without meaningfully
-// growing the external-subrequest footprint. If the cursor isn't crossed
-// within these pages the tick stops at 'page_limit' and does NOT advance the
-// cursor (see below), so a miss here is a delay, never data loss.
-const RECENT_PAGE_LIMIT = 2; // pages of /danh-sach/phim-moi-cap-nhat to scan before giving up on this tick
+// The feed scan (docs/plan-incremental-sync-stall.md Phase 2) walks
+// /danh-sach/phim-moi-cap-nhat newest-first and normally stops at the first
+// page every item of which is already in D1 with a matching upstream_modified
+// ('known_page'). This cap is the safety stop for when that never happens
+// (a large backlog after an outage, or a bug): 30 pages ~= 720 slugs, each
+// getting its own Workflow step -- well under the Free plan's 1,024
+// steps/instance -- and 30 feed fetches, under the 50-external-subrequest
+// cap that applies per step. Overridable via [vars] RECENT_PAGE_CAP.
+const DEFAULT_RECENT_PAGE_CAP = 30;
+const RECENT_PAGE_CAP_MIN = 1;
+const RECENT_PAGE_CAP_MAX = 40;
+
+/** [vars] RECENT_PAGE_CAP, an integer clamped to [1, 40]. A missing or
+ * unparseable value falls back to DEFAULT_RECENT_PAGE_CAP. */
+function resolveRecentPageCap(env: Env): number {
+  const parsed = Number.parseInt((env.RECENT_PAGE_CAP ?? '').trim(), 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_RECENT_PAGE_CAP;
+  return Math.min(RECENT_PAGE_CAP_MAX, Math.max(RECENT_PAGE_CAP_MIN, parsed));
+}
 
 /** Versioned cursor for the recent feed. `slug` is a deterministic
  * tie-breaker/diagnostic value; equal-timestamp items are still scanned on
@@ -44,6 +55,7 @@ export interface RecentCursor {
 
 export type IncrementalStopReason =
   | 'cursor_crossed'
+  | 'known_page'
   | 'empty_page'
   | 'page_limit'
   | 'upstream_error'
@@ -229,18 +241,21 @@ export interface RecentScanResult {
 /** The page-scanning half of incremental sync, extracted so a caller that
  * wants per-slug step boundaries (src-ssr/workflows/incrementalSyncWorkflow.ts)
  * can request just the candidate slug list without also getting
- * runIncrementalSync's own SELF-fan-out shape. Behavior identical to what
- * used to be inline in runIncrementalSync below -- scan
- * /danh-sach/phim-moi-cap-nhat pages newest-first until the last-seen cursor
- * is crossed. Items sharing the cursor timestamp are deliberately
- * re-scanned: KKPhim can reorder ties between pages, and a timestamp-only
- * stop at the first tie loses titles at that boundary. */
-export async function scanRecentSlugs(env: Env, pageLimit = RECENT_PAGE_LIMIT): Promise<RecentScanResult> {
+ * runIncrementalSync's own SELF-fan-out shape.
+ *
+ * Clock-free scan (docs/plan-incremental-sync-stall.md Phase 2): walk
+ * /danh-sach/phim-moi-cap-nhat newest-first and stop at the first page
+ * whose every item is already in D1 with an upstream_modified equal to the
+ * feed's modified.time ('known_page'). No before/after comparison against
+ * that timestamp -- KKPhim labels it +07 as Z (F3) -- and no persisted
+ * cursor gate: a slug that failed to sync earlier simply isn't "known"
+ * yet, so it's retried on the next tick automatically. `cursor:recent` is
+ * still read (to seed `newest`) and still written by the callers, but only
+ * as a diagnostic surfaced by /__sync/status. */
+export async function scanRecentSlugs(env: Env, pageLimit = resolveRecentPageCap(env)): Promise<RecentScanResult> {
   const repos = buildRepos(env);
   const clients = buildClients(env);
-  const rawCursor = await repos.syncState.get('cursor:recent');
-  const cursor = parseRecentCursor(rawCursor);
-  const cursorTime = cursor ? Date.parse(cursor.time) : 0;
+  const cursor = parseRecentCursor(await repos.syncState.get('cursor:recent'));
 
   const slugs: string[] = [];
   const seenSlugs = new Set<string>();
@@ -265,29 +280,25 @@ export async function scanRecentSlugs(env: Env, pageLimit = RECENT_PAGE_LIMIT): 
       discoveryStopReason = 'empty_page';
       break;
     }
-    let crossedCursor = false;
+    const markers = await repos.movie.getSyncMarkersBySlugs(items.map((item) => item.slug));
+    let changedOnPage = 0;
     for (const item of items) {
-      const t = item.modified?.time;
-      const itemTime = t ? Date.parse(t) : Number.NaN;
-      if (cursorTime > 0 && itemTime < cursorTime) {
-        crossedCursor = true;
-        // Do not abandon the rest of this page: an upstream reorder can put
-        // an equal-timestamp item after the first older item.
-        continue;
-      }
-      // A v2 cursor identifies one item already committed at the boundary.
-      // Skip that exact slug, but continue scanning every other equal-time
-      // item so a reordered page cannot hide a newly inserted title.
-      if (cursor && itemTime === cursorTime && item.slug === cursor.slug) continue;
       if (seenSlugs.has(item.slug)) continue;
+      const feedSeconds = Math.floor(Date.parse(item.modified.time) / 1000);
+      const marker = markers.get(item.slug);
+      // Already held at exactly this upstream_modified -> known, skip.
+      // Anything else (no row, different timestamp, an earlier failed
+      // sync) is a candidate to (re)sync this tick.
+      if (marker && marker.upstreamModified === feedSeconds) continue;
       seenSlugs.add(item.slug);
       slugs.push(item.slug);
-      const candidate = { time: t, slug: item.slug } satisfies RecentCursor;
+      changedOnPage++;
+      const candidate = { time: item.modified.time, slug: item.slug } satisfies RecentCursor;
       newest = newest ? newerCursor(newest, candidate) : candidate;
     }
-    if (crossedCursor) {
+    if (changedOnPage === 0) {
       scanComplete = true;
-      discoveryStopReason = 'cursor_crossed';
+      discoveryStopReason = 'known_page';
       break;
     }
   }

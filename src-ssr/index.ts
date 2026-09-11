@@ -5,6 +5,7 @@ import { sitemapRoute } from './routes/sitemap';
 import { syncRoute } from './routes/sync';
 import { securityHeaders } from './middleware/securityHeaders';
 import { requestSampler } from './middleware/requestSampler';
+import { dispatchScheduledWorkflows } from './services/sync/dispatch';
 
 // Re-exported so wrangler's [[workflows]] class_name bindings
 // (wrangler.toml) can resolve them -- Workflows must be exported from the
@@ -72,19 +73,18 @@ app.notFound(async (c) => {
   });
 });
 
-// The legacy scheduled() handler (five jobs sharing one Cron Trigger
-// invocation -- incremental sync, hero snapshot, recommendation resolve,
-// recommendation refresh, backfill) is retired as of
-// docs/plan-free-plan-migration.md Phase 5. docs/state-free-plan-migration.md
-// Phase 0 measured that shape exceeding the Free-plan 50-external-subrequest
-// cap on two of the five jobs individually; Phase 5's own trigger was live
-// production evidence at a dashboard-configured 10ms CPU limit --
-// recommendation resolve was consistently the job mid-execution when the
-// isolate got killed for exceeding CPU, because CPU time is a
-// whole-invocation budget shared cumulatively across all five jobs with no
-// reset between them. The [[workflows]] in wrangler.toml (each job's own
-// Workflow, one fresh CPU/subrequest budget per step) fully replace it --
-// see src-ssr/workflows/*.ts.
+// scheduled() is back, but nothing like the pre-Phase-5 version that ran
+// five jobs' worth of work inline in one Cron Trigger invocation (and blew
+// the Free-plan CPU/subrequest budgets doing it). This handler ONLY calls
+// Workflow.create() a few times -- all the heavy lifting still happens
+// inside the [[workflows]] in wrangler.toml, each step with its own fresh
+// CPU/subrequest budget. It exists because those Workflows' own
+// `schedules` silently stopped firing when the account left Workers Paid
+// (2026-09-07); a classic [triggers] cron works on Free, so it's the
+// single trigger now. See src-ssr/services/sync/dispatch.ts.
 export default {
   fetch: app.fetch,
+  scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
+    ctx.waitUntil(dispatchScheduledWorkflows(env, controller.scheduledTime));
+  },
 };

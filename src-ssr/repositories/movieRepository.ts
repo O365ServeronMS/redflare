@@ -196,6 +196,40 @@ export class MovieRepository {
     return out;
   }
 
+  /** source_hash + upstream_modified for a set of slugs. Same PK-driven
+   * `slug IN (...)` shape as getHashesBySlugs, chunked at the param cap.
+   * The clock-free feed scan (docs/plan-incremental-sync-stall.md Phase 2)
+   * calls this per feed page: a page is "fully known" -- and stops the scan
+   * -- once every item already sits in D1 with a source_hash AND an
+   * upstream_modified equal to the feed's own modified.time. Equality is
+   * the only safe test because KKPhim labels that timestamp +07 as Z (F3),
+   * so no before/after comparison against it is reliable. */
+  async getSyncMarkersBySlugs(
+    slugs: readonly string[]
+  ): Promise<Map<string, { sourceHash: string; upstreamModified: number | null }>> {
+    if (slugs.length === 0) return new Map();
+    const out = new Map<string, { sourceHash: string; upstreamModified: number | null }>();
+    for (const chunk of chunkByParams(slugs, 1)) {
+      const placeholders = chunk.map(() => '?').join(',');
+      const res = await this.db
+        .prepare(`SELECT slug, source_hash, upstream_modified FROM movie WHERE slug IN (${placeholders})`)
+        .bind(...chunk)
+        .all<{ slug: string; source_hash: string; upstream_modified: number | null }>();
+      for (const row of res.results ?? []) {
+        out.set(row.slug, { sourceHash: row.source_hash, upstreamModified: row.upstream_modified });
+      }
+    }
+    return out;
+  }
+
+  /** Bumps only upstream_modified, for the F4 case: a title whose KKPhim
+   * modified.time moved but nothing hash-relevant did (hashMovie
+   * deliberately excludes modifiedAt). One indexed write instead of a full
+   * upsert, keeping the row's rail position honest with the feed. */
+  async setUpstreamModified(slug: string, modifiedAt: number): Promise<void> {
+    await this.db.prepare('UPDATE movie SET upstream_modified = ? WHERE slug = ?').bind(modifiedAt, slug).run();
+  }
+
   /** Keyset-paginated listing for /danh-sach/:type (plan §3.1: no OFFSET --
    * a deep-page crawl request would otherwise scan and bill every skipped
    * row against the D1 rows-read quota). Fetches limit+1 to know whether a

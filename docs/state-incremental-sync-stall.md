@@ -194,20 +194,52 @@ chưa từng chạy → 503 + age `null`. `test:hero-home-data` (đang hit
 
 ---
 
-## Còn phải làm — Phase 5 & 6 (chủ dự án duyệt từng bước)
+## Phase 5 — Deploy theo từng nấc
 
-- **Phase 5.1:** apply `migrations/0016` rồi `0017` (từng file, đọc
-  `rows_written`), `git push` deploy Phase 1. Chờ 24h, đo:
-  `wrangler d1 insights redflare-db --timePeriod=1d --sort-by=reads` không
-  còn query request-path nào > 1.000 row TB; `d1AnalyticsAdaptiveGroups`
-  rows read/ngày < 300k; `/api/home-data` + `/api/list` `cpuTimeMs` < 10.
-  EXPLAIN QUERY PLAN production: `SEARCH … USING INDEX idx_gm_slug` /
-  `idx_cm_slug`.
-- **Phase 5.2:** deploy Phase 2–4. Recommendation vẫn tắt
-  (`RECOMMENDATION_JOBS_ENABLED = "false"`). Tick đầu tự bắt kịp backlog
-  (`stopReason: 'known_page'`, `pagesScanned` ~8+). Theo dõi 24h: rows read
-  < 2M/ngày, rows written < 50k/ngày, steps < 2.000/ngày. Backlog > 30
-  trang → tạm đặt `RECENT_PAGE_CAP = "40"` trên dashboard.
+### 5.1 — Phase 1 (đang chạy, 2026-09-10 ~12:25 UTC)
+
+- **Commit tách đôi:** `cc8a076` = Phase 1 (request-path), `973460d` =
+  Phase 2–4 (giữ local trên branch `worktree-bridge-cse_01GSVZFWrBmKCjkdb125t2Lm`,
+  chưa push). `movieRepository.ts` / `package.json` tách hunk sạch; đã
+  verify Phase 1 cô lập trong worktree tạm: `worker:typecheck` ok, `build`
+  ok, 7 suite xanh (`test:incremental-sync` 12 — bản gốc, đúng vì test
+  Phase 2 nằm ở `973460d`), `wrangler deploy --dry-run` ok.
+- **Deploy:** `git push origin cc8a076:main` (`ee750f6..cc8a076`) lúc
+  ~12:24 UTC 2026-09-10. Cloudflare Workers Builds tự build. Site còn sống
+  (`/api/home-data` 200); `/api/health/sync` vẫn 404 → đúng, chỉ Phase 1
+  lên, chưa Phase 4.
+- **Migration 0016 applied `--remote`** lúc ~12:24 UTC: `idx_gm_slug` ✅.
+  Đo: `genre_movie` = 77.664 row → 0016 ghi ~77,7k index-entry hôm nay.
+  `country_movie` = 33.738 row.
+- **0017 HOÃN sang ngày UTC sau (>= 2026-09-11 00:00 UTC).** Lý do: 77,7k
+  (0016) + 33,7k (0017) ≈ 111k > ngưỡng 80k/ngày của plan và sát trần
+  cứng 100k/ngày. Bộ đếm write D1 reset lúc 00:00 UTC.
+- **`d1 insights --timePeriod=1d` lúc 2026-09-11 ~07:48 UTC** (≈19,5h sau
+  deploy): không còn query request-path nào lặp lại với rows read cao —
+  chỉ còn 1 lần chạy còn sót của câu `COALESCE(...)` cũ (trước deploy) và
+  vài query kiểm tra tay của phiên trước. Tín hiệu đủ tốt để không cần chờ
+  hết 24h mới sang 5.2 (chủ dự án đồng ý đi luôn).
+- **0017 applied `--remote`** lúc 2026-09-11 ~07:50 UTC (ngày UTC mới, còn
+  nguyên ngân sách write). Verify: `EXPLAIN QUERY PLAN DELETE FROM
+  country_movie WHERE slug='x'` → `SEARCH country_movie USING INDEX
+  idx_cm_slug (slug=?)`. **Phase 5.1 xong.**
+
+### 5.2 — Phase 2–4 (2026-09-11 ~07:52 UTC)
+
+- Code Phase 2–4 nằm trên branch `worktree-bridge-cse_01GSVZFWrBmKCjkdb125t2Lm`
+  (commit `a6a1f41`), chưa từng lên `main`. Cherry-pick sạch (không conflict)
+  vào worktree này trên nền `bcd5d15` (= Phase 1 đã deploy), verify lại toàn
+  bộ Luật chung #4 (typecheck, build, 9 suite test, `deploy --dry-run`) —
+  tất cả xanh, không cần sửa gì thêm.
+- Deploy trước khi đủ 24h đo Phase 1 (chủ dự án chấp nhận rủi ro dựa trên
+  tín hiệu `d1 insights` ở trên). Recommendation vẫn tắt
+  (`RECOMMENDATION_JOBS_ENABLED = "false"`).
+- **Theo dõi tiếp (chủ dự án hoặc phiên sau):** tick đầu tự bắt kịp backlog
+  (`stopReason: 'known_page'`, `pagesScanned` ~8+); `/api/health/sync` phải
+  chuyển từ 404 sang 200 trong vòng ~30 phút sau tick đầu. 24h đầu: rows
+  read < 2M/ngày, rows written < 50k/ngày, steps < 2.000/ngày. Backlog dài
+  hơn 30 trang (tick đầu ra `page_limit`) → đặt tạm `RECENT_PAGE_CAP = "40"`
+  trên dashboard.
 - **Phase 5.3:** giữ recommendation tắt tới khi có plan tối ưu Q3/Q6.
 - **Phase 6:** cập nhật `README.md` (cron dispatcher, `/api/health/sync`,
   `RECENT_PAGE_CAP`, `RECOMMENDATION_JOBS_ENABLED`, bảng ngân sách Free,

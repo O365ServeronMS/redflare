@@ -45,9 +45,11 @@ export class IncrementalSyncWorkflow extends WorkflowEntrypoint<Env> {
       }
     }
 
-    // Advance the cursor only after every slug from this scan synced
-    // cleanly -- same "no partial advance" invariant runIncrementalSync
-    // enforces inline, just checked here instead.
+    // cursor:recent is diagnostic-only now (docs/plan-incremental-sync-stall.md
+    // Phase 2 -- the scan decides what's new by comparing each feed item's
+    // modified.time against D1's upstream_modified, not against this
+    // cursor). Still advanced on a clean full pass so /__sync/status can
+    // show how far the last good scan reached.
     let cursorAfter = scan.cursorBefore;
     if (!scan.scanFailed && scan.scanComplete && failed === 0 && scan.newest) {
       const newest = scan.newest;

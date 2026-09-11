@@ -5,6 +5,8 @@ import { RecommendationRepository } from '../repositories/recommendationReposito
 import { TaxonomyRepository } from '../repositories/taxonomyRepository';
 import { SearchRepository, SEARCH_LIMIT, SEARCH_MAX_PAGES } from '../repositories/searchRepository';
 import { CatalogStatsRepository } from '../repositories/catalogStatsRepository';
+import { SyncStateRepository } from '../repositories/syncStateRepository';
+import { INCREMENTAL_STALE_SECONDS, HERO_STALE_SECONDS } from '../services/sync/dispatch';
 import { toLegacyItems, toLegacyDetail, toLegacyEpisodes } from './legacyItem';
 import { buildHomeData } from './homeData';
 import { clampPage, buildPagination } from './pagination';
@@ -201,6 +203,52 @@ async function handleRecommendation(c: Context<{ Bindings: Env }>) {
 
 apiRoute.get('/api/recommendation/:mediaType/:tmdbId', handleRecommendation);
 apiRoute.get('/api/related/:mediaType/:tmdbId', handleRecommendation);
+
+// GET /api/health/sync (docs/plan-incremental-sync-stall.md Phase 4).
+// Public liveness probe for a free external monitor: 200 while both the
+// incremental sync and the hero snapshot are fresh, 503 once either goes
+// stale (or has never run). Two point reads of sync_state; no cursor,
+// slug, or other internal state in the body. always no-store.
+apiRoute.get('/api/health/sync', async (c) => {
+  const syncState = new SyncStateRepository(c.env.DB);
+  const [recentRaw, heroRaw] = await Promise.all([
+    syncState.get('recent:last_run'),
+    syncState.get('hero:last_success_at'),
+  ]);
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const recordedAtMs = parseRecordedAtMs(recentRaw);
+  const incrementalAgeSeconds = recordedAtMs === null
+    ? null
+    : Math.max(0, nowSeconds - Math.floor(recordedAtMs / 1000));
+  const heroSuccessAt = heroRaw === null ? Number.NaN : Number(heroRaw);
+  const heroAgeSeconds = Number.isFinite(heroSuccessAt)
+    ? Math.max(0, nowSeconds - heroSuccessAt)
+    : null;
+
+  const ok =
+    incrementalAgeSeconds !== null && incrementalAgeSeconds <= INCREMENTAL_STALE_SECONDS
+    && heroAgeSeconds !== null && heroAgeSeconds <= HERO_STALE_SECONDS;
+
+  applyNoStore(c);
+  return c.json({ ok, incrementalAgeSeconds, heroAgeSeconds }, ok ? 200 : 503);
+});
+
+/** epoch ms of the last incremental-sync summary's `recordedAt`, or null
+ * if the key is missing/unparseable. */
+function parseRecordedAtMs(raw: string | null): number | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const recordedAt = parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>).recordedAt
+      : null;
+    const ms = typeof recordedAt === 'string' ? Date.parse(recordedAt) : Number.NaN;
+    return Number.isNaN(ms) ? null : ms;
+  } catch {
+    return null;
+  }
+}
 
 // Never intended for a browser to hit, but keeps /api/* from ever falling
 // through to the notFound handler with cacheable headers if someone
