@@ -80,264 +80,152 @@ implementation rather than after mistakes.
 
 # Project guide
 
+**README.md is the maintained reference** for architecture, API contract,
+schema, Workflows, ops routes, cache layers, and the AI-agent rules
+("🤖 Luật dành cho AI agent"). Read the relevant README section before
+backend work. This file only carries what an agent needs on every task.
+
 ## What this is
 
-`phim.bluesia.net` — a Vietnamese movie-streaming front-end. **Vanilla JS SPA**
-(no framework), built with Vite, deployed entirely to Cloudflare's free
-tier: static assets **plus a Worker** (`worker/index.js`, `main` in
-`wrangler.toml`) that does *all* the catalog work itself — OPhim proxying,
-TMDB enrichment, hero/recommendation ranking, R2 image mirroring — with no
-backend server anywhere else. `hls.js` + `artplayer` handle playback. Images
-are served from **R2** (`img.bluesia.net`), mirrored there by the
-Worker itself — see "Data flow & caching" below.
+`film.bluesia.net`, a Vietnamese movie-streaming site, runs entirely on
+Cloudflare. Per ADR-0002 (`docs/adr/0002-no-vps-ssr-architecture.md`):
 
-**This used to run differently, twice over.** Through 2026-08-01 the Worker
-was a thin KV cache-aside shim in front of a VPS Node service (`catalog-api`,
-at `img.bluesia.net/api/*` — **the same hostname R2 uses today, a different
-thing**; see the callout below) that did all the real work; the VPS also
-mirrored images into R2 and ran Valkey as its own cache. That VPS backend
-(`bluefilm-backend`) was migrated onto the Worker in phases and the VPS
-stack was fully retired 2026-08-01 — see
-[`bluesiaOM/context/state-redflare-cf-worker.md`](../bluesiaOM/context/state-redflare-cf-worker.md)
-for the phase-by-phase history and the gotchas hit along the way (D1's
-100-bound-param cap, a Worker `fetch()`-ing its own Custom Domain always
-returning 522, etc). The retired VPS source is archived, not deleted, at
-`github.com/O365ServeronMS/bluefilm-backend` — it's the reference if the
-enrichment/ranking logic ever needs cross-checking.
+- **Frontend:** a vanilla JS SPA (`src/`, no framework, built by Vite into
+  `dist/`), served as Static Assets with the SPA fallback. Playback uses
+  `hls.js` + `artplayer`.
+- **Backend:** a Hono + TypeScript Worker (`src-ssr/index.ts`). It handles
+  `/api/*`, sitemap/robots, and the `/__sync/*` ops routes.
+- **Storage:** **D1 only** (`redflare-db`). There is no KV and no R2.
+- **Data freshness:** 5 Cloudflare Workflows (`src-ssr/workflows/`) keep the
+  catalog up to date from KKPhim/phimapi and TMDB. User requests only ever
+  read D1.
+- **Images:** hotlinked from `image.tmdb.org` and `phimimg.com`, never
+  mirrored.
 
-Separately, images themselves moved domain later that same day: R2 originally
-served artwork at `redflarer2.bluesia.net`; a 2026-08-04 migration moved it to
-`img.bluesia.net` — the exact hostname the retired VPS used to own, now
-reused for something unrelated (R2 image serving, not a catalog API). Don't
-confuse the two: if you're reading old commit history or archived docs and see
-`img.bluesia.net`, check the date — before 2026-08-04 it means the VPS;
-2026-08-04 onward it means the R2 bucket.
+**History:** the VPS `catalog-api`, `worker/`, KV, R2 mirroring, wsrv.nl and
+`img.bluesia.net` are all retired. Anything in old commits or `docs/plan-*`
+that mentions them is history; don't recreate it.
 
-There are **no tests**, **no TypeScript**, and **no linter/CI**. Plain ES modules
-+ imperative DOM.
+## Commands
 
-## Stack & commands
-
-Node **26** (pinned in `.nvmrc` — Cloudflare's build image reads it too).
+Node **26** (`.nvmrc`).
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Vite dev server on `:3000`. Default loop. `src/api/ophim.js` calls same-origin `/api/*`; `vite.config.js`'s `server.proxy` forwards that straight to the **live production Worker** at `phim.bluesia.net/api/*` (the Worker is the only backend now — there is no local backend to run instead). |
-| `npm run build` | Vite build → `dist/` |
-| `npm run preview` | Vite's own static preview of `dist/` (no SPA fallback, no Worker — but `preview.proxy` forwards `/api/*` to the live production Worker same as `dev`) |
-| `npm start` | `wrangler dev --remote` — runs the **actual Worker** (`worker/index.js`) with **real bindings** (KV/D1/R2/service binding), serving `dist/` through the asset layer. `--remote` is in the npm script on purpose — plain `wrangler dev` uses local simulated bindings that are empty/stale and will not reproduce real cache/D1/R2 behavior (see "Platform gotchas" — `wrangler kv/r2/d1` commands need `--remote` too, for the same reason). Use this to verify `not_found_handling = "single-page-application"` (deep link like `/phim/<slug>` reloads correctly) **and** to test the Worker's own builders (`worker/lib/*`) and Cache API / D1 fallback behavior. Requires `npm run build` first. |
+| `npm run dev` | Vite on `:3000`; `/api/*` is proxied to the **live production Worker**. |
+| `npm run build` | Builds the SPA into `dist/`. |
+| `npm start` | `wrangler dev --remote`: the real Worker with **real remote bindings**. Needs a build first. Other `wrangler kv/d1` commands also need `--remote`. |
+| `npm run worker:typecheck` | Type-checks the Worker. |
+| `npm test` | Runs the full gate (`scripts/rf-test.mjs all`): every `test:*` script, typecheck, build, `wrangler deploy --dry-run`, `git diff --check`. |
+| `npm run db:migrate` | Applies `migrations/*.sql` to **production** D1. Never run by any build step. |
 
-**Deploy = `git push origin main`.** Cloudflare Workers Builds picks it up, runs
-`npm run build`, and publishes `dist/` as static assets. No `wrangler deploy` by
-hand. Confirm before committing/pushing unless told otherwise.
+**Deploy = `git push origin main`** (Cloudflare Workers Builds). Never run
+`wrangler deploy` by hand. Confirm before committing/pushing unless told
+otherwise. `wrangler.toml` pins the custom domain (`routes`,
+`custom_domain = true`) on purpose; don't remove it.
 
-`wrangler.toml` pins the custom domain (`routes` with `custom_domain = true`) on
-purpose — each deploy re-attaches `phim.bluesia.net` so the site doesn't go down
-if the Git integration is disconnected/reconnected. Don't remove it.
+## Automation (`.claude/`, `scripts/`)
 
-## Architecture
+Tuned for low token use: shell scripts do the work, and agents/skills only
+summarize the output.
 
-- **`src/main.js`** — entry point. Mounts global UI (Header, Search), wires the
-  router, defines one async page-render function per route.
-- **`src/router.js`** — History API SPA router. `:param` patterns. A handler may
-  return a cleanup fn (sync or a Promise resolving to one); the router calls it
-  on navigation. Internal `<a href="/...">` clicks are intercepted globally.
-- **`src/api/ophim.js`** — the **only** module that talks to the network. Every
-  fetch goes to `CATALOG_BASE` (= `/api`, same-origin — handled by the Worker);
-  nothing here calls OPhim directly. Also exports `posterUrl`/`thumbUrl`
-  (pass-throughs — image URLs arrive as full R2 URLs already), `upstreamFallback`/
-  `attachImageFallback` (retry the original TMDB/OPhim URL if the R2 mirror
-  hasn't landed yet — see "Images: R2" below), and `normalizeListItem` (smooths
-  over OPhim's two list shapes).
-- **`worker/index.js`** + **`worker/lib/*`** — the Worker. Handles `/api/*`
-  end to end: fetches OPhim + TMDB directly, runs enrichment/ranking
-  (`worker/lib/enrich.js`, ported from the retired `catalog-api`), maintains
-  the reverse index + recommendation cache in D1 (`worker/lib/recommendation.js`),
-  maps/mirrors artwork into R2 (`worker/lib/images.js` for URL mapping,
-  `worker/lib/mirror.js` for the mirror-queue drain). `/api/home-data` is
-  pre-built by an hourly cron (`worker/lib/home.js`) rather than built
-  per-request — see "Data flow & caching". Anything that isn't `/api/*` and
-  isn't a literal file in `dist/` falls through to
-  `env.ASSETS.fetch(request)`, which applies `not_found_handling` below (SPA
-  fallback).
-- **`src/modules/<Name>/<Name>.js`** — UI modules, each exporting
-  `renderX(container, ...)` that builds DOM imperatively and appends it. No
-  virtual DOM, no templating lib. Naming rules + migration status live in
-  [`MODULES.md`](MODULES.md) — read it before adding or renaming a module.
-  Caveat: its "Axis C — Service modules" table still describes `catalog-api`
-  on the VPS (Valkey cache namespaces, `sign.js`), i.e. the pre-2026-08-01
-  world. The naming convention in that doc is current; its backend map is not.
-- **`src/components/MovieDetail.js`** — the last legacy resident; it is
-  page-level, so it moves to `pages/DetailPage.js` in the planned `pages/` step,
-  not into `modules/`.
-- **`src/lib/`** — shared helpers, no DOM ownership of their own: `image.js`
-  and `lazyMount.js` (see "Lazy loading" below) plus `mediaSession.js`
-  (Media Session API metadata, called from `Player.js` — puts **tên phim +
-  tập và ảnh poster lên màn hình khoá iPhone**: `title` = `"<tên phim> -
-  <tập>"`, `artist` = `Film Bluesia`, `artwork` = the w500 poster. Without
-  it iOS falls back to `document.title` + favicon. Keep the title short —
-  it's the only line iOS reliably shows).
-- **`migrations/`** — the D1 schema: `0001_stale.sql`, `0002_recs_idx_mirror.sql`,
-  `0003_popularity.sql`. Source of truth for the 6 tables described under
-  "Caching layers" #4. Not applied automatically by any build step —
-  `wrangler d1 migrations apply redflare-db --remote` by hand.
-- **`src/styles/`** — `variables.css` (CSS custom props), `global.css`,
-  `components.css` (the bulk, still monolithic). Class naming is BEM-ish:
-  `block__element--modifier`.
-- **`docs/DESIGN.md` + `docs/tokens.json` + `docs/theme.css`** — the
-  Netflix-style design reference the tokens in `variables.css` derive from.
-  Reference only, not built or imported.
-- **`catalog-api`** (retired 2026-08-01) — used to be a separate Node service
-  on the VPS doing everything `worker/lib/*` does now (OPhim proxying, hero
-  ranking, TMDB enrichment, R2 mirroring, Valkey cache), served at
-  `img.bluesia.net/api/*` (VPS-era meaning of that hostname — see the callout
-  in "What this is"; today `img.bluesia.net` is the R2 image host and has no
-  `/api/*` route at all). Fully ported to the Worker across Phases 3–6 of
-  the migration and shut down; source archived at
-  `github.com/O365ServeronMS/bluefilm-backend` for reference, not imported by
-  this repo. The original `worker.js`/`trending.js` in *this* repo were
-  deleted when that logic first moved to the VPS (commit `81e498a`) — the
-  current `worker/index.js` + `worker/lib/*` is a from-scratch reimplementation
-  written for the Worker runtime, not a revert of that old code.
+| Name | Model | Purpose |
+|---|---|---|
+| agent `rf-ops` | haiku | Read-only production probe (`scripts/rf-status.sh`) |
+| agent `rf-test` | haiku | Test gate (`scripts/rf-test.mjs changed\|all`); reports failures only |
+| `/rf-deploy [redeploy] [-y]` | sonnet/low | Runs the gate, pushes to main, waits for the build, smoke-tests (`scripts/rf-wait-deploy.sh`) |
+| `/rf-kick <target>` | haiku | `purge`, `hero`, or a Workflow trigger (`scripts/rf-kick.sh`, which needs `--force` for sync jobs) |
 
-## Data flow & caching (important) — corrected 2026-08-14
+The scripts read `CRON_KEY` from the environment or from
+`~/.config/redflare/cron_key`.
 
-**Everything above this point through "Architecture" describes the retired
-`worker/index.js` + `worker/lib/*` design (KV, R2 image mirroring, wsrv.nl,
-the Cache API).** None of that exists in this checkout. ADR-0002
-(`docs/adr/0002-no-vps-ssr-architecture.md`) replaced it: the backend is now
-`src-ssr/` (Hono + TypeScript), storage is **D1 only** (no KV, no R2), and
-images are hotlinked from TMDB/phimimg rather than mirrored. That ADR itself
-says it "supersedes the SPA + JSON-API topology described in CLAUDE.md" —
-the rest of this file was never updated to match. Treat any `worker/`,
-KV-key, or R2/wsrv.nl reference above as historical, not current. **README.md
-is the maintained, accurate reference for the current architecture, API
-contract, ops routes, and cache layers** — read it, not the sections above,
-for anything backend-related. This section replaces just the caching part.
+**Free-plan D1 budget:** 5M rows read/day. Once that's exceeded, D1 rejects
+every query until 00:00 UTC. Before triggering sync jobs or adding queries,
+see `docs/plan-incremental-sync-stall.md`. D1 also caps each query at 100
+bound parameters.
 
-### Caching layers, current
+## Caching
 
-One layer for `/api/*`, `/sitemap*.xml`, and `/robots.txt`: **Workers
-Caching**, enabled via `[cache] enabled = true` in `wrangler.toml` — this is
-a cache *owned by the Worker itself*, not the zone's CDN cache. Policy is
-set once in `src-ssr/cache/control.ts` (`applyPageCache`):
+Only one layer applies: **Workers Caching** (`[cache] enabled = true`), a
+cache owned by the Worker, not the zone CDN. The policy lives in
+`src-ssr/cache/control.ts`:
 `public, max-age=60, stale-while-revalidate=86400, stale-if-error=604800`.
-No `s-maxage` — deliberately: it implies `proxy-revalidate`, which disables
-`stale-while-revalidate`/`stale-if-error` on the same response (this project
-hit that bug once already, see the ADR and `docs/state-hit-rate.md`).
 
-**Invalidation is deploy-time, not tag-based.** `cross_version_cache` is
-left at its default (`false`), so the Worker version is part of the cache
-key — every `git push origin main` starts every cached path from empty
-automatically, at no cost. There is no per-title `Cache-Tag` purging: it was
-built, then removed 2026-08-14 after finding the resolve pipeline could
-issue up to ~300 purge calls in one tick, several times over the Free
-plan's 5-requests/minute purge rate limit — and because `cache.purge()`
-resolves `{success: false}` on rejection rather than throwing, those
-rejected purges were silently being counted as done. A changed title now
-just rides out `max-age=60` like everything else.
+- **No `s-maxage`.** It implies `proxy-revalidate`, which disables SWR/SIE.
+- **Invalidation happens at deploy time.** The Worker version is part of the
+  cache key (`cross_version_cache = false`). The reasons are in
+  `wrangler.toml`.
+- **To purge now,** use `GET /__sync/purge-cache` (or `/rf-kick purge`). The
+  dashboard's "Purge Everything" does **not** affect Workers Caching.
+- **Never cached:** `/api/search` (`applyNoStore`, because Turnstile tokens are
+  single-use) and `/__sync/*`.
 
-**`GET /__sync/purge-cache`** (`x-cron-key` header, see `routes/sync.ts`)
-purges everything immediately, for when you don't want to wait for a
-deploy. **The Cloudflare dashboard's zone-level "Purge Everything" does
-NOT work for this** — Workers Caching is the Worker's own cache, and "no
-zone-level purge (via the dashboard, API, or Terraform) affects Workers
-Caching content" (Cloudflare docs, `/workers/cache/purge/`). That dashboard
-button only ever worked back when this project cached via `caches.default`
-(pre-ADR-0002); don't reach for it now, use the route above.
+## Frontend architecture
 
-**If `cross_version_cache` ever needs to change** (e.g. to keep a warm
-cache across deploys instead of relying on deploy-time invalidation): it
-was evaluated and rejected in this same change — full reasoning is in the
-`[cache]` block comment in `wrangler.toml`. Re-enabling it means adding
-back a `version_metadata` binding and a way to purge one version's entries
-on rollback (both were built and then removed alongside the tag machinery;
-git history around 2026-08-14 has a working reference implementation if
-this is ever revisited).
+- `src/main.js` is the entry point: it mounts the global UI and has one
+  render function per route. `src/router.js` is a History API router; a
+  handler may return a cleanup function (sync or Promise), which runs on
+  navigation.
+- `src/api/ophim.js` is the **only** network module, and it calls same-origin
+  `/api`. Route list data through `normalizeListItem` before it reaches UI
+  components.
+- `src/modules/<Name>/<Name>.js` modules export `renderX(container, …)` and
+  build DOM imperatively. Read [`MODULES.md`](MODULES.md) before adding or
+  renaming one; its backend map is outdated. `src/components/MovieDetail.js`
+  is legacy and page-level.
+- `src/lib/`:
+  - `image.js` — image policy
+  - `lazyMount.js`
+  - `mediaSession.js` — iOS lock-screen `title` = `"<tên phim> - <tập>"`,
+    `artist` = `Film Bluesia`, w500 poster; keep the title short
+  - `movieTitle.js`
+- CSS lives in `src/styles/` (`variables.css`, `global.css`, `components.css`)
+  and uses BEM-ish class names. `docs/DESIGN.md` and the tokens are reference
+  only.
 
-`/api/search` is the one uncacheable endpoint (`applyNoStore` — every
-Turnstile token is single-use) and `/__sync/*` ops routes are always
-`private, no-store`.
+## Lazy loading
 
-See README.md's "🛡️ Bảo mật và cache" section for the full cache-layer
-table (including static asset / logo Cache-Control policy from
-`public/_headers`, which this section doesn't repeat) and "🛠️ Vận hành"
-for the full ops-route list.
-
-## Lazy loading (images + below-fold sections)
-
-Two shared helpers make this consistent app-wide — route every new image and
-every new below-fold section through them rather than setting `loading`/
-`decoding`/`IntersectionObserver` ad hoc per module.
-
-- **`src/lib/image.js`** — `applyImagePolicy(img, { priority })`. Every
-  `<img>` in the app goes through this: `lazy` + `decoding="async"` by
-  default, `eager` + `fetchPriority="high"` only when `priority: true` (the
-  image is the page's LCP candidate — above the fold on first paint).
-  - `PosterCard.js` takes a `priority` param; `Carousel.js` takes a
-    `priorityCount` (marks the first N cards); `Grid.js` marks its first 6
-    cards priority (covers the widest desktop row). Home's first carousel
-    ("Phim Mới Cập Nhật") gets `priorityCount: 3`; the detail page's
-    `.detail__thumb` is always `priority: true` (it *is* the LCP element on
-    `/phim/:slug`). Everything else — rail thumbs past index 0, search
-    overlay results, recommendation cards — stays default (lazy).
-  - **HeroSlider is the one exception, not `<img>`-based.** Its 20 backdrops
-    are CSS `background-image`, so they can't use `loading="lazy"` at all —
-    instead `ensureBackdrop()` only ever loads the active slide + one
-    idle-prefetched neighbor; `goToSlide()` loads the new active + its next
-    neighbor on demand as the user rotates through. Don't revert this to
-    "set backdrop for all slides on mount" — that was firing ~20 full-size
-    image requests on every home page load.
-  - The hero's first backdrop is also the page's actual LCP element, so
-    `renderHomePage` (`src/main.js`) additionally injects a dynamic
-    `<link rel="preload" as="image" fetchpriority="high">` for it as soon as
-    `/api/home-data` resolves (its URL isn't known until then, so it can't be
-    a static tag in `index.html`).
-- **`src/lib/lazyMount.js`** — `mountWhenVisible(placeholder, renderFn)`.
-  IntersectionObserver-backed, self-disconnecting, `rootMargin: 600px`. Used
-  for sections that are reliably below the fold, to defer both DOM
-  construction and (where relevant) the network request that section makes:
-  home's 3rd/4th carousel rows (Phim Lẻ, Phim Bộ), and the detail page's
-  Recommendation block (`Recommendation.js`'s `/api/recommendation/*` fetch
-  previously fired unconditionally on every detail-page load regardless of
-  scroll position — now it only fires once the block nears the viewport).
-  Returns a disconnect fn — always wire it into the page handler's cleanup
-  (see `renderHomePage`'s returned cleanup, `renderDetailPage` awaiting
-  `renderMovieDetail`'s returned cleanup) so navigating away before the
-  section ever became visible doesn't leave an observer watching a detached
-  node.
-- Don't lazy-mount cheap, no-network sections (e.g. `Footer`) — the
-  IntersectionObserver/cleanup bookkeeping isn't worth it for a section with
-  no image/network payload.
-- `index.html`'s `<link rel="preconnect">` must point at the actual image
-  origin, `https://img.bluesia.net` — get this wrong (e.g. pointing at a
-  retired host) and it silently does nothing useful, no error either way.
+- **Every `<img>` goes through `applyImagePolicy(img, { priority })`**
+  (`src/lib/image.js`). The default is `lazy` + `decoding="async"`;
+  `priority` means `eager` + `fetchPriority="high"`, for LCP candidates only:
+  - `PosterCard(priority)`
+  - `Carousel` `priorityCount` (Home's first rail = 3)
+  - `Grid`: the first 6 cards
+  - `.detail__thumb`: always priority
+- **HeroSlider uses CSS backgrounds.** `ensureBackdrop()` loads only the
+  active slide plus one neighbour; don't revert to loading all 20.
+  `renderHomePage` injects a `<link rel="preload">` for the first backdrop.
+- **Below-fold sections with a network or image cost go through
+  `mountWhenVisible`** (`src/lib/lazyMount.js`, `rootMargin: 600px`). This
+  covers Home rails 3–4 and Recommendation. Always wire the returned
+  disconnect into the page cleanup. Don't lazy-mount cheap sections like
+  Footer.
+- **`index.html` preconnects to the real image origins**
+  (`image.tmdb.org`, `phimimg.com`).
 
 ## Conventions & gotchas
-- **Responsive TMDB portrait images (mandatory).** Use the shared
-  `src/lib/image.js` `<picture>` policy; do not hand-roll `srcset` or
-  viewport checks in components.
-  - At `max-width: 768px`: Hero rail = `w154`; PosterCard = `w185`.
-  - At `min-width: 769px`: Hero rail = `w185`; PosterCard = `w500`.
-  - Apply variants only to `image.tmdb.org/t/p/w154|w185|w500` poster URLs.
-    KKPhim/phimimg URLs and the existing `w500` mobile backdrop / `w1280`
-    desktop backdrop contracts pass through unchanged.
-  - This is browser-only presentation policy: keep D1/API/sync canonical
-    URLs unchanged and never run a backfill for a display-size change.
-  - If a desktop `<source>` fails, remove it before assigning the image fallback.
 
-- **CSS specificity + media-query source order bites here.** Media queries add
-  *zero* specificity, so an override declared earlier loses to an equal-specificity
-  rule declared later inside a `@media` block. When a responsive rule must win,
-  raise its specificity (e.g. compound `.hero--detail.hero--has-thumb`) rather
-  than relying on order.
-- **Layout via flow, not stacked absolute anchors.** Independently
-  absolute-positioning two elements (one to `top`, one to `bottom`) overlaps on
-  short/landscape viewports. Prefer a flex flow so siblings can't collide.
-- **Negative margins are load-bearing.** e.g. `.detail__episodes { margin-top }`
-  tucks sections into hero dead-space. Changing hero spacing can break them —
-  scope a reset with a marker class (`.detail--has-thumb`) instead of retuning
-  magic numbers.
-- UI copy is **Vietnamese**. Match it.
-- OPhim list payloads come in two shapes — always route new list data through
-  `normalizeListItem` before handing it to UI components.
+- **Responsive TMDB portrait images (mandatory).** Use the `<picture>` policy
+  in `src/lib/image.js`; no hand-rolled `srcset` or viewport checks.
+  - `max-width: 768px`: Hero rail `w154`, PosterCard `w185`.
+  - `min-width: 769px`: Hero rail `w185`, PosterCard `w500`.
+  - Only `image.tmdb.org/t/p/w154|w185|w500` poster URLs get variants.
+    phimimg URLs and the backdrop contracts (w500 mobile / w1280 desktop)
+    pass through unchanged.
+  - This is browser-only policy: never change D1/API canonical URLs, and
+    never backfill for a display-size change.
+  - If a desktop `<source>` fails, remove it before assigning the fallback.
+- **KKPhim `modified.time` is +07 but labelled `Z`.** Compare it by
+  equality, never by ordering.
+- **Media queries add zero specificity.** To make a responsive override
+  win, raise its specificity (e.g. `.hero--detail.hero--has-thumb`); don't
+  rely on source order.
+- **Lay out via flex flow, not stacked absolute `top`/`bottom` anchors.**
+  Anchored elements collide on short or landscape viewports.
+- **Negative margins are load-bearing** (e.g. `.detail__episodes`). Scope
+  resets with a marker class (`.detail--has-thumb`) instead of retuning
+  them.
+- **UI copy is Vietnamese.**
+- **Design invariants and "don't break" rules** (no framework, no hash
+  routing, no `public/_redirects`, pagination, overlays, and so on) are
+  listed in README → "🤖 Luật dành cho AI agent".

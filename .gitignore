@@ -15,6 +15,9 @@ worker-configuration.d.ts
 CLAUDE.local.md
 agents.md
 AGENTS.md
-.claude/
+.claude/*
+# ...except the shared automation (see CLAUDE.md "Automation")
+!.claude/agents/
+!.claude/skills/
 **/memory/
 state.md

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test": "node scripts/rf-test.mjs all",
     "preview": "vite preview",
     "start": "wrangler dev --remote",
     "cf-typegen": "wrangler types --strict-vars=false",
