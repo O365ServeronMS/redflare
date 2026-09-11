@@ -306,3 +306,36 @@ npm test
 - Việc còn lại thuộc Phase 6 (deploy + apply migration + catch-up + chạy
   thử tay + bật job + theo dõi 24h) — toàn bộ cần chủ dự án duyệt từng
   bước theo đúng plan, dừng lại ở đây để báo cáo.
+
+---
+
+## Phase 6 — Deploy & bật lại
+
+Chủ dự án duyệt bắt đầu Phase 6 lúc 2026-09-12.
+
+**Đo trước (baseline, `wrangler d1 insights --timePeriod=1d --sort-by=reads
+--limit=15`)**, trước khi push: tổng ~881k rows read / ~46,5k rows written
+trong 24h qua (top ~50 query distinct). Hai query đọc nhiều nhất (459.502 và
+188.842 rows) là các `COUNT(*)` chẩn đoán thủ công từ lúc soạn phần "Bối
+cảnh & số liệu đo" của plan này (2026-09-11) — không phải traffic runtime,
+không lặp lại. Baseline này xác nhận hệ thống hiện đang xa trần 5M/ngày khi
+2 job recommendation còn tắt.
+
+### 6.1 — Push code Phase 1-5 (job vẫn tắt)
+
+- Chủ dự án duyệt qua `AskUserQuestion` ("Push and deploy") trước khi chạy
+  `git push`.
+- `git fetch origin` + `git merge-base --is-ancestor origin/main HEAD` →
+  sạch, HEAD là fast-forward của `origin/main` đúng 5 commit Phase 1-5.
+  `git status --porcelain` rỗng.
+  `node scripts/rf-test.mjs all` chạy lại ngay trước push → `OK: 18/18`.
+- `PREV=$(bash scripts/rf-wait-deploy.sh --latest)` → `e4535a96-...`.
+- `git push origin HEAD:main` → `04547d1..4b45548`.
+- `bash scripts/rf-wait-deploy.sh "$PREV"` → deployment mới
+  `ff4ff5f4-64b6-4722-a131-ea699cbc32aa` sau ~20s. Smoke:
+  `200 /`, `200 /api/home-data`, `200 /phim/rf-smoke`, `200 /sitemap.xml`,
+  `200 /robots.txt` → **SMOKE PASS**.
+
+`RECOMMENDATION_JOBS_ENABLED` vẫn `"false"` sau deploy này — job chưa chạy.
+
+**Tiếp theo:** 6.2 (apply migration `0018`), chờ duyệt bước kế.
