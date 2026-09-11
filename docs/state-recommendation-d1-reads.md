@@ -338,4 +338,115 @@ không lặp lại. Baseline này xác nhận hệ thống hiện đang xa trầ
 
 `RECOMMENDATION_JOBS_ENABLED` vẫn `"false"` sau deploy này — job chưa chạy.
 
-**Tiếp theo:** 6.2 (apply migration `0018`), chờ duyệt bước kế.
+### 6.2 — Apply migration 0018
+
+- Chủ dự án duyệt qua `AskUserQuestion` ("Apply now").
+- `npx wrangler d1 migrations list redflare-db --remote` → chỉ `0018` pending
+  (đúng kỳ vọng, không có migration nào bị bỏ sót từ trước).
+- `npx wrangler d1 migrations apply redflare-db --remote` → ✅.
+- Xác nhận số dòng seed (đọc trực tiếp, không phải `COUNT(*)` trên bảng
+  `recommendation` lớn — bảng `recommendation_freshness` nhỏ, Luật chung #3
+  không áp dụng ở đây):
+  ```
+  SELECT result, COUNT(*) AS n FROM recommendation_freshness GROUP BY result
+  → retryable_error 20, seeded 6.940, success 6.215, valid_empty 33
+  ```
+  6.940 dòng `seeded` khớp ước tính plan (6.931, lệch nhẹ vì catalog đã đổi
+  chút từ lúc đo 2026-09-11). Tổng `recommendation_freshness` giờ 13.208
+  dòng — khớp cỡ "~14k rows written" dự tính (mỗi dòng seed ghi cả index).
+  `rows_read` của câu group-by này: 26.416 (một lần, chấp nhận).
+- **EXPLAIN QUERY PLAN lại trên production** cho cả 2 query của
+  `getDueSources` (2.3), sau khi đã có dữ liệu seed — vẫn đúng kỳ vọng,
+  không đổi so với lúc chưa seed:
+  ```
+  Query A: SEARCH f USING INDEX idx_recommendation_freshness_success (last_success_at=?)
+           SEARCH m USING INDEX sqlite_autoindex_movie_1 (slug=?)
+  Query B: SEARCH f USING COVERING INDEX idx_recommendation_freshness_success (last_success_at<?)
+           SEARCH m USING INDEX sqlite_autoindex_movie_1 (slug=?)
+  ```
+
+### 6.3 — Catch-up một lần (plan §1.4)
+
+- Chủ dự án duyệt qua `AskUserQuestion` ("Run now").
+- Chạy đúng SQL trong plan §1.4:
+  ```
+  UPDATE recommendation SET resolve_attempted = 0
+  WHERE target_slug IS NULL AND resolve_attempted = 1
+    AND EXISTS (SELECT 1 FROM movie m WHERE m.tmdb_type = recommendation.target_type
+                AND m.tmdb_id = recommendation.target_tmdb_id);
+  ```
+  Kết quả thật: `changes: 19`, `rows_read: 77.598`, `rows_written: 38`.
+  Cao hơn ước tính gốc của plan (4 dòng / ~78k đọc / ~12 ghi, đo
+  2026-09-11) vì catalog đã sync thêm từ lúc đó tới giờ — số rows_read khớp
+  gần đúng dự đoán (77.598 ≈ 78k), số dòng ảnh hưởng lớn hơn là bình
+  thường (backlog tích luỹ thêm ~2 ngày). Không lặp lại (one-time, không
+  đưa vào migration, đúng plan).
+
+### 6.4 — Chạy thử mỗi job một lần bằng tay
+
+Chủ dự án duyệt qua `AskUserQuestion` ("Run both now"). Kích trực tiếp qua
+`wrangler workflows trigger` (không cần `CRON_KEY` — route HTTP
+`scripts/rf-kick.sh` cần key mà môi trường phiên này không có sẵn, nhưng
+`wrangler workflows trigger <name>` xác thực qua tài khoản Cloudflare, kết
+quả tương đương).
+
+**`recommendation-resolve` (instance `67b91168-...`):**
+- `count-stubs`: `1000` (đúng `MAX_STUBS`, đầy — như dự đoán).
+- `requeue-overflow`: `{"candidates":0,"requeued":0}` → **0 rows read**
+  (đúng tiêu chí #1 — guard `maxStubs <= stubCount` chặn trước khi đọc D1).
+- `fetch-unresolved-groups`: trả 300 group (chạm `RESOLVE_BATCH_SIZE`, tất
+  cả `hasLocalTarget:true` — chính là 19 group vừa được catch-up 6.3 mở lại
+  cộng với backlog `pending` cũ).
+- 38 batch step, tổng: **300 resolved_existing, 0 stub, 0 overflow, 0
+  retryable**, `callsUsed` giữ nguyên `0` suốt (toàn bộ resolve local,
+  không phát sinh subrequest), `stopped` không bao giờ `true` → đúng tiêu
+  chí #4 (không group nào retryable do hết subrequest — ở đây còn dư
+  nguyên ngân sách vì đợt này 100% local).
+- Toàn instance chạy 7 giây.
+
+**`recommendation-refresh` (instance `4cdeb316-...`):**
+- `fetch-due-sources`: trả đúng 20 nguồn.
+- Batch đầu tiên: **cả 20/20 nguồn ra `retryable`** (TMDB request thất
+  bại). Kiểm tra ngay: `recommendation_freshness` của các slug này có
+  `result='retryable_error'`, `last_success_at` giữ nguyên/`NULL` — đúng
+  hành vi thiết kế (không mất state, không ghi sai).
+- **Chẩn đoán:** trigger `hero-snapshot` trực tiếp ngay sau đó (dùng chung
+  `TMDB_API_TOKEN`, endpoint `/trending`) → thành công, viết snapshot mới
+  bình thường → xác nhận token/TMDB **không** hỏng nói chung. Trigger lại
+  `recommendation-refresh` lần 2 (20 nguồn *khác*, do 20 nguồn cũ đang
+  trong backoff 30 phút) → **20/20 thành công** (`ok:20, retry:0`).
+  → Kết luận: lần đầu là một **sự cố TMDB thoáng qua** (rất có thể là một
+  đợt lỗi/giới hạn ngắn hạn từ phía TMDB đúng lúc trigger, không phải bug
+  code) — và quan trọng hơn, **hệ thống retry-safe hoạt động đúng như
+  thiết kế Phase 2/4**: lần thất bại không làm hỏng state, không ghi đè
+  sai, tick sau tự phục hồi hoàn toàn không cần can thiệp tay.
+- Cả 2 instance chạy nhanh (7s / 10s) — không có dấu hiệu quét lớn.
+
+**D1 insights cho 2 câu query mới (giới hạn của lần đo này):**
+`wrangler d1 insights` (được ghi nhận là "experimental") **chưa** kịp lên
+số liệu `rows_read` thật cho `getUnresolvedGroupedByTarget` và 2 câu
+`getDueSources` dù đã đợi vài phút sau khi chạy — chỉ thấy lại đúng các
+dòng `EXPLAIN QUERY PLAN` đã chạy ở Phase 1-2 (0 rows, đúng vì EXPLAIN
+không đọc dữ liệu thật). Đây là độ trễ ingestion đã biết của API
+`d1_analytics` (thường vài phút tới vài chục phút), không phải dấu hiệu
+lỗi. Bằng chứng gián tiếp nhưng vững: cả 2 EXPLAIN QUERY PLAN đã xác nhận
+`SEARCH ... USING INDEX` (không `SCAN`, không `TEMP B-TREE`) trên đúng SQL
+literal đang chạy trong code, và cả 2 Workflow instance hoàn tất rất nhanh
+(7s/10s cho hàng trăm thao tác D1) — không có dấu hiệu quét lớn kiểu
+94k-rows-mỗi-lần như trước Phase 1-2. Số liệu chính xác tiêu chí #2/#3 của
+bước 6.4 (`<10k` / `<1k` rows/lần) **chưa xác nhận được bằng số đo trực
+tiếp** trong phiên này — nếu chủ dự án muốn số thật trước khi bật job,
+cần chạy lại `wrangler d1 insights` sau khi dữ liệu kịp lên (khuyến nghị
+đợi thêm rồi kiểm tra lại trước bước 6.5, hoặc chấp nhận bằng chứng gián
+tiếp ở trên).
+
+**Tiêu chí bước 6.4 theo plan — kết quả:**
+| Tiêu chí | Kết quả |
+|---|---|
+| requeue step 0 rows read | ✅ xác nhận trực tiếp |
+| `getUnresolvedGroupedByTarget` < 10k rows/lần | ⚠️ chưa có số đo trực tiếp (analytics lag); EXPLAIN + tốc độ chạy gián tiếp ủng hộ |
+| `getDueSources` tổng < 1k rows/lần | ⚠️ chưa có số đo trực tiếp (analytics lag); EXPLAIN + tốc độ chạy gián tiếp ủng hộ |
+| resolve instance không retryable do hết subrequest | ✅ xác nhận (0 retryable, `callsUsed` không vượt ngân sách) |
+
+**Tiếp theo:** 6.5 (bật `RECOMMENDATION_JOBS_ENABLED = "true"`) — dừng lại,
+báo cáo chủ dự án, chờ quyết định (xem tin nhắn cuối phiên).
