@@ -241,6 +241,15 @@ chưa từng chạy → 503 + age `null`. `test:hero-home-data` (đang hit
   hơn 30 trang (tick đầu ra `page_limit`) → đặt tạm `RECENT_PAGE_CAP = "40"`
   trên dashboard.
 - **Phase 5.3:** giữ recommendation tắt tới khi có plan tối ưu Q3/Q6.
+- **Deploy:** `git push origin 4516ca1:main` (`bcd5d15..4516ca1`) lúc
+  ~07:56 UTC 2026-09-11. Build mới `d5c43a42` lên sau ~20s. Smoke test
+  (`/`, `/api/home-data`, `/phim/rf-smoke`, `/sitemap.xml`, `/robots.txt`)
+  đều 200. `GET /api/health/sync` → `503 {"ok":false,
+  "incrementalAgeSeconds":374294,"heroAgeSeconds":374324}`, `cache-control:
+  private, no-store` — đúng như kỳ vọng vì job dừng từ 2026-09-07, cron
+  `*/30 * * * *` mới vừa đăng ký nên chưa tới tick đầu. **Cần theo dõi tick
+  đầu** (trong vòng 30 phút): kỳ vọng `/__sync/status` báo `stopReason:
+  'known_page'`, `pagesScanned` ≥ 8; sau đó `/api/health/sync` chuyển 200.
 - **Phase 6:** cập nhật `README.md` (cron dispatcher, `/api/health/sync`,
   `RECENT_PAGE_CAP`, `RECOMMENDATION_JOBS_ENABLED`, bảng ngân sách Free,
   quy trình khi sync ngừng, ghi chú F3); sửa comment `wrangler.toml` còn
