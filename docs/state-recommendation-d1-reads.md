@@ -223,3 +223,42 @@ fetch**, chứ không chỉ là "không được tính".
 
 Không có SQL mới ở phase này nên không có EXPLAIN QUERY PLAN để chạy (Luật
 chung #2 chỉ áp dụng khi có query mới/sửa).
+
+---
+
+### Phase 4 — Refresh: không ghi lại khi danh sách không đổi
+
+Code xong 2026-09-12. Không có migration/deploy ở phase này.
+
+- `recommendationRepository.ts` `replaceTargetsPreservingResolvedForSlug`:
+  SELECT `current` thêm cột `sort_order` + `ORDER BY sort_order` (đã có
+  index `idx_rec_lookup(slug, sort_order)` — không thêm chi phí đọc). Nếu
+  `current.length === edges.length` và từng cặp
+  `(target_tmdb_id, target_type, sort_order)` khớp theo thứ tự (edges luôn
+  đã sắp theo `sortOrder` từ nơi gọi) → `return false`, **không** chạm D1
+  ghi (bỏ qua cả DELETE lẫn INSERT, kể cả khi `edges.length === 0` khớp
+  bảng rỗng). Đổi chữ ký `Promise<void>` → `Promise<boolean>` (`true` =
+  đã ghi); caller (`refreshOneSource`) vẫn bỏ qua giá trị trả về, không cần
+  sửa.
+
+**EXPLAIN QUERY PLAN trên production (Luật chung #2)** cho SELECT `current`
+đã sửa (thêm cột + `ORDER BY`), không tốn rows read:
+```
+SEARCH recommendation USING INDEX idx_rec_lookup (slug=?)
+```
+Không `SCAN`, không `TEMP B-TREE` — `ORDER BY sort_order` được phục vụ trực
+tiếp bởi thứ tự index, không cần sắp lại.
+
+**Test (`tests/recommendationRefresh.test.mjs`):**
+- `replaceTargetsPreservingResolvedForSlug: an identical rank list is not
+  rewritten`: gọi lại với đúng edge đã có trong `setup()` (`target 42,
+  sort_order 0`) → `wrote === false`, `rowid` **không đổi**, `target_slug`
+  vẫn `'existing-target'` (chứng minh không có DELETE+INSERT chạy).
+- `...a reordered or expanded list is still rewritten`: đổi thứ tự + thêm
+  một target mới → `wrote === true`, thứ tự mới đúng, và `rowid` của target
+  cũ (42) **đổi** — bằng chứng lần này đúng là đi qua nhánh DELETE+INSERT,
+  không phải nhánh no-op bị lọt qua do so sai.
+
+**Verify (Luật chung #1) — tất cả xanh:**
+`worker:typecheck` ok · `test:recommendation-refresh` 9 (7 cũ + 2 mới) ·
+`test:recommendation-safety` 17 (không đụng, chỉ sanity check).

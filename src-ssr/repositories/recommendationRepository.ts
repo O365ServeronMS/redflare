@@ -46,12 +46,36 @@ export class RecommendationRepository {
   }
 
   /** Source-only refresh preserves slugs TMDB still returns, so rank refresh
-   * does not temporarily turn an already-rendering rail into pending edges. */
-  async replaceTargetsPreservingResolvedForSlug(slug: string, edges: readonly RecommendationEdge[]): Promise<void> {
+   * does not temporarily turn an already-rendering rail into pending edges.
+   * Returns whether it actually wrote anything -- Phase 4
+   * (docs/plan-recommendation-d1-reads.md): refreshOneSource used to
+   * DELETE+INSERT the full edge set (~15 edges, ~75 rows written counting
+   * indexes) every tick even when TMDB returned the exact same ranked list,
+   * ~36k writes/day at the current 20-sources/hour cadence against the
+   * Free 100k/day write cap. `ORDER BY sort_order` (idx_rec_lookup already
+   * covers it) makes the index-wise comparison below valid without an
+   * extra sort -- `edges` is always already in ascending sort_order from
+   * its caller. */
+  async replaceTargetsPreservingResolvedForSlug(slug: string, edges: readonly RecommendationEdge[]): Promise<boolean> {
     const current = await this.db.prepare(
-      'SELECT target_tmdb_id, target_type, target_slug FROM recommendation WHERE slug = ?'
-    ).bind(slug).all<{ target_tmdb_id: number; target_type: string; target_slug: string | null }>();
-    const resolved = new Map((current.results ?? []).map((row) => [
+      'SELECT target_tmdb_id, target_type, target_slug, sort_order FROM recommendation WHERE slug = ? ORDER BY sort_order'
+    ).bind(slug).all<{ target_tmdb_id: number; target_type: string; target_slug: string | null; sort_order: number }>();
+    const currentRows = current.results ?? [];
+
+    if (
+      currentRows.length === edges.length
+      && edges.every((edge, i) => {
+        const row = currentRows[i];
+        return row !== undefined
+          && row.target_tmdb_id === edge.targetTmdbId
+          && row.target_type === edge.targetType
+          && row.sort_order === edge.sortOrder;
+      })
+    ) {
+      return false;
+    }
+
+    const resolved = new Map(currentRows.map((row) => [
       `${row.target_type}:${row.target_tmdb_id}`, row.target_slug,
     ]));
     if (edges.length > 0) {
@@ -78,6 +102,7 @@ export class RecommendationRepository {
       }
     }
     await this.db.batch(statements);
+    return true;
   }
 
   /** Reads last-good target refs when a TMDB recommendation request fails. */

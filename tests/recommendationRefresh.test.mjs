@@ -5,6 +5,7 @@ import { Miniflare } from 'miniflare';
 
 import { runRecommendationRefreshTick } from '../src-ssr/services/sync/recommendationRefresh.ts';
 import { RecommendationFreshnessRepository } from '../src-ssr/repositories/recommendationFreshnessRepository.ts';
+import { RecommendationRepository } from '../src-ssr/repositories/recommendationRepository.ts';
 
 const originalFetch = globalThis.fetch;
 const instances = [];
@@ -153,4 +154,38 @@ test('getDueSources: a stub-tier or tmdb-less movie is excluded even with an exp
   ]);
 
   assert.deepEqual(await new RecommendationFreshnessRepository(db).getDueSources(500, 100, 10), []);
+});
+
+test('replaceTargetsPreservingResolvedForSlug: an identical rank list is not rewritten', async () => {
+  const { db } = await setup();
+  const repo = new RecommendationRepository(db);
+  const before = await db.prepare('SELECT rowid FROM recommendation WHERE slug = ?').bind('source').first();
+
+  const wrote = await repo.replaceTargetsPreservingResolvedForSlug('source', [
+    { targetTmdbId: 42, targetType: 'movie', sortOrder: 0 },
+  ]);
+
+  assert.equal(wrote, false);
+  const after = await db.prepare('SELECT rowid, target_slug FROM recommendation WHERE slug = ?').bind('source').first();
+  assert.deepEqual(after, { rowid: before.rowid, target_slug: 'existing-target' });
+});
+
+test('replaceTargetsPreservingResolvedForSlug: a reordered or expanded list is still rewritten', async () => {
+  const { db } = await setup();
+  const repo = new RecommendationRepository(db);
+  const before = await db.prepare('SELECT rowid FROM recommendation WHERE slug = ?').bind('source').first();
+
+  const wrote = await repo.replaceTargetsPreservingResolvedForSlug('source', [
+    { targetTmdbId: 43, targetType: 'movie', sortOrder: 0 },
+    { targetTmdbId: 42, targetType: 'movie', sortOrder: 1 },
+  ]);
+
+  assert.equal(wrote, true);
+  const after = await db.prepare(
+    'SELECT rowid, target_tmdb_id, sort_order FROM recommendation WHERE slug = ? ORDER BY sort_order'
+  ).bind('source').all();
+  assert.deepEqual(after.results.map((r) => r.target_tmdb_id), [43, 42]);
+  // The DELETE+INSERT rewrite means even the still-present target (42) gets
+  // a fresh rowid -- proof this path did NOT take the no-op early return.
+  assert.notEqual(after.results[1].rowid, before.rowid);
 });
