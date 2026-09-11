@@ -450,3 +450,53 @@ tiếp ở trên).
 
 **Tiếp theo:** 6.5 (bật `RECOMMENDATION_JOBS_ENABLED = "true"`) — dừng lại,
 báo cáo chủ dự án, chờ quyết định (xem tin nhắn cuối phiên).
+
+**Ghi chú d1 insights:** đợi ~6 phút (12 lần thử, mỗi 30s) sau khi chạy
+thử tay ở 6.4, `wrangler d1 insights` vẫn chưa lên số `rows_read` thật cho
+`getUnresolvedGroupedByTarget`/`getDueSources` (chỉ thấy lại các dòng
+`EXPLAIN QUERY PLAN` cũ). Chủ dự án chọn **tiến tới 6.5 luôn**, chấp nhận
+bằng chứng gián tiếp (EXPLAIN index-only trên đúng SQL literal + cả 2
+instance chạy xong trong 7-10 giây + 0 retryable) thay vì tiếp tục chờ một
+API được chính Cloudflare gắn nhãn "experimental".
+
+### 6.5 — Bật `RECOMMENDATION_JOBS_ENABLED = "true"`
+
+- Chủ dự án duyệt 2 lần qua `AskUserQuestion`: một lần cho quyết định
+  "tiến tới 6.5 luôn" (thay vì chờ thêm insights), một lần xác nhận cụ thể
+  "Commit and deploy" ngay trước khi tạo commit.
+- Sửa `wrangler.toml`: `RECOMMENDATION_JOBS_ENABLED = "false"` →
+  `"true"`, viết lại comment (lịch sử Q3/Q6 + trỏ tới ngày duyệt + hướng
+  dẫn rollback). `src-ssr/services/sync/dispatch.ts:52`: comment tương tự,
+  không đổi logic (biến `recommendationJobs` đã đọc đúng key này từ Phase
+  3 gốc).
+- `node scripts/rf-test.mjs all` → `OK: 18/18` trước khi commit.
+- Commit riêng (`feat(recs): enable recommendation-resolve and
+  recommendation-refresh jobs`).
+- **Va chạm khi push:** giữa lúc làm Phase 6, một phiên khác của chủ dự án
+  đã push thẳng lên `main` một commit docs không liên quan
+  (`895047c`, thêm `docs/plan-sync-status-d1-reads.md` + sửa 2 dòng trỏ
+  trong `docs/plan-recommendation-d1-reads.md` mục "Ngoài phạm vi") →
+  `git push` đầu tiên bị `rejected (non-fast-forward)`. Xử lý: `git fetch`
+  + kiểm diff của commit lạ (không đụng file nào mình đang sửa) → `git
+  rebase origin/main` sạch, không conflict → chạy lại full gate (`OK:
+  18/18`) → push lại thành công (`895047c..98b4c1c`).
+- Deploy: `PREV=fd2fe5a3-...` → push → deployment mới
+  `c09feb07-4d9c-4517-8177-f181d59fe8c5` sau ~60s. Smoke: `200` cho cả 5
+  route kiểm tra → **SMOKE PASS**. Kiểm thêm ngay `GET /api/health/sync` →
+  `200`.
+
+`RECOMMENDATION_JOBS_ENABLED` giờ **`"true"`** trên production. Từ tick
+`*/30` kế tiếp, `recommendation-resolve` chạy mỗi tick, `recommendation-refresh`
+chạy mỗi giờ (top-of-hour), theo đúng `dispatch.ts`.
+
+**Rollback nếu cần:** đặt lại `RECOMMENDATION_JOBS_ENABLED = "false"` trong
+`wrangler.toml`, commit, `git push origin HEAD:main` (không sửa trực tiếp
+trên dashboard Cloudflare — deploy kế tiếp sẽ ghi đè giá trị đó). Migration
+`0018` không cần rollback (chỉ thêm dòng).
+
+**Tiếp theo — 6.6 (theo dõi 24h):** cần đo lại sau ít nhất 24h kể từ
+2026-09-12 ~04:1x UTC (giờ deploy commit `98b4c1c`— xem `git log` để lấy
+giờ chính xác trên `main`). Tiêu chí (theo plan): tổng D1 rows read/ngày
+< 2M, rows written/ngày < 50k (toàn hệ thống), `/api/health/sync` luôn
+200. **Chưa làm trong phiên này** — cần một phiên/kiểm tra riêng sau khi
+đủ 24h dữ liệu thật, ghi số vào mục này.
