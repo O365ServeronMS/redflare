@@ -51,8 +51,17 @@ function resolveRecentPageCap(env: Env): number {
 // (2026-09-11) synced 11 titles, then every later fetch failed.
 // syncOneMovie makes at most 5: KKPhim detail, one canonical-alias
 // re-fetch, then TMDB detail + season + recommendations.
-const INSTANCE_SUBREQUEST_BUDGET = 50;
+export const INSTANCE_SUBREQUEST_BUDGET = 50;
 const MAX_FETCHES_PER_SYNC = 5;
+
+// Resolve budget (docs/plan-recommendation-d1-reads.md Phase 3): the
+// resolve-workflow analogue of syncBudgetForPages above. resolveOneGroup's
+// worst case is kkphim.getByTmdbRef's lookup (1) plus everything
+// syncOneMovie can do on its own (MAX_FETCHES_PER_SYNC) when the target
+// turns out to be on KKPhim but not yet synced -- an upper bound, not the
+// actual count, since resolveOneGroup has no visibility into how many of
+// those syncOneMovie actually used.
+export const RESOLVE_MAX_CALLS_PER_GROUP = 1 + MAX_FETCHES_PER_SYNC;
 
 /** How many titles one Workflow instance can still sync after its feed scan
  * spent `pagesScanned` fetches. The rest stay "unknown" in D1 and are
@@ -764,6 +773,12 @@ export interface ResolveGroup {
 
 export interface ResolveGroupOutcome {
   kind: 'resolved_existing' | 'resolved_stub' | 'overflow' | 'retryable';
+  // Upper-bound estimate of external (KKPhim/TMDB) subrequests this group
+  // spent -- Phase 3 (docs/plan-recommendation-d1-reads.md): callers budget
+  // against INSTANCE_SUBREQUEST_BUDGET using this, so it must never
+  // undercount. Local resolutions cost 0 (a D1 read only); every other path
+  // starts with the 1-call KKPhim lookup and adds from there.
+  externalCalls: number;
 }
 
 /** One (target_tmdb_id, target_type) group's worth of the three-tier
@@ -798,24 +813,27 @@ export async function resolveOneGroup(
   const local = await repos.movie.getCanonicalTargetByTmdbRef(targetType, targetTmdbId);
   if (local) {
     await repos.recommendation.markResolved(targetTmdbId, targetType, local.slug);
-    return { kind: 'resolved_existing' };
+    return { kind: 'resolved_existing', externalCalls: 0 };
   }
 
   const onKkphim = await clients.kkphim.getByTmdbRef(targetType, targetTmdbId);
-  if (onKkphim.kind === 'retryable_error') return { kind: 'retryable' };
+  if (onKkphim.kind === 'retryable_error') return { kind: 'retryable', externalCalls: 1 };
   if (onKkphim.kind === 'found') {
+    // Upper bound, not the actual count -- see ResolveGroupOutcome.
+    const externalCalls = RESOLVE_MAX_CALLS_PER_GROUP;
     const synced = await syncOneMovie(env, onKkphim.data.movie.slug, clients, repos);
     if (synced.outcome !== 'written' && synced.outcome !== 'unchanged') {
-      return { kind: 'retryable' };
+      return { kind: 'retryable', externalCalls };
     }
     const target = await repos.movie.getBySlug(onKkphim.data.movie.slug);
-    if (!target) return { kind: 'retryable' };
+    if (!target) return { kind: 'retryable', externalCalls };
     await repos.recommendation.markResolved(targetTmdbId, targetType, target.slug);
-    return { kind: 'resolved_existing' };
+    return { kind: 'resolved_existing', externalCalls };
   }
 
   if (maxStubs > 0 && refCount >= STUB_MIN_REFCOUNT && stubCountRef.count < maxStubs) {
     const tmdbDetail = await clients.tmdb.getDetailResult(targetType, targetTmdbId);
+    const externalCalls = 2; // KKPhim lookup above + this TMDB detail call.
     const rawTitle = tmdbDetail.kind === 'success' ? tmdbDetail.data.title || tmdbDetail.data.name : '';
     if (tmdbDetail.kind === 'success' && rawTitle) {
       const slug = slugifyStub(rawTitle, targetType, targetTmdbId);
@@ -826,13 +844,17 @@ export async function resolveOneGroup(
       await repos.recommendation.markResolved(targetTmdbId, targetType, slug);
       stubCountRef.count++;
       await repos.syncState.set(STUB_COUNT_KEY, String(stubCountRef.count));
-      return { kind: 'resolved_stub' };
+      return { kind: 'resolved_stub', externalCalls };
     }
-    if (tmdbDetail.kind === 'retryable_error') return { kind: 'retryable' };
+    if (tmdbDetail.kind === 'retryable_error') return { kind: 'retryable', externalCalls };
+    // A successful TMDB lookup with no usable title still falls through to
+    // overflow -- 2 calls were spent either way.
+    await repos.recommendation.markAttempted(targetTmdbId, targetType);
+    return { kind: 'overflow', externalCalls };
   }
 
   await repos.recommendation.markAttempted(targetTmdbId, targetType);
-  return { kind: 'overflow' };
+  return { kind: 'overflow', externalCalls: 1 };
 }
 
 /** Phase 4 (plan §4, ADR-0002 Finding 3) -- the three-tier recommendation
@@ -862,11 +884,18 @@ export async function runRecommendationResolveTick(env: Env): Promise<ResolveTic
   let overflow = 0;
   let retryable = 0;
   let groupsSeen = 0;
+  // Phase 3 (docs/plan-recommendation-d1-reads.md): this route runs in one
+  // Workflow-less fetch invocation, so it shares the same 50/instance
+  // subrequest cap the Workflow enforces across steps -- track it inline
+  // instead.
+  let callsUsed = 0;
 
   for (const group of groups) {
     if (Date.now() >= deadline) break;
+    if (callsUsed + RESOLVE_MAX_CALLS_PER_GROUP > INSTANCE_SUBREQUEST_BUDGET) break;
     groupsSeen++;
     const outcome = await resolveOneGroup(env, repos, clients, group, maxStubs, stubCountRef);
+    callsUsed += outcome.externalCalls;
     if (outcome.kind === 'resolved_existing') resolvedToExisting++;
     else if (outcome.kind === 'resolved_stub') resolvedToStub++;
     else if (outcome.kind === 'overflow') overflow++;

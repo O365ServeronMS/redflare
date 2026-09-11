@@ -253,6 +253,52 @@ test('a found KKPhim target is not resolved when its sync fails', async () => {
   assert.deepEqual(await resolveState(db), { target_slug: null, resolve_attempted: 0 });
 });
 
+test('resolve tick caps upstream groups at floor(50/6) per instance; local resolves are free', async () => {
+  const { db, env } = await setupResolver();
+  // setupResolver seeds one default pending edge -- this test wants an
+  // exact count (30 local + 20 non-local), so start from a clean table.
+  await db.prepare('DELETE FROM recommendation').run();
+
+  const statements = [];
+  for (let i = 0; i < 30; i++) {
+    const tmdbId = 1000 + i;
+    statements.push(
+      db.prepare('INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES (?, ?, ?, ?)').bind(`local-${i}`, tmdbId, 'movie', 'catalog'),
+      db.prepare('INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order) VALUES (?, NULL, ?, ?, 0)').bind(`local-source-${i}`, tmdbId, 'movie')
+    );
+  }
+  for (let i = 0; i < 20; i++) {
+    statements.push(
+      db.prepare('INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order) VALUES (?, NULL, ?, ?, 0)').bind(`non-local-source-${i}`, 2000 + i, 'movie')
+    );
+  }
+  await db.batch(statements);
+
+  // Every non-local target is "found" on KKPhim (1 external call) but its
+  // own sync then fails (1 more) -- 2 calls actually spent, but
+  // resolveOneGroup budgets the RESOLVE_MAX_CALLS_PER_GROUP upper bound (6)
+  // regardless, same as production would before knowing the outcome.
+  let fetchCalls = 0;
+  globalThis.fetch = async (url) => {
+    fetchCalls++;
+    const value = String(url);
+    const lookup = value.match(/\/tmdb\/movie\/(\d+)/);
+    if (lookup) return json(kkDetail(`upstream-target-${lookup[1]}`));
+    if (value.includes('/phim/upstream-target-')) return json({ message: 'busy' }, 503);
+    throw new Error('unexpected request: ' + value);
+  };
+
+  const result = await runRecommendationResolveTick(env);
+  assert.equal(result.resolvedToExisting, 30, 'all 30 local groups resolve without spending any budget');
+  assert.equal(result.retryable, 8, 'floor(50/6) upstream groups fit the instance budget');
+  assert.equal(result.overflow, 0);
+  assert.equal(result.resolvedToStub, 0);
+  assert.equal(result.groupsSeen, 38, '30 local + 8 attempted upstream; the rest deferred to the next tick');
+  // Proves groups past the 8th genuinely never fetch, not just that their
+  // outcome is uncounted: 8 groups x (1 lookup + 1 failed detail fetch).
+  assert.equal(fetchCalls, 16);
+});
+
 test('TMDB retryable failure while building a stub leaves the target pending', async () => {
   const { db, env } = await setupResolver('1');
   await db.prepare(

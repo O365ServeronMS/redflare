@@ -11,9 +11,12 @@ import {
 } from '../services/sync/recommendationRefresh';
 
 // RECOMMENDATION_REFRESH_LIMIT is only 20, comfortably under the Free-plan
-// 50-subrequest cap even in one step -- but batching keeps it consistent
-// with the other Workflows and bounds a single step to a handful of TMDB
-// calls regardless of a future limit increase.
+// 50-subrequest-per-*instance* cap (not per step -- see
+// INSTANCE_SUBREQUEST_BUDGET in orchestrator.ts / docs/state-incremental-sync-stall.md
+// 5.2b) even if every source needed its 1 TMDB call in a single step -- but
+// batching keeps it consistent with the other Workflows and bounds a
+// single step to a handful of TMDB calls regardless of a future limit
+// increase.
 const SOURCES_PER_STEP = 5;
 
 /** Free-plan-safe replacement for recommendationRefresh.ts's

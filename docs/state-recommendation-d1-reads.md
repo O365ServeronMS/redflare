@@ -162,3 +162,64 @@ mới) · `test:recommendation-refresh` 7 (3 cũ + 4 mới) · `test:incremental
 18 · `test:hero-refresh` 8.
 
 **Việc còn lại:** apply `0018` + đo `rows_written` thật (Phase 6.2).
+
+---
+
+### Phase 3 — Resolve: ngân sách subrequest theo instance
+
+Code xong 2026-09-12. Không có migration/deploy ở phase này.
+
+- **3.1** `orchestrator.ts`: `INSTANCE_SUBREQUEST_BUDGET` đổi thành `export
+  const` (giữ nguyên giá trị 50). Thêm `export const
+  RESOLVE_MAX_CALLS_PER_GROUP = 1 + MAX_FETCHES_PER_SYNC` (= 6, tính theo
+  công thức thay vì literal để tự động khớp nếu `MAX_FETCHES_PER_SYNC` đổi).
+- **3.2** `ResolveGroupOutcome` thêm `externalCalls: number` (ước lượng
+  trên). Cập nhật mọi `return` trong `resolveOneGroup`:
+  - local resolve: `0`.
+  - KKPhim lookup `retryable_error`: `1`.
+  - KKPhim `found` (dù `syncOneMovie` sau đó thành công hay fail): luôn
+    `RESOLVE_MAX_CALLS_PER_GROUP` (6) — không biết trước
+    `syncOneMovie` dùng bao nhiêu fetch thật, phải lấy giá trị trên.
+  - Nhánh stub (đã gọi TMDB detail): `2`, dùng cho cả 3 kết cục (thành
+    công/`retryable_error`/thành công nhưng thiếu title → vẫn rơi xuống
+    overflow).
+  - Overflow không qua nhánh stub (stub không đủ điều kiện): `1` (chỉ có
+    lookup).
+- **3.3** `recommendationResolveWorkflow.ts`: vòng ngoài giữ biến `callsUsed`
+  (khởi tạo 0), truyền `callsUsedBefore` vào closure `step.do` của mỗi
+  batch; trong batch, trước mỗi group kiểm `used + RESOLVE_MAX_CALLS_PER_GROUP
+  > INSTANCE_SUBREQUEST_BUDGET` → `stopped = true`, `break`. Step trả thêm
+  `callsUsed`/`stopped`; vòng ngoài đồng bộ lại `callsUsed` từ kết quả step
+  (replay-safe, cùng pattern với `stubCountRef`) và `break` khi `stopped`.
+  Kết quả instance thêm field `deferred = groups.length - (existing+stub+
+  overflow+retryable)` (chọn phương án đổi shape thay vì chỉ ghi comment,
+  vì rẻ và rõ ràng hơn cho việc theo dõi ở `/__sync/status`/log). Sửa lại
+  comment đầu file `GROUPS_PER_STEP` — không còn nói "50/step cap" (sai);
+  giải thích ngân sách giờ enforce tường minh qua `callsUsed`, batch chỉ
+  còn quyết định CPU time/step.
+- **3.4** `runRecommendationResolveTick` (`orchestrator.ts`, route tay
+  `/__sync/resolve-recommendations`): thêm biến `callsUsed` cục bộ, cùng
+  điều kiện dừng trước mỗi group trong vòng lặp (bên cạnh điều kiện
+  deadline có sẵn).
+- **3.5** `recommendationRefreshWorkflow.ts`: chỉ sửa comment
+  `SOURCES_PER_STEP` — nói rõ trần 50 là **per-instance**, không phải per
+  step, trỏ tới `INSTANCE_SUBREQUEST_BUDGET`. Không đổi logic (20 nguồn × 1
+  TMDB call = 20 ≤ 50 vẫn đúng).
+
+**Test (`tests/recommendationFailureSafety.test.mjs`):** thêm `resolve tick
+caps upstream groups at floor(50/6) per instance; local resolves are free`
+— 30 group local (mỗi group một `movie` catalog khớp `tmdb_id`, refCount=1)
++ 20 group non-local (KKPhim trả `found` nhưng `syncOneMovie` sau đó luôn
+503 → `retryable`, tốn 6/group theo ước lượng trên). Assertions: 30 resolved
+local (không tốn ngân sách), đúng `floor(50/6) = 8` group upstream được xử
+lý, `groupsSeen = 38` (30 + 8), và **đếm số lần `fetch` thật** = 16 (8 ×
+[1 lookup + 1 detail fail]) để chứng minh nhóm thứ 9 trở đi **không hề gọi
+fetch**, chứ không chỉ là "không được tính".
+
+**Verify (Luật chung #1) — tất cả xanh:**
+`worker:typecheck` ok · `test:recommendation-safety` 17 (16 cũ + 1 mới) ·
+`test:recommendation-refresh` 7 · `test:incremental-sync` 18 ·
+`test:hero-refresh` 8.
+
+Không có SQL mới ở phase này nên không có EXPLAIN QUERY PLAN để chạy (Luật
+chung #2 chỉ áp dụng khi có query mới/sửa).
