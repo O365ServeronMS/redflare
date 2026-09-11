@@ -330,8 +330,8 @@ dòng, không cần rollback.
 ## Ngoài phạm vi (ghi nhận, không làm)
 
 - `/__sync/status`: `getResolveStats` quét toàn bảng `recommendation` (~190k rows/lần) và
-  `countByTier` quét `movie` — mỗi lần `rf-status.sh` có `CRON_KEY` là ~250k rows. Nên cache
-  vào `sync_state` ở plan riêng.
+  `countByTier` quét `movie` — mỗi lần `rf-status.sh` có `CRON_KEY` là ~250k rows. Plan riêng:
+  `docs/plan-sync-status-d1-reads.md`.
 - Q7 (`getUnresolvedGroupedByTarget`) tỉ lệ với số pending; ổn khi pending vài trăm–vài nghìn.
   Nếu pending tăng > 20k (vd. sau khi nâng `MAX_STUBS` hoặc sync hàng loạt) → cần plan riêng.
 - Throughput refresh: 20 nguồn/giờ = 480/ngày trên ~13k nguồn, TTL 14 ngày → mỗi nguồn thực tế
