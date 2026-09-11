@@ -50,9 +50,11 @@ async function start(name: string, workflow: Workflow, id: string): Promise<void
 export async function dispatchScheduledWorkflows(env: Env, scheduledTime: number): Promise<void> {
   const topOfHour = new Date(scheduledTime).getUTCMinutes() === 0;
   // Q3 (CTE requeue ~77k rows/tick) and Q6 (getDueSources ~33k rows/tick)
-  // in the Phase 1 audit -- both recommendation jobs stay off until a
-  // dedicated plan optimises them. Existing recommendation rails keep
-  // serving what's already resolved; only refresh stops.
+  // in the Phase 1 audit -- fixed by docs/plan-recommendation-d1-reads.md
+  // Phases 1-4, but both recommendation jobs stay off until that plan's
+  // Phase 6 (migration apply + smoke test + 24h monitoring) is signed off.
+  // Existing recommendation rails keep serving what's already resolved;
+  // only refresh stops.
   const recommendationJobs = isEnabled(env.RECOMMENDATION_JOBS_ENABLED);
   const backfill = isEnabled(env.BACKFILL_ENABLED);
 

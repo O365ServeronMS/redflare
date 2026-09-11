@@ -404,7 +404,8 @@ workflow `schedules` nào.
 5.3. **Recommendation jobs:** giữ `RECOMMENDATION_JOBS_ENABLED = "false"` cho tới
      khi có một plan riêng tối ưu Q3 (CTE requeue ~77k rows/lần) và Q6
      (`getDueSources` ~33k rows/lần). Rail gợi ý vẫn hiển thị dữ liệu đã có sẵn,
-     chỉ không được làm mới.
+     chỉ không được làm mới. → `docs/plan-recommendation-d1-reads.md` (Phase
+     1-5 code xong 2026-09-12, Phase 6 deploy/bật job chờ chủ dự án duyệt).
 
 **Tiêu chí xong:** 24 giờ liên tục có instance mỗi 30 phút; `/api/health/sync`
 luôn trả 200; phim mới lên home trong vòng 30 phút sau khi xuất hiện trên

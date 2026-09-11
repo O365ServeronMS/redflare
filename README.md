@@ -230,8 +230,8 @@ Không còn một Cron Trigger `scheduled()` duy nhất chạy tuần tự nhi�
 |---|---|---|
 | `IncrementalSyncWorkflow` | `*/30 * * * *` | Quét feed phim mới tới trang đã biết hết (tối đa `RECENT_PAGE_CAP`, mặc định 12); mỗi slug mới/đổi là một step riêng gọi `syncOneMovie`, mỗi tick tối đa `(50 − số trang) / 5` phim, phần còn lại để tick sau |
 | `HeroSnapshotWorkflow` | `*/15 * * * *` (cổng 30 phút, nên thực chạy ~mỗi giờ) | Lấy TMDB trending; mỗi candidate là một step riêng |
-| `RecommendationResolveWorkflow` | `*/15 * * * *` | Resolve target chưa có slug, ưu tiên target được nhiều phim tham chiếu; chia batch ~15 group/step |
-| `RecommendationRefreshWorkflow` | `*/15 * * * *` | Làm mới danh sách recommendation ID từ TMDB; chia batch ~5 source/step |
+| `RecommendationResolveWorkflow` | `*/15 * * * *` | Resolve target chưa có slug, ưu tiên target được nhiều phim tham chiếu; requeue overflow theo sự kiện (`syncOneMovie` mở lại một target ngay khi nó vào catalog) thay vì quét toàn bảng, quét định kỳ chỉ chạy khi còn chỗ stub và tối đa 1 lần/24h; chia batch 8 group/step, dừng cấp phát group mới khi chạm ngân sách 50 subrequest/**instance** (`docs/plan-recommendation-d1-reads.md`) |
+| `RecommendationRefreshWorkflow` | `*/15 * * * *` | Làm mới danh sách recommendation ID từ TMDB cho các nguồn đã có dòng `recommendation_freshness` (seed một lần bởi migration `0018`, tự ghi thêm ở mỗi lần `syncOneMovie`); bỏ qua ghi D1 khi TMDB trả đúng danh sách cũ; chia batch ~5 source/step |
 | `BackfillWorkflow` | `*/15 * * * *`, **inert mặc định** | Chỉ chạy khi `BACKFILL_ENABLED="true"` (xem bảng dưới); mỗi step tối đa 5 trang |
 
 Mỗi movie được normalize rồi hash. Nếu `source_hash` không đổi, pipeline ghi **0 row**, tránh đốt D1 write quota.
@@ -460,6 +460,16 @@ Tất cả route dưới đây cần `x-cron-key` và trả `Cache-Control: priv
 | `GET /__sync/purge-cache` | Xoá toàn bộ Workers Caching ngay lập tức, không cần đợi deploy |
 
 Đường tự động (không cần gọi tay) là 5 Workflow trong `wrangler.toml [[workflows]]` — các route trên chỉ dùng để test/debug/vận hành thủ công một lần.
+
+**`tmdb_override`** chỉ được ghi tay (không có code nào tự `INSERT` vào bảng
+này). Sau khi thêm một override, chạy tay:
+```sql
+UPDATE recommendation SET resolve_attempted = 0
+WHERE target_tmdb_id = ? AND target_type = ? AND target_slug IS NULL;
+```
+cho đúng `(target_tmdb_id, target_type)` vừa override — nếu không, một edge
+overflow đang chờ target đó sẽ không tự mở lại cho tới lần quét định kỳ
+tiếp theo (tối đa 1 lần/24h, xem bảng Workflows ở trên).
 
 ### Status nên theo dõi
 

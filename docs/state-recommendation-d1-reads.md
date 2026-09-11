@@ -262,3 +262,47 @@ tiếp bởi thứ tự index, không cần sắp lại.
 **Verify (Luật chung #1) — tất cả xanh:**
 `worker:typecheck` ok · `test:recommendation-refresh` 9 (7 cũ + 2 mới) ·
 `test:recommendation-safety` 17 (không đụng, chỉ sanity check).
+
+---
+
+### Phase 5 — Tài liệu
+
+Code xong 2026-09-12. Chỉ đổi comment/docs, không đổi hành vi/giá trị nào.
+
+- `README.md`: 2 hàng Workflow (Resolve/Refresh) cập nhật mô tả — requeue
+  theo sự kiện + quét định kỳ tối đa 1 lần/24h khi còn chỗ stub, ngân sách
+  50 subrequest/**instance**, freshness seed bởi `0018` + tự ghi ở
+  `syncOneMovie`, refresh bỏ qua ghi khi danh sách không đổi. Thêm đoạn ops
+  ngay dưới bảng "Ops routes": `tmdb_override` chỉ ghi tay, kèm câu lệnh
+  `UPDATE ... SET resolve_attempted = 0` cần chạy sau khi thêm override
+  (đúng plan §1.5).
+- `wrangler.toml`: comment trên `RECOMMENDATION_JOBS_ENABLED` — bỏ "still
+  un-optimised", trỏ tới `docs/plan-recommendation-d1-reads.md` (Phase 1-5
+  đã xong, Phase 6 chờ duyệt). Giá trị **không đổi**, vẫn `"false"`.
+- `src-ssr/services/sync/dispatch.ts:52`: comment Q3/Q6 cập nhật tương tự
+  — "fixed by ... Phases 1-4" thay vì "both recommendation jobs stay off
+  until a dedicated plan optimises them".
+- `docs/plan-incremental-sync-stall.md` Phase 5.3: thêm một dòng trỏ tới
+  `docs/plan-recommendation-d1-reads.md` kèm trạng thái hiện tại.
+
+**Verify (Luật chung #1, full gate cuối cùng trước khi dừng ở Phase 6):**
+```
+npm test
+→ OK: 18/18 passed
+```
+(`worker:typecheck`, `build`, toàn bộ `test:*`, `wrangler deploy --dry-run`,
+`git diff --check` — tất cả xanh.)
+
+---
+
+## Tóm tắt trạng thái sau Phase 1-5
+
+- Code xong, đã commit theo từng phase (5 commit riêng biệt trên nhánh
+  worktree hiện tại). **Chưa `git push`.**
+- **Chưa** `wrangler d1 migrations apply` — migration `0018` vẫn nằm trong
+  `migrations/`, chưa chạy trên production.
+- **Chưa** đổi `RECOMMENDATION_JOBS_ENABLED` — vẫn `"false"`.
+- **Chưa** chạy catch-up SQL một lần (plan §1.4).
+- Việc còn lại thuộc Phase 6 (deploy + apply migration + catch-up + chạy
+  thử tay + bật job + theo dõi 24h) — toàn bộ cần chủ dự án duyệt từng
+  bước theo đúng plan, dừng lại ở đây để báo cáo.

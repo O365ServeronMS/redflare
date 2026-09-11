@@ -134,10 +134,14 @@ BACKFILL_PAGE_TO = ""
 # gates whether the cron dispatcher starts the recommendation-resolve and
 # recommendation-refresh Workflows. Default "false" -- their D1 rows-read
 # cost (Q3: CTE requeue ~77k rows/tick; Q6: getDueSources ~33k rows/tick)
-# is still un-optimised, and on Free that alone can exceed the 5M
-# rows-read/day cap. Recommendation rails keep serving already-resolved
-# data while this is off; only the refresh/resolve of new edges pauses.
-# Plain [var], flip on the dashboard once a dedicated Q3/Q6 plan lands.
+# was un-optimised, and on Free that alone can exceed the 5M rows-read/day
+# cap. Recommendation rails keep serving already-resolved data while this
+# is off; only the refresh/resolve of new edges pauses.
+# docs/plan-recommendation-d1-reads.md (Phases 1-5) fixes Q3/Q6 and lands
+# the D1 read/write budget the jobs need to run safely -- still "false"
+# here because Phase 6 (migration apply + one-tick smoke test + 24h
+# monitoring) needs the project owner's sign-off at each step before this
+# flips. Plain [var], flip on the dashboard once Phase 6 clears.
 RECOMMENDATION_JOBS_ENABLED = "false"
 
 # RECENT_PAGE_CAP (docs/plan-incremental-sync-stall.md Phase 2): safety
