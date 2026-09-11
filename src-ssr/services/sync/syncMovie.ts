@@ -1,6 +1,7 @@
 import { MovieRepository } from '../../repositories/movieRepository';
 import { EpisodeRepository } from '../../repositories/episodeRepository';
 import { RecommendationRepository } from '../../repositories/recommendationRepository';
+import { RecommendationFreshnessRepository } from '../../repositories/recommendationFreshnessRepository';
 import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
 import { SearchRepository } from '../../repositories/searchRepository';
 import { KkphimClient } from './kkphimClient';
@@ -33,6 +34,7 @@ export async function syncOneMovie(
     movie: MovieRepository;
     episode: EpisodeRepository;
     recommendation: RecommendationRepository;
+    recommendationFreshness: RecommendationFreshnessRepository;
     taxonomy: TaxonomyRepository;
     search: SearchRepository;
     tmdbOverride: TmdbOverrideRepository;
@@ -111,6 +113,20 @@ export async function syncOneMovie(
     // extremely rare).
     if (tmdbId && tmdbType) {
       await repos.recommendation.requeueTarget(tmdbType, tmdbId);
+      // Q6 fix (docs/plan-recommendation-d1-reads.md Phase 2): this fetch
+      // above already called TMDB recommendations for `slug` -- record it
+      // as a freshness attempt so getDueSources never needs to anti-join
+      // `movie` to find sources that have never been recorded (0018 seeds
+      // the backlog; this keeps every future write in sync going forward).
+      // A retryable TMDB response leaves last_success_at untouched
+      // (RecommendationFreshnessRepository.markAttempt's CASE), same
+      // semantics as refreshOneSource.
+      await repos.recommendationFreshness.markAttempt(
+        slug,
+        recommendation.kind === 'success'
+          ? (recommendation.ids.length === 0 ? 'valid_empty' : 'success')
+          : 'retryable_error'
+      );
     }
 
     const rowsWritten =

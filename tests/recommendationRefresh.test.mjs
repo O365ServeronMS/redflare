@@ -4,6 +4,7 @@ import { afterEach, test } from 'node:test';
 import { Miniflare } from 'miniflare';
 
 import { runRecommendationRefreshTick } from '../src-ssr/services/sync/recommendationRefresh.ts';
+import { RecommendationFreshnessRepository } from '../src-ssr/repositories/recommendationFreshnessRepository.ts';
 
 const originalFetch = globalThis.fetch;
 const instances = [];
@@ -29,7 +30,26 @@ async function setup() {
   await db.batch(migration.replaceAll(/--.*$/gm, '').split(';').map((sql) => sql.trim()).filter(Boolean).map((sql) => db.prepare(sql)));
   await db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('source', 101, 'movie', 'catalog')").run();
   await db.prepare("INSERT INTO recommendation (slug, target_slug, target_tmdb_id, target_type, sort_order) VALUES ('source', 'existing-target', 42, 'movie', 0)").run();
+  // Phase 2 invariant (docs/plan-recommendation-d1-reads.md): every eligible
+  // source has a freshness row (0018 seed + syncOneMovie's own write) --
+  // getDueSources no longer anti-joins `movie` to find rows missing one.
+  // last_attempt_at = 0 keeps 'source' due (never succeeded, backoff long past).
+  await db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('source', NULL, 0, 'seeded')").run();
   return { db, env: { DB: db, TMDB_API_TOKEN: 'test-token' } };
+}
+
+async function setupFreshnessOnly() {
+  const mf = new Miniflare({
+    modules: true,
+    script: 'export default { fetch() { return new Response("ok"); } };',
+    d1Databases: { DB: crypto.randomUUID() },
+  });
+  instances.push(mf);
+  const db = await mf.getD1Database('DB');
+  await db.prepare('CREATE TABLE movie (slug TEXT PRIMARY KEY, tmdb_id INTEGER, tmdb_type TEXT, tier TEXT)').run();
+  const migration = await readFile(new URL('../migrations/0011_recommendation_freshness.sql', import.meta.url), 'utf8');
+  await db.batch(migration.replaceAll(/--.*$/gm, '').split(';').map((sql) => sql.trim()).filter(Boolean).map((sql) => db.prepare(sql)));
+  return db;
 }
 
 test('retryable refresh preserves last-good edges and backs off the source', async () => {
@@ -77,4 +97,60 @@ test('valid empty is explicit success and replaces old edges', async () => {
   assert.equal(result.validEmpty, 1);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM recommendation WHERE slug = ?').bind('source').first()).n, 0);
   assert.equal((await db.prepare('SELECT result FROM recommendation_freshness WHERE slug = ?').bind('source').first()).result, 'valid_empty');
+});
+
+test('getDueSources: a never-succeeded source past its retry backoff sorts before an expired one', async () => {
+  const db = await setupFreshnessOnly();
+  const now = Math.floor(Date.now() / 1000);
+  await db.batch([
+    db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('never-tried', 1, 'movie', 'catalog')"),
+    db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('never-tried', NULL, ?, 'retryable_error')").bind(now - 1000),
+    db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('expired', 2, 'movie', 'catalog')"),
+    db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('expired', ?, ?, 'success')").bind(now - 1000, now - 1000),
+  ]);
+
+  const due = await new RecommendationFreshnessRepository(db).getDueSources(500, 100, 10);
+  assert.deepEqual(due.map((d) => d.slug), ['never-tried', 'expired']);
+});
+
+test('getDueSources: a never-succeeded source still inside the retry backoff is excluded', async () => {
+  const db = await setupFreshnessOnly();
+  const now = Math.floor(Date.now() / 1000);
+  await db.batch([
+    db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('just-tried', 1, 'movie', 'catalog')"),
+    db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('just-tried', NULL, ?, 'retryable_error')").bind(now),
+  ]);
+
+  assert.deepEqual(await new RecommendationFreshnessRepository(db).getDueSources(500, 100, 10), []);
+});
+
+test('getDueSources: expired sources sort by last_success_at ascending, and limit is shared across never-succeeded and expired', async () => {
+  const db = await setupFreshnessOnly();
+  const now = Math.floor(Date.now() / 1000);
+  await db.batch([
+    db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('never-tried', 1, 'movie', 'catalog')"),
+    db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('never-tried', NULL, ?, 'retryable_error')").bind(now - 1000),
+    db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('older', 2, 'movie', 'catalog')"),
+    db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('older', ?, ?, 'success')").bind(now - 2000, now - 2000),
+    db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('newer', 3, 'movie', 'catalog')"),
+    db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('newer', ?, ?, 'success')").bind(now - 1500, now - 1500),
+  ]);
+
+  // limit=2: the one due never-succeeded source takes a slot, leaving room
+  // for only the older (not the newer) of the two expired sources.
+  const due = await new RecommendationFreshnessRepository(db).getDueSources(500, 100, 2);
+  assert.deepEqual(due.map((d) => d.slug), ['never-tried', 'older']);
+});
+
+test('getDueSources: a stub-tier or tmdb-less movie is excluded even with an expired freshness row', async () => {
+  const db = await setupFreshnessOnly();
+  const now = Math.floor(Date.now() / 1000);
+  await db.batch([
+    db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('a-stub', 1, 'movie', 'stub')"),
+    db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('a-stub', ?, ?, 'success')").bind(now - 1000, now - 1000),
+    db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('no-tmdb', NULL, NULL, 'catalog')"),
+    db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('no-tmdb', ?, ?, 'success')").bind(now - 1000, now - 1000),
+  ]);
+
+  assert.deepEqual(await new RecommendationFreshnessRepository(db).getDueSources(500, 100, 10), []);
 });

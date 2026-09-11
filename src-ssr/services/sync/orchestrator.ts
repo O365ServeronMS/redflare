@@ -1,6 +1,7 @@
 import { MovieRepository } from '../../repositories/movieRepository';
 import { EpisodeRepository } from '../../repositories/episodeRepository';
 import { RecommendationRepository } from '../../repositories/recommendationRepository';
+import { RecommendationFreshnessRepository } from '../../repositories/recommendationFreshnessRepository';
 import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
 import { SearchRepository } from '../../repositories/searchRepository';
 import { SyncStateRepository } from '../../repositories/syncStateRepository';
@@ -164,6 +165,7 @@ export function buildRepos(env: Env) {
     movie: new MovieRepository(env.DB),
     episode: new EpisodeRepository(env.DB),
     recommendation: new RecommendationRepository(env.DB),
+    recommendationFreshness: new RecommendationFreshnessRepository(env.DB),
     taxonomy: new TaxonomyRepository(env.DB),
     search: new SearchRepository(env.DB),
     syncState: new SyncStateRepository(env.DB),

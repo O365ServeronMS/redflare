@@ -8,6 +8,7 @@ import { syncOneMovie } from '../src-ssr/services/sync/syncMovie.ts';
 import { runRecommendationResolveTick, buildRepos, requeueOverflowGroups } from '../src-ssr/services/sync/orchestrator.ts';
 import { MovieRepository } from '../src-ssr/repositories/movieRepository.ts';
 import { RecommendationRepository } from '../src-ssr/repositories/recommendationRepository.ts';
+import { RecommendationFreshnessRepository } from '../src-ssr/repositories/recommendationFreshnessRepository.ts';
 
 const originalFetch = globalThis.fetch;
 const instances = [];
@@ -97,6 +98,7 @@ test('preserves last-good targets when the TMDB recommendation request is retrya
       replaceTargetsForSlug: async (...args) => replaced.push(args),
       requeueTarget: async () => undefined,
     },
+    recommendationFreshness: { markAttempt: async () => undefined },
     taxonomy: { syncMovieTaxonomy: async () => undefined },
     search: { indexMovie: async () => undefined },
     tmdbOverride: { getBySlug: async () => null },
@@ -134,6 +136,7 @@ test('replaces targets with an empty list only after a valid TMDB empty result',
       replaceTargetsForSlug: async (...args) => replaced.push(args),
       requeueTarget: async () => undefined,
     },
+    recommendationFreshness: { markAttempt: async () => undefined },
     taxonomy: { syncMovieTaxonomy: async () => undefined },
     search: { indexMovie: async () => undefined },
     tmdbOverride: { getBySlug: async () => null },
@@ -161,6 +164,7 @@ test('uses a verified TMDB override when the upstream record has no TMDB identit
     movie: { getSyncMarkersBySlugs: async () => new Map([['tro-choi-vuong-quyen-phan-1', { sourceHash: 'old', upstreamModified: null }]]), upsertMany: async (rows) => { written.push(...rows); return 1; } },
     episode: { replaceForSlug: async () => undefined },
     recommendation: { replaceTargetsForSlug: async () => undefined, getTargetsForSlug: async () => [], requeueTarget: async () => undefined },
+    recommendationFreshness: { markAttempt: async () => undefined },
     taxonomy: { syncMovieTaxonomy: async () => undefined },
     search: { indexMovie: async () => undefined },
     tmdbOverride: { getBySlug: async () => ({ tmdbId: 1399, tmdbType: 'tv', tmdbSeason: 1, source: 'override' }) },
@@ -320,6 +324,7 @@ test('syncOneMovie requeues an overflow edge event-driven when its own tmdb iden
     movie: { getSyncMarkersBySlugs: async () => new Map(), upsertMany: async () => 1 },
     episode: { replaceForSlug: async () => undefined },
     recommendation: new RecommendationRepository(db),
+    recommendationFreshness: new RecommendationFreshnessRepository(db),
     taxonomy: { syncMovieTaxonomy: async () => undefined },
     search: { indexMovie: async () => undefined },
     tmdbOverride: { getBySlug: async () => null },
@@ -341,6 +346,47 @@ test('syncOneMovie requeues an overflow edge event-driven when its own tmdb iden
     ).bind('other-source', 42, 'movie').first(),
     { resolve_attempted: 0 }
   );
+});
+
+test('syncOneMovie records a freshness attempt on the written branch: success and retryable', async () => {
+  const { db } = await setupResolver();
+  const repos = {
+    movie: { getSyncMarkersBySlugs: async () => new Map(), upsertMany: async () => 1 },
+    episode: { replaceForSlug: async () => undefined },
+    recommendation: new RecommendationRepository(db),
+    recommendationFreshness: new RecommendationFreshnessRepository(db),
+    taxonomy: { syncMovieTaxonomy: async () => undefined },
+    search: { indexMovie: async () => undefined },
+    tmdbOverride: { getBySlug: async () => null },
+  };
+
+  const okResult = await syncOneMovie({}, 'freshness-ok', {
+    kkphim: { getDetail: async () => kkDetail('freshness-ok') },
+    tmdb: {
+      getDetail: async () => null,
+      getSeasonDetail: async () => null,
+      getRecommendationIds: async () => ({ kind: 'success', ids: [7] }),
+    },
+  }, repos);
+  assert.equal(okResult.outcome, 'written');
+  const okRow = await db.prepare(
+    'SELECT last_success_at IS NOT NULL AS has_success, result FROM recommendation_freshness WHERE slug = ?'
+  ).bind('freshness-ok').first();
+  assert.deepEqual(okRow, { has_success: 1, result: 'success' });
+
+  const retryResult = await syncOneMovie({}, 'freshness-retry', {
+    kkphim: { getDetail: async () => kkDetail('freshness-retry') },
+    tmdb: {
+      getDetail: async () => null,
+      getSeasonDetail: async () => null,
+      getRecommendationIds: async () => ({ kind: 'retryable_error' }),
+    },
+  }, repos);
+  assert.equal(retryResult.outcome, 'written');
+  const retryRow = await db.prepare(
+    'SELECT last_success_at, result FROM recommendation_freshness WHERE slug = ?'
+  ).bind('freshness-retry').first();
+  assert.deepEqual(retryRow, { last_success_at: null, result: 'retryable_error' });
 });
 
 test('requeueOverflowGroups scans at most once per 24h once stub headroom opens', async () => {

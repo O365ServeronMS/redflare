@@ -4,6 +4,7 @@ import { HeroSnapshotRepository } from '../../repositories/heroSnapshotRepositor
 import { MovieRepository } from '../../repositories/movieRepository';
 import { EpisodeRepository } from '../../repositories/episodeRepository';
 import { RecommendationRepository } from '../../repositories/recommendationRepository';
+import { RecommendationFreshnessRepository } from '../../repositories/recommendationFreshnessRepository';
 import { TaxonomyRepository } from '../../repositories/taxonomyRepository';
 import { SearchRepository } from '../../repositories/searchRepository';
 import { TmdbOverrideRepository } from '../../repositories/tmdbOverrideRepository';
@@ -231,6 +232,7 @@ export async function buildDependencies(env: Env): Promise<HeroRefreshDependenci
   const movie = new MovieRepository(env.DB);
   const episode = new EpisodeRepository(env.DB);
   const recommendation = new RecommendationRepository(env.DB);
+  const recommendationFreshness = new RecommendationFreshnessRepository(env.DB);
   const taxonomy = new TaxonomyRepository(env.DB);
   const search = new SearchRepository(env.DB);
   const tmdbOverride = new TmdbOverrideRepository(env.DB);
@@ -243,7 +245,7 @@ export async function buildDependencies(env: Env): Promise<HeroRefreshDependenci
     movie,
     syncCanonical: async (slug) => {
       const { syncOneMovie } = await import('./syncMovie');
-      return syncOneMovie(env, slug, { kkphim, tmdb }, { movie, episode, recommendation, taxonomy, search, tmdbOverride });
+      return syncOneMovie(env, slug, { kkphim, tmdb }, { movie, episode, recommendation, recommendationFreshness, taxonomy, search, tmdbOverride });
     },
   };
 }

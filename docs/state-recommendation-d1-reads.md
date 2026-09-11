@@ -80,3 +80,85 @@ trước khi dừng lại chờ duyệt (theo yêu cầu chủ dự án: dừng 
 
 **Việc còn lại:** 1.4 (catch-up SQL) và 1.5 (README ops note) chuyển sang
 Phase 6 và Phase 5 tương ứng, xem ghi chú trên.
+
+---
+
+### Phase 2 — Q6: freshness đầy đủ + query đi từ index
+
+Code xong 2026-09-12. **Chưa `wrangler d1 migrations apply`** (Phase 6).
+
+- **2.1** `migrations/0018_recommendation_freshness_seed.sql`: `INSERT OR
+  IGNORE INTO recommendation_freshness (slug, last_success_at,
+  last_attempt_at, result) SELECT slug, last_synced, last_synced, 'seeded'
+  FROM movie WHERE tier='catalog' AND tmdb_id IS NOT NULL AND tmdb_type IN
+  ('movie','tv')` — đúng như plan §2.1. Grep xác nhận (như plan yêu cầu):
+  không có code nào khác switch trên `recommendation_freshness.result`
+  ngoài `markAttempt`'s `excluded.result` CASE — giá trị mới `'seeded'` an
+  toàn. Chưa apply, ước tính ~30k rows read / ~14k rows written (Phase 6.2).
+- **2.2** `syncMovie.ts`: thêm `recommendationFreshness:
+  RecommendationFreshnessRepository` vào tham số `repos`; trong nhánh
+  `written`, cùng khối `if (tmdbId && tmdbType)` với hook 1.2, gọi
+  `markAttempt(slug, ...)`: `'success'`/`'valid_empty'` theo
+  `recommendation.ids.length`, hoặc `'retryable_error'`. Cập nhật **mọi**
+  caller của `syncOneMovie` (grep lại theo plan §2.2):
+  - `orchestrator.ts` `buildRepos`: thêm
+    `recommendationFreshness: new RecommendationFreshnessRepository(env.DB)`.
+  - `heroSnapshot.ts` `buildDependencies`: thêm biến `recommendationFreshness`,
+    truyền vào `syncCanonical`'s lời gọi `syncOneMovie`.
+  - `incrementalSyncWorkflow.ts`: không cần sửa — đã dùng `buildRepos(this.env)`
+    nguyên khối.
+  - `tests/incrementalSyncSafety.test.mjs`: không cần sửa — `kkDetail` ở
+    file đó luôn `tmdb: null` nên nhánh `if (tmdbId && tmdbType)` (cả hook
+    1.2 lẫn 2.2) không bao giờ chạy.
+- **2.3** `recommendationFreshnessRepository.ts` `getDueSources` viết lại
+  thành 2 query tuần tự (A: chưa từng thành công + hết backoff, B: hết TTL,
+  `LIMIT = limit - A.length`), cả hai `CROSS JOIN` từ `recommendation_freshness`
+  sang `movie` như plan §2.3, giữ nguyên chữ ký + thứ tự kết quả.
+- **2.4** `movieRepository.ts` `getRecommendationSourceByTmdbRef` — không sửa
+  SQL, đúng plan. Ghi nhận: sau seed, một `tmdb_id` có nhiều bản catalog sẽ
+  ưu tiên dòng có `last_success_at` seeded (non-NULL) hơn dòng chưa từng
+  refresh — chấp nhận, đúng ngữ nghĩa "có recs hơn".
+
+**EXPLAIN QUERY PLAN trên production (Luật chung #2), không tốn rows read:**
+
+Query A (chưa từng thành công):
+```
+SEARCH f USING INDEX idx_recommendation_freshness_success (last_success_at=?)
+SEARCH m USING INDEX sqlite_autoindex_movie_1 (slug=?)
+```
+Query B (hết TTL):
+```
+SEARCH f USING COVERING INDEX idx_recommendation_freshness_success (last_success_at<?)
+SEARCH m USING INDEX sqlite_autoindex_movie_1 (slug=?)
+```
+Cả hai đúng kỳ vọng plan §2.3 — không `SCAN`, không `TEMP B-TREE`.
+
+**Test:**
+- `tests/recommendationRefresh.test.mjs`: `setup()` seed thêm một dòng
+  `recommendation_freshness` cho `'source'` (`last_success_at = NULL,
+  last_attempt_at = 0`) để khớp giả định mới (nếu không, 'source' không có
+  dòng freshness nên 2 query mới không nhặt được nó — vì đi từ
+  `recommendation_freshness`, không còn anti-join `movie`). Thêm 4 test đơn
+  vị cho `getDueSources` qua helper `setupFreshnessOnly()` (chỉ bảng
+  `movie` + migration 0011, không cần bảng `recommendation`): thứ tự
+  never-succeeded trước expired; never-succeeded còn trong backoff bị loại;
+  `limit` chia đúng giữa A và B, expired sort theo `last_success_at` tăng
+  dần; movie `tier='stub'` hoặc thiếu `tmdb_id` bị loại dù có dòng freshness
+  hết hạn.
+- `tests/recommendationFailureSafety.test.mjs`: 4 mock `recommendation` (2
+  test `syncOneMovie` cũ + 1 override test + 1 test event-driven mới) thêm
+  `recommendationFreshness: { markAttempt: async () => undefined }` (hoặc
+  `RecommendationFreshnessRepository(db)` thật ở 2 test dùng
+  `setupResolver()`) — trước đó không có key này nên nhánh mới ở 2.2 throw.
+  Thêm test `syncOneMovie records a freshness attempt on the written
+  branch: success and retryable`: 1 sync thành công (`ids:[7]`) → dòng
+  freshness `result='success'`, `last_success_at` non-null; 1 sync với TMDB
+  recs `retryable_error` → `result='retryable_error'`, `last_success_at`
+  vẫn `null` (CASE giữ nguyên giá trị cũ, không có dòng cũ nên vẫn null).
+
+**Verify (Luật chung #1) — tất cả xanh:**
+`worker:typecheck` ok · `test:recommendation-safety` 16 (15 cũ/Phase-1 + 1
+mới) · `test:recommendation-refresh` 7 (3 cũ + 4 mới) · `test:incremental-sync`
+18 · `test:hero-refresh` 8.
+
+**Việc còn lại:** apply `0018` + đo `rows_written` thật (Phase 6.2).
