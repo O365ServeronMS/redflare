@@ -37,6 +37,7 @@ function validateMetadata(metadata: HeroSnapshotMetadata): void {
     metadata.result.matchedCount,
     metadata.result.notFoundCount,
     metadata.result.failedCount,
+    metadata.result.budgetSkipped,
   ];
   if (values.some((value) => !Number.isInteger(value) || value < 0)) {
     throw new TypeError('Hero snapshot metadata values must be non-negative integers');
@@ -54,7 +55,7 @@ function parseResult(value: string | null): HeroRefreshResult | null {
     const parsed: unknown = JSON.parse(value);
     if (typeof parsed !== 'object' || parsed === null) return null;
     const result = parsed as Record<string, unknown>;
-    const fields = ['tmdbCount', 'matchedCount', 'notFoundCount', 'failedCount'] as const;
+    const fields = ['tmdbCount', 'matchedCount', 'notFoundCount', 'failedCount', 'budgetSkipped'] as const;
     if (!fields.every((field) => Number.isInteger(result[field]) && (result[field] as number) >= 0)) return null;
     return result as unknown as HeroRefreshResult;
   } catch {
@@ -79,7 +80,7 @@ export class HeroSnapshotRepository {
   /** D1 batch() is documented as a SQL transaction that rolls back the
    * sequence on failure:
    * https://developers.cloudflare.com/d1/worker-api/d1-database/#batch */
-  async replaceSnapshot(rows: readonly HeroSnapshotEntry[], metadata: HeroSnapshotMetadata): Promise<void> {
+  async replaceSnapshot(rows: readonly HeroSnapshotEntry[], metadata: HeroSnapshotMetadata): Promise<number> {
     validateRows(rows);
     validateMetadata(metadata);
 
@@ -97,6 +98,11 @@ export class HeroSnapshotRepository {
       upsertState.bind(LAST_RESULT_KEY, JSON.stringify(metadata.result), metadata.lastAttemptAt)
     );
     await this.db.batch(statements);
+    // Phase 2 (docs/plan-free-tier-overrun.md 2.4 row-accounting table):
+    // hero_snapshot has no secondary index, so DELETE+INSERT costs 2
+    // rows/entry. The sync_state upserts above aren't counted (see the
+    // convention table's note on sync_state itself).
+    return rows.length * 2;
   }
 
   /** Records a failed refresh without touching the last-known-good

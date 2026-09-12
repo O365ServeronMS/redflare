@@ -66,13 +66,13 @@ export class CatalogStatsRepository {
    * wrote rows, RecommendationResolveWorkflow after a tick that created a
    * stub) -- never on a fixed schedule, since steady-state ticks write
    * nothing. */
-  async refresh(): Promise<void> {
+  async refresh(): Promise<number> {
     const now = Math.floor(Date.now() / 1000);
     const stamp = await this.db
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .bind(REFRESH_STAMP_KEY)
       .first<{ value: string }>();
-    if (stamp && now - Number(stamp.value) < REFRESH_MIN_INTERVAL_SECONDS) return;
+    if (stamp && now - Number(stamp.value) < REFRESH_MIN_INTERVAL_SECONDS) return 0;
 
     const [tierRow, typeRes, genreRes, countryRes] = await Promise.all([
       this.db.prepare("SELECT COUNT(*) AS n FROM movie WHERE tier = 'catalog'").first<{ n: number }>(),
@@ -101,5 +101,10 @@ export class CatalogStatsRepository {
       )
       .bind(REFRESH_STAMP_KEY, String(now), now)
       .run();
+
+    // Phase 2 (docs/plan-free-tier-overrun.md 2.5 row-accounting table):
+    // catalog_stats has no secondary index, so the DELETE+INSERT above costs
+    // 2 rows/entry; +2 for the sync_state stamp upsert (1 row + its index).
+    return rows.length * 2 + 2;
   }
 }

@@ -88,3 +88,29 @@ test('refresh() runs again once the 6h window has elapsed', async () => {
   await repo.refresh();
   assert.equal(recomputeCount(db), 2, "a stale stamp lets refresh recompute");
 });
+
+// Phase 2 (docs/plan-free-tier-overrun.md 2.5): refresh()'s return value
+// feeds the write-budget counter, so it must match the row-accounting table
+// exactly -- no secondary index on catalog_stats, so DELETE+INSERT costs 2
+// rows/entry (1 tier + 1 type + 1 genre + 1 country = 4 entries from fakeDb's
+// canned aggregates), +2 for the sync_state stamp upsert.
+test("refresh() trả đúng số rows", async () => {
+  const db = fakeDb();
+  const repo = new CatalogStatsRepository(db);
+
+  Date.now = () => 1_000_000_000_000;
+  const rowsWritten = await repo.refresh();
+  assert.equal(rowsWritten, 4 * 2 + 2);
+});
+
+test('thoát sớm vì rate limit → trả 0', async () => {
+  const db = fakeDb();
+  const repo = new CatalogStatsRepository(db);
+
+  Date.now = () => 1_000_000_000_000;
+  await repo.refresh();
+
+  Date.now = () => 1_000_000_000_000 + 5 * 60 * 60 * 1000; // +5h, still inside the window
+  const rowsWritten = await repo.refresh();
+  assert.equal(rowsWritten, 0);
+});

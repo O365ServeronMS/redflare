@@ -28,7 +28,7 @@ async function setup() {
 const metadata = {
   lastSuccessAt: 1_800_000_000,
   lastAttemptAt: 1_800_000_005,
-  result: { tmdbCount: 20, matchedCount: 2, notFoundCount: 18, failedCount: 0 },
+  result: { tmdbCount: 20, matchedCount: 2, notFoundCount: 18, failedCount: 0, budgetSkipped: 0 },
 };
 
 test('keeps sparse rank order, rejects duplicate TMDB IDs, and accepts empty snapshots', async () => {
@@ -57,7 +57,7 @@ test('keeps sparse rank order, rejects duplicate TMDB IDs, and accepts empty sna
   const empty = {
     lastSuccessAt: metadata.lastSuccessAt + 60,
     lastAttemptAt: metadata.lastAttemptAt + 60,
-    result: { tmdbCount: 0, matchedCount: 0, notFoundCount: 0, failedCount: 0 },
+    result: { tmdbCount: 0, matchedCount: 0, notFoundCount: 0, failedCount: 0, budgetSkipped: 0 },
   };
   await repo.replaceSnapshot([], empty);
   assert.deepEqual(await repo.getRankedMovies(), []);

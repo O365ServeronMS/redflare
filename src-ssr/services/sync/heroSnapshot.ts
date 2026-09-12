@@ -11,9 +11,13 @@ import { TmdbOverrideRepository } from '../../repositories/tmdbOverrideRepositor
 import { KkphimClient, type KkphimDetailResponse } from './kkphimClient';
 import { TmdbClient, type TmdbTrendingMovie } from './tmdbClient';
 import { PHIMAPI_AGGREGATE_RPS, RateLimiter, TMDB_AGGREGATE_RPS } from './throttle';
+import { INSTANCE_SUBREQUEST_BUDGET, MAX_FETCHES_PER_SYNC } from './orchestrator';
 
 export const HERO_REFRESH_INTERVAL_SECONDS = 30 * 60;
-const HERO_LOOKUP_CONCURRENCY = 4;
+// A candidate costs 1 (kkphim lookup) + up to MAX_FETCHES_PER_SYNC when it
+// still has to be synced. Free: 50 external subrequests per Workflow
+// instance (docs/state-incremental-sync-stall.md 5.2b).
+const HERO_SYNC_CALL_COST = MAX_FETCHES_PER_SYNC;
 
 type CanonicalSyncOutcome = { outcome: 'written' | 'unchanged' | 'skipped' | 'error' };
 
@@ -42,6 +46,7 @@ export interface HeroRefreshSummary extends HeroRefreshResult {
   filteredNoStream: number;
   filteredNoBackdrop: number;
   failed: number;
+  budgetSkipped: number;
   durationMs: number;
 }
 
@@ -51,7 +56,8 @@ export type CandidateOutcome =
   | { kind: 'filtered_type' }
   | { kind: 'filtered_no_stream' }
   | { kind: 'filtered_no_backdrop' }
-  | { kind: 'retryable_error' };
+  | { kind: 'retryable_error' }
+  | { kind: 'budget_skipped' };
 
 /**
  * Builds the weekly Hero snapshot from TMDB's first 20 movie results. This
@@ -75,19 +81,26 @@ export async function refreshHeroSnapshot(env: Env, options: RefreshHeroSnapshot
   }
 
   const candidates = dedupeTrendingMovies(trending.movies);
-  const results = await mapLimit(candidates, HERO_LOOKUP_CONCURRENCY, (candidate) => resolveCandidate(candidate, deps));
   const rows: HeroSnapshotEntry[] = [];
   let notFound = 0;
   let filteredType = trending.rejectedTypeCount;
   let filteredNoStream = 0;
   let filteredNoBackdrop = 0;
   let failed = 0;
-  for (const result of results) {
+  let budgetSkipped = 0;
+  // Sequential, not mapLimit's parallel workers -- external-call accounting
+  // against INSTANCE_SUBREQUEST_BUDGET only works if `used` reflects calls
+  // already spent before the next candidate starts.
+  let used = 1; // fetch-trending above
+  for (const candidate of candidates) {
+    const result = await resolveCandidate(candidate, deps, INSTANCE_SUBREQUEST_BUDGET - used);
+    used += result.externalCalls;
     if (result.kind === 'matched') rows.push(result.row);
     else if (result.kind === 'not_found') notFound++;
     else if (result.kind === 'filtered_type') filteredType++;
     else if (result.kind === 'filtered_no_stream') filteredNoStream++;
     else if (result.kind === 'filtered_no_backdrop') filteredNoBackdrop++;
+    else if (result.kind === 'budget_skipped') budgetSkipped++;
     else failed++;
   }
 
@@ -99,6 +112,7 @@ export async function refreshHeroSnapshot(env: Env, options: RefreshHeroSnapshot
     filteredNoStream,
     filteredNoBackdrop,
     failed,
+    budgetSkipped,
     keptLastGood: failed > 0,
     durationMs: Date.now() - startedAt,
   });
@@ -127,33 +141,47 @@ export function dedupeTrendingMovies(movies: readonly TmdbTrendingMovie[]): Tmdb
  * whole batch of ~20 candidates run together in refreshHeroSnapshot below
  * was observed (docs/state-free-plan-migration.md Phase 0 audit) to cost
  * ~60+ external subrequests in one invocation -- over the Free-plan
- * 50/invocation cap on its own. */
-export async function resolveCandidate(candidate: TmdbTrendingMovie, deps: HeroRefreshDependencies): Promise<CandidateOutcome> {
+ * 50/invocation cap on its own. Skipping re-sync for candidates already in
+ * D1 (below) is only a heuristic that helps the common case; the hard cap
+ * is `remainingCalls` vs INSTANCE_SUBREQUEST_BUDGET, enforced by the caller. */
+export async function resolveCandidate(
+  candidate: TmdbTrendingMovie,
+  deps: HeroRefreshDependencies,
+  remainingCalls: number
+): Promise<CandidateOutcome & { externalCalls: number }> {
+  if (remainingCalls < 1) return { kind: 'budget_skipped', externalCalls: 0 };
+
   const lookup = await deps.kkphim.getMovieByTmdbId(candidate.id);
-  if (lookup.kind === 'not_found') return lookup;
-  if (lookup.kind === 'retryable_error') return lookup;
+  const externalCalls = 1;
+  if (lookup.kind === 'not_found') return { ...lookup, externalCalls };
+  if (lookup.kind === 'retryable_error') return { ...lookup, externalCalls };
 
-  if (!isExactMovieMatch(lookup.data, candidate.id)) return { kind: 'retryable_error' };
-  if (lookup.data.movie.type !== 'single') return { kind: 'filtered_type' };
-  if (!hasPlayableEpisode(lookup.data)) return { kind: 'filtered_no_stream' };
+  if (!isExactMovieMatch(lookup.data, candidate.id)) return { kind: 'retryable_error', externalCalls };
+  if (lookup.data.movie.type !== 'single') return { kind: 'filtered_type', externalCalls };
+  if (!hasPlayableEpisode(lookup.data)) return { kind: 'filtered_no_stream', externalCalls };
 
-  // Workers Free: 50 external subrequests per Workflow instance. A full
-  // syncOneMovie costs up to 5, so re-syncing all ~20 candidates blew the
-  // cap (2026-09-11). A row already in D1 as this exact catalog movie is
-  // kept fresh by incremental sync; only sync the ones that aren't.
+  // A row already in D1 as this exact catalog movie is kept fresh by
+  // incremental sync; only sync the ones that aren't, and only if there's
+  // remaining budget for syncCanonical's worst case (HERO_SYNC_CALL_COST).
   const slug = lookup.data.movie.slug;
   let movie = await deps.movie.getBySlug(slug);
   if (!isCatalogMovie(movie, candidate.id)) {
+    if (remainingCalls - externalCalls < HERO_SYNC_CALL_COST) return { kind: 'budget_skipped', externalCalls };
     const synced = await deps.syncCanonical(slug);
-    if (synced.outcome === 'error') return { kind: 'retryable_error' };
+    const afterSync = externalCalls + HERO_SYNC_CALL_COST;
+    if (synced.outcome === 'error') return { kind: 'retryable_error', externalCalls: afterSync };
     movie = await deps.movie.getBySlug(slug);
+    if (!isCatalogMovie(movie, candidate.id)) return { kind: 'retryable_error', externalCalls: afterSync };
+    if (movie.type !== 'single') return { kind: 'filtered_type', externalCalls: afterSync };
+    if (movie.has_stream !== 1) return { kind: 'filtered_no_stream', externalCalls: afterSync };
+    if (!hasBackdrop(movie)) return { kind: 'filtered_no_backdrop', externalCalls: afterSync };
+    return { kind: 'matched', row: { rank: candidate.rank, tmdbId: candidate.id, slug: movie.slug }, externalCalls: afterSync };
   }
-  if (!isCatalogMovie(movie, candidate.id)) return { kind: 'retryable_error' };
-  if (movie.type !== 'single') return { kind: 'filtered_type' };
-  if (movie.has_stream !== 1) return { kind: 'filtered_no_stream' };
-  if (!hasBackdrop(movie)) return { kind: 'filtered_no_backdrop' };
+  if (movie.type !== 'single') return { kind: 'filtered_type', externalCalls };
+  if (movie.has_stream !== 1) return { kind: 'filtered_no_stream', externalCalls };
+  if (!hasBackdrop(movie)) return { kind: 'filtered_no_backdrop', externalCalls };
 
-  return { kind: 'matched', row: { rank: candidate.rank, tmdbId: candidate.id, slug: movie.slug } };
+  return { kind: 'matched', row: { rank: candidate.rank, tmdbId: candidate.id, slug: movie.slug }, externalCalls };
 }
 
 function isCatalogMovie(movie: MovieRow | null, tmdbId: number): movie is MovieRow {
@@ -180,6 +208,7 @@ function toStoredResult(value: HeroRefreshSummary): HeroRefreshResult {
     matchedCount: value.matched,
     notFoundCount: value.notFound,
     failedCount: value.failed,
+    budgetSkipped: value.budgetSkipped,
   };
 }
 
@@ -188,6 +217,7 @@ function summary(values: Partial<HeroRefreshSummary>): HeroRefreshSummary {
   const matched = values.matched ?? 0;
   const notFound = values.notFound ?? 0;
   const failed = values.failed ?? 0;
+  const budgetSkipped = values.budgetSkipped ?? 0;
   return {
     skipped: values.skipped ?? false,
     keptLastGood: values.keptLastGood ?? false,
@@ -198,6 +228,7 @@ function summary(values: Partial<HeroRefreshSummary>): HeroRefreshSummary {
     filteredNoStream: values.filteredNoStream ?? 0,
     filteredNoBackdrop: values.filteredNoBackdrop ?? 0,
     failed,
+    budgetSkipped,
     durationMs: values.durationMs ?? 0,
     tmdbCount: fetched,
     matchedCount: matched,
@@ -213,19 +244,6 @@ async function keepLastGood(
 ): Promise<HeroRefreshSummary> {
   await hero.recordAttempt(now, toStoredResult(result));
   return result;
-}
-
-async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-  async function worker(): Promise<void> {
-    while (cursor < items.length) {
-      const index = cursor++;
-      results[index] = await fn(items[index] as T);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
 }
 
 export async function buildDependencies(env: Env): Promise<HeroRefreshDependencies> {

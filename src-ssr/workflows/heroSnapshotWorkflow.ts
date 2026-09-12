@@ -5,6 +5,9 @@ import {
   dedupeTrendingMovies,
   HERO_REFRESH_INTERVAL_SECONDS,
 } from '../services/sync/heroSnapshot';
+import { INSTANCE_SUBREQUEST_BUDGET } from '../services/sync/orchestrator';
+import { SyncStateRepository } from '../repositories/syncStateRepository';
+import { hasWriteBudget } from '../services/sync/writeBudget';
 import type { HeroSnapshotEntry } from '../types/heroSnapshot';
 
 /** Free-plan-safe replacement for heroSnapshot.ts's refreshHeroSnapshot,
@@ -15,13 +18,18 @@ import type { HeroSnapshotEntry } from '../types/heroSnapshot';
  * ~60+ external subrequests when it actually runs (not skipped by the
  * 30-minute gate), over the Free-plan 50/invocation cap on its own. Here
  * each candidate gets its own step instead -- but on Free the 50-subrequest
- * cap is per instance, not per step, so resolveCandidate skips re-syncing
- * candidates already in D1. Keeps the same 30-minute gate
- * (HERO_REFRESH_INTERVAL_SECONDS) so a real run only happens roughly once
- * per hour even under a tighter cron schedule, bounding step count. */
+ * cap is per instance, not per step, so `callsUsed` below tracks it
+ * explicitly (Phase 1, docs/plan-free-tier-overrun.md 2026-09-11 incident:
+ * resolveCandidate skipping re-syncs already-in-D1 candidates was only a
+ * heuristic, not a hard cap -- 6+ new candidates in one trending batch still
+ * blew the 50-subrequest ceiling and dropped the whole snapshot). Keeps the
+ * same 30-minute gate (HERO_REFRESH_INTERVAL_SECONDS) so a real run only
+ * happens roughly once per hour even under a tighter cron schedule,
+ * bounding step count. */
 export class HeroSnapshotWorkflow extends WorkflowEntrypoint<Env> {
   override async run(_event: WorkflowEvent<unknown>, step: WorkflowStep) {
     const deps = await buildDependencies(this.env);
+    const syncState = new SyncStateRepository(this.env.DB);
 
     const gate = await step.do('check-gate', async () => {
       const state = await deps.hero.getRefreshState();
@@ -31,10 +39,16 @@ export class HeroSnapshotWorkflow extends WorkflowEntrypoint<Env> {
     });
     if (!gate.due) return { skipped: true, matched: 0, failed: 0 };
 
+    // Phase 2 (docs/plan-free-tier-overrun.md 2.4/V1): checked before
+    // fetch-trending, not just before write-snapshot -- out of budget means
+    // this run can't write, so don't spend TMDB/KKPhim subrequests on it.
+    const budgetOk = await step.do('check-write-budget', () => hasWriteBudget(syncState));
+    if (!budgetOk) return { skipped: 'write_budget' as const, matched: 0, failed: 0 };
+
     const trending = await step.do('fetch-trending', () => deps.tmdb.getTrendingMovies('week'));
     if (!trending) {
       await step.do('record-failed-attempt', () =>
-        deps.hero.recordAttempt(gate.now, { tmdbCount: 0, matchedCount: 0, notFoundCount: 0, failedCount: 1 })
+        deps.hero.recordAttempt(gate.now, { tmdbCount: 0, matchedCount: 0, notFoundCount: 0, failedCount: 1, budgetSkipped: 0 })
       );
       return { skipped: false, matched: 0, failed: 1 };
     }
@@ -46,29 +60,53 @@ export class HeroSnapshotWorkflow extends WorkflowEntrypoint<Env> {
     let filteredNoStream = 0;
     let filteredNoBackdrop = 0;
     let failed = 0;
+    let budgetSkipped = 0;
+    // Persists across steps the same way recommendationResolveWorkflow.ts's
+    // callsUsed does -- re-derived from each step's own returned
+    // externalCalls, not an outer closure variable, so a replay after an
+    // interruption sees the right remaining budget without re-running
+    // earlier steps' callbacks.
+    let callsUsed = 1; // fetch-trending above
 
     for (const candidate of candidates) {
-      const outcome = await step.do(`resolve-candidate-${candidate.id}`, () => resolveCandidate(candidate, deps));
+      const callsUsedBefore = callsUsed;
+      const outcome = await step.do(`resolve-candidate-${candidate.id}`, () =>
+        resolveCandidate(candidate, deps, INSTANCE_SUBREQUEST_BUDGET - callsUsedBefore)
+      );
+      callsUsed = callsUsedBefore + outcome.externalCalls;
       if (outcome.kind === 'matched') rows.push(outcome.row);
       else if (outcome.kind === 'not_found') notFound++;
       else if (outcome.kind === 'filtered_type') filteredType++;
       else if (outcome.kind === 'filtered_no_stream') filteredNoStream++;
       else if (outcome.kind === 'filtered_no_backdrop') filteredNoBackdrop++;
+      else if (outcome.kind === 'budget_skipped') budgetSkipped++;
       else failed++;
     }
 
-    const result = { tmdbCount: trending.fetchedCount, matchedCount: rows.length, notFoundCount: notFound, failedCount: failed };
+    const result = {
+      tmdbCount: trending.fetchedCount,
+      matchedCount: rows.length,
+      notFoundCount: notFound,
+      failedCount: failed,
+      budgetSkipped,
+    };
     if (failed > 0) {
       // Same "don't replace a last-good snapshot with a partial one" rule
       // as refreshHeroSnapshot -- any retryable candidate failure keeps the
-      // existing snapshot and just records the attempt.
+      // existing snapshot and just records the attempt. budget_skipped is
+      // NOT a failure -- it must never trigger this branch, or the governor
+      // itself would cause the exact snapshot-dropping incident it exists
+      // to prevent.
       await step.do('record-failed-attempt', () => deps.hero.recordAttempt(gate.now, result));
       return { skipped: false, matched: rows.length, failed };
     }
 
-    await step.do('write-snapshot', () =>
+    const rowsWritten = await step.do('write-snapshot', () =>
       deps.hero.replaceSnapshot(rows, { lastSuccessAt: gate.now, lastAttemptAt: gate.now, result })
     );
-    return { skipped: false, matched: rows.length, notFound, filteredType, filteredNoStream, filteredNoBackdrop, failed };
+    if (rowsWritten > 0) {
+      await step.do('record-rows-written', () => syncState.addRowsWrittenToday(rowsWritten));
+    }
+    return { skipped: false, matched: rows.length, notFound, filteredType, filteredNoStream, filteredNoBackdrop, failed, budgetSkipped };
   }
 }

@@ -6,6 +6,10 @@ import { Miniflare } from 'miniflare';
 import { runRecommendationRefreshTick } from '../src-ssr/services/sync/recommendationRefresh.ts';
 import { RecommendationFreshnessRepository } from '../src-ssr/repositories/recommendationFreshnessRepository.ts';
 import { RecommendationRepository } from '../src-ssr/repositories/recommendationRepository.ts';
+import { SyncStateRepository } from '../src-ssr/repositories/syncStateRepository.ts';
+import { RecommendationRefreshWorkflow } from '../src-ssr/workflows/recommendationRefreshWorkflow.ts';
+
+const noopStep = { do: async (_name, fn) => fn() };
 
 const originalFetch = globalThis.fetch;
 const instances = [];
@@ -26,6 +30,7 @@ async function setup() {
   await db.batch([
     db.prepare('CREATE TABLE movie (slug TEXT PRIMARY KEY, tmdb_id INTEGER, tmdb_type TEXT, tier TEXT)'),
     db.prepare('CREATE TABLE recommendation (slug TEXT NOT NULL, target_slug TEXT, target_tmdb_id INTEGER NOT NULL, target_type TEXT NOT NULL, sort_order INTEGER NOT NULL, resolve_attempted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (slug, target_tmdb_id, target_type))'),
+    db.prepare('CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)'),
   ]);
   const migration = await readFile(new URL('../migrations/0011_recommendation_freshness.sql', import.meta.url), 'utf8');
   await db.batch(migration.replaceAll(/--.*$/gm, '').split(';').map((sql) => sql.trim()).filter(Boolean).map((sql) => db.prepare(sql)));
@@ -165,7 +170,7 @@ test('replaceTargetsPreservingResolvedForSlug: an identical rank list is not rew
     { targetTmdbId: 42, targetType: 'movie', sortOrder: 0 },
   ]);
 
-  assert.equal(wrote, false);
+  assert.equal(wrote, 0);
   const after = await db.prepare('SELECT rowid, target_slug FROM recommendation WHERE slug = ?').bind('source').first();
   assert.deepEqual(after, { rowid: before.rowid, target_slug: 'existing-target' });
 });
@@ -180,7 +185,7 @@ test('replaceTargetsPreservingResolvedForSlug: a reordered or expanded list is s
     { targetTmdbId: 42, targetType: 'movie', sortOrder: 1 },
   ]);
 
-  assert.equal(wrote, true);
+  assert.equal(wrote, 12); // 2 edges * 6 rows/DELETE+INSERT (idx_rec_lookup, idx_rec_target)
   const after = await db.prepare(
     'SELECT rowid, target_tmdb_id, sort_order FROM recommendation WHERE slug = ? ORDER BY sort_order'
   ).bind('source').all();
@@ -188,4 +193,36 @@ test('replaceTargetsPreservingResolvedForSlug: a reordered or expanded list is s
   // The DELETE+INSERT rewrite means even the still-present target (42) gets
   // a fresh rowid -- proof this path did NOT take the no-op early return.
   assert.notEqual(after.results[1].rowid, before.rowid);
+});
+
+test('RecommendationRefreshWorkflow: exhausted write budget skips the run entirely (no TMDB call, no writes)', async () => {
+  const { db, env } = await setup();
+  await new SyncStateRepository(db).addRowsWrittenToday(85_000);
+  let fetchCalled = false;
+  globalThis.fetch = async () => { fetchCalled = true; return Response.json({ results: [] }); };
+
+  const workflow = new RecommendationRefreshWorkflow({}, env);
+  const result = await workflow.run({}, noopStep);
+
+  assert.equal(result.skipped, 'write_budget');
+  assert.equal(fetchCalled, false);
+  assert.deepEqual(await db.prepare('SELECT target_slug, target_tmdb_id FROM recommendation WHERE slug = ?').bind('source').first(), {
+    target_slug: 'existing-target', target_tmdb_id: 42,
+  });
+});
+
+test('RecommendationRefreshWorkflow: addRowsWrittenToday ends up with the correct total after one run', async () => {
+  const { db, env } = await setup();
+  await db.prepare("INSERT INTO movie (slug, tmdb_id, tmdb_type, tier) VALUES ('local-target', 43, 'movie', 'catalog')").run();
+  await db.prepare("INSERT INTO recommendation_freshness (slug, last_success_at, last_attempt_at, result) VALUES ('local-target', ?, ?, 'success')")
+    .bind(Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000)).run();
+  globalThis.fetch = async () => Response.json({ results: [{ id: 42 }, { id: 43 }] });
+
+  const workflow = new RecommendationRefreshWorkflow({}, env);
+  const result = await workflow.run({}, noopStep);
+
+  assert.equal(result.refreshed, 1);
+  // 2 edges * 6 rows/DELETE+INSERT (idx_rec_lookup, idx_rec_target) + 2 for
+  // the recommendation_freshness markAttempt upsert (idx_..._success).
+  assert.equal(await new SyncStateRepository(db).getRowsWrittenToday(), 14);
 });

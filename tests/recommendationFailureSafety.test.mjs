@@ -9,6 +9,11 @@ import { runRecommendationResolveTick, buildRepos, requeueOverflowGroups } from 
 import { MovieRepository } from '../src-ssr/repositories/movieRepository.ts';
 import { RecommendationRepository } from '../src-ssr/repositories/recommendationRepository.ts';
 import { RecommendationFreshnessRepository } from '../src-ssr/repositories/recommendationFreshnessRepository.ts';
+import { SyncStateRepository } from '../src-ssr/repositories/syncStateRepository.ts';
+import { MAX_ROWS_PER_DAY } from '../src-ssr/services/sync/writeBudget.ts';
+import { RecommendationResolveWorkflow } from '../src-ssr/workflows/recommendationResolveWorkflow.ts';
+
+const noopStep = { do: async (_name, fn) => fn() };
 
 const originalFetch = globalThis.fetch;
 const instances = [];
@@ -297,6 +302,23 @@ test('resolve tick caps upstream groups at floor(50/6) per instance; local resol
   // Proves groups past the 8th genuinely never fetch, not just that their
   // outcome is uncounted: 8 groups x (1 lookup + 1 failed detail fetch).
   assert.equal(fetchCalls, 16);
+});
+
+test('RecommendationResolveWorkflow: exhausted write budget skips requeue-overflow and the resolve loop entirely', async () => {
+  const { db, env } = await setupResolver();
+  await new SyncStateRepository(db).addRowsWrittenToday(MAX_ROWS_PER_DAY);
+  globalThis.fetch = async () => {
+    throw new Error('must not fetch upstream when the write budget is exhausted');
+  };
+
+  const workflow = new RecommendationResolveWorkflow({}, env);
+  const result = await workflow.run({}, noopStep);
+
+  assert.equal(result.skipped, 'write_budget');
+  assert.deepEqual(resolveSummary(result), {
+    groupsSeen: 0, resolvedToExisting: 0, resolvedToStub: 0, overflow: 0, retryable: 0,
+  });
+  assert.deepEqual(await resolveState(db), { target_slug: null, resolve_attempted: 0 });
 });
 
 test('TMDB retryable failure while building a stub leaves the target pending', async () => {

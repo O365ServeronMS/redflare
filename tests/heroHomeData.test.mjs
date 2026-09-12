@@ -49,7 +49,7 @@ test('home-data reads Hero and Trending only from the weekly ranked snapshot', a
   await hero.replaceSnapshot([{ rank: 8, tmdbId: 101, slug: 'ranked-weekly-movie' }], {
     lastSuccessAt: 1_800_000_000,
     lastAttemptAt: 1_800_000_000,
-    result: { tmdbCount: 20, matchedCount: 1, notFoundCount: 19, failedCount: 0 },
+    result: { tmdbCount: 20, matchedCount: 1, notFoundCount: 19, failedCount: 0, budgetSkipped: 0 },
   });
 
   const homeData = await buildHomeData(db);
@@ -59,7 +59,7 @@ test('home-data reads Hero and Trending only from the weekly ranked snapshot', a
   await hero.replaceSnapshot([], {
     lastSuccessAt: 1_800_001_800,
     lastAttemptAt: 1_800_001_800,
-    result: { tmdbCount: 20, matchedCount: 0, notFoundCount: 20, failedCount: 0 },
+    result: { tmdbCount: 20, matchedCount: 0, notFoundCount: 20, failedCount: 0, budgetSkipped: 0 },
   });
   const emptyHomeData = await buildHomeData(db);
   assert.deepEqual(emptyHomeData.heroMovies, []);
@@ -78,7 +78,7 @@ test('home-data caps Trending at 12 while preserving TMDB weekly order', async (
   await hero.replaceSnapshot(rows, {
     lastSuccessAt: 1_800_000_000,
     lastAttemptAt: 1_800_000_000,
-    result: { tmdbCount: 20, matchedCount: 13, notFoundCount: 7, failedCount: 0 },
+    result: { tmdbCount: 20, matchedCount: 13, notFoundCount: 7, failedCount: 0, budgetSkipped: 0 },
   });
 
   const homeData = await buildHomeData(db);
@@ -95,7 +95,7 @@ test('Hero ops routes remain CRON_KEY-gated and status exposes only refresh meta
   await hero.replaceSnapshot([], {
     lastSuccessAt: now,
     lastAttemptAt: now,
-    result: { tmdbCount: 20, matchedCount: 0, notFoundCount: 20, failedCount: 0 },
+    result: { tmdbCount: 20, matchedCount: 0, notFoundCount: 20, failedCount: 0, budgetSkipped: 0 },
   });
   const env = { DB: db, CRON_KEY: 'test-cron-key', BACKFILL_MODE: 'burst', MAX_STUBS: '0' };
 

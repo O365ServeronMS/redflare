@@ -16,6 +16,12 @@ export interface RecommendationRefreshTickResult {
 
 export interface RefreshSourceOutcome {
   kind: 'refreshed' | 'valid_empty' | 'retryable';
+  // D1 rows (index writes included) this source actually wrote -- Phase 2
+  // (docs/plan-free-tier-overrun.md 2.2): callers accumulate this into
+  // SyncStateRepository.addRowsWrittenToday. markAttempt's upsert always
+  // costs 2 (1 row + 1 index); replaceTargetsPreservingResolvedForSlug adds
+  // its own count on top when the target list actually changed.
+  rowsWritten: number;
 }
 
 /** One source's worth of the refresh tick, extracted so a caller wanting
@@ -32,14 +38,14 @@ export async function refreshOneSource(
   const result = await tmdb.getRecommendationIds(source.tmdbType, source.tmdbId, 15);
   if (result.kind === 'retryable_error') {
     await freshness.markAttempt(source.slug, 'retryable_error');
-    return { kind: 'retryable' };
+    return { kind: 'retryable', rowsWritten: 2 };
   }
-  await recommendation.replaceTargetsPreservingResolvedForSlug(
+  const targetsWritten = await recommendation.replaceTargetsPreservingResolvedForSlug(
     source.slug,
     result.ids.map((targetTmdbId, sortOrder) => ({ targetTmdbId, targetType: source.tmdbType, sortOrder }))
   );
   await freshness.markAttempt(source.slug, result.ids.length === 0 ? 'valid_empty' : 'success');
-  return { kind: result.ids.length === 0 ? 'valid_empty' : 'refreshed' };
+  return { kind: result.ids.length === 0 ? 'valid_empty' : 'refreshed', rowsWritten: targetsWritten + 2 };
 }
 
 /** Refreshes source recommendation IDs without fetching KKPhim/movie detail,

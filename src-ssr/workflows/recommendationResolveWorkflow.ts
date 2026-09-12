@@ -9,6 +9,7 @@ import {
   RESOLVE_MAX_CALLS_PER_GROUP,
   INSTANCE_SUBREQUEST_BUDGET,
 } from '../services/sync/orchestrator';
+import { hasWriteBudget } from '../services/sync/writeBudget';
 
 // docs/state-free-plan-migration.md Phase 0 measured this job at ~169
 // external subrequests in one invocation against a real backlog -- over 3x
@@ -44,6 +45,26 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
     // without re-running earlier steps' callbacks.
     const stubCountRef = { count: initialStubCount };
 
+    // Phase 2 (docs/plan-free-tier-overrun.md 2.3/V1): checked before
+    // requeue-overflow and the resolve loop, both of which write -- out of
+    // budget means none of this run's writes could land anyway.
+    const budgetOk = await step.do('check-write-budget', () => hasWriteBudget(repos.syncState));
+    if (!budgetOk) {
+      return {
+        skipped: 'write_budget' as const,
+        groupsSeen: 0,
+        deferred: 0,
+        requeueCandidates: 0,
+        requeued: 0,
+        resolvedToExisting: 0,
+        resolvedToStub: 0,
+        overflow: 0,
+        retryable: 0,
+        stubCount: stubCountRef.count,
+        maxStubs,
+      };
+    }
+
     const requeue = await step.do('requeue-overflow', () => requeueOverflowGroups(repos, maxStubs, stubCountRef.count));
     const groups = await step.do('fetch-unresolved-groups', () => repos.recommendation.getUnresolvedGroupedByTarget(RESOLVE_BATCH_SIZE));
 
@@ -55,6 +76,9 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
     // step re-derives it from its own stored return value on replay rather
     // than re-running earlier steps' callbacks.
     let callsUsed = 0;
+    // Same re-derive-from-return-value pattern as callsUsed, for the daily
+    // D1 row-write counter (Phase 2, docs/plan-free-tier-overrun.md 2.3).
+    let rowsWritten = 0;
 
     for (let i = 0; i < groups.length; i += GROUPS_PER_STEP) {
       const batch = groups.slice(i, i + GROUPS_PER_STEP);
@@ -65,6 +89,7 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
         let over = 0;
         let retry = 0;
         let used = callsUsedBefore;
+        let rows = 0;
         let stopped = false;
         for (const group of batch) {
           // Worst case first, since a group's actual cost (0 for a local
@@ -76,12 +101,13 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
           }
           const outcome = await resolveOneGroup(this.env, repos, clients, group, maxStubs, stubCountRef);
           used += outcome.externalCalls;
+          rows += outcome.rowsWritten;
           if (outcome.kind === 'resolved_existing') existing++;
           else if (outcome.kind === 'resolved_stub') stub++;
           else if (outcome.kind === 'overflow') over++;
           else retry++;
         }
-        return { existing, stub, over, retry, stubCount: stubCountRef.count, callsUsed: used, stopped };
+        return { existing, stub, over, retry, stubCount: stubCountRef.count, callsUsed: used, rows, stopped };
       });
       resolvedToExisting += batchResult.existing;
       resolvedToStub += batchResult.stub;
@@ -89,6 +115,7 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
       retryable += batchResult.retry;
       stubCountRef.count = batchResult.stubCount;
       callsUsed = batchResult.callsUsed;
+      rowsWritten += batchResult.rows;
       if (batchResult.stopped) break;
     }
 
@@ -96,7 +123,11 @@ export class RecommendationResolveWorkflow extends WorkflowEntrypoint<Env> {
     // `type` value, see normalizeStubMovie) -- resolving to an existing
     // target just rewrites a foreign key, never a movie row.
     if (resolvedToStub > 0) {
-      await step.do('refresh-catalog-stats', () => repos.catalogStats.refresh());
+      rowsWritten += await step.do('refresh-catalog-stats', () => repos.catalogStats.refresh());
+    }
+
+    if (rowsWritten > 0) {
+      await step.do('record-rows-written', () => repos.syncState.addRowsWrittenToday(rowsWritten));
     }
 
     return {

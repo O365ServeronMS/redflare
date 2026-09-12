@@ -56,7 +56,7 @@ export class RecommendationRepository {
    * covers it) makes the index-wise comparison below valid without an
    * extra sort -- `edges` is always already in ascending sort_order from
    * its caller. */
-  async replaceTargetsPreservingResolvedForSlug(slug: string, edges: readonly RecommendationEdge[]): Promise<boolean> {
+  async replaceTargetsPreservingResolvedForSlug(slug: string, edges: readonly RecommendationEdge[]): Promise<number> {
     const current = await this.db.prepare(
       'SELECT target_tmdb_id, target_type, target_slug, sort_order FROM recommendation WHERE slug = ? ORDER BY sort_order'
     ).bind(slug).all<{ target_tmdb_id: number; target_type: string; target_slug: string | null; sort_order: number }>();
@@ -72,7 +72,7 @@ export class RecommendationRepository {
           && row.sort_order === edge.sortOrder;
       })
     ) {
-      return false;
+      return 0;
     }
 
     const resolved = new Map(currentRows.map((row) => [
@@ -102,7 +102,10 @@ export class RecommendationRepository {
       }
     }
     await this.db.batch(statements);
-    return true;
+    // Phase 2 (docs/plan-free-tier-overrun.md 2.2 row-accounting table):
+    // recommendation has 2 indexes besides its PK, so a DELETE+INSERT of a
+    // row costs 6 writes (3 for the deleted row, 3 for the inserted one).
+    return edges.length * 6;
   }
 
   /** Reads last-good target refs when a TMDB recommendation request fails. */

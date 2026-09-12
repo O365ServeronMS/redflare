@@ -9,6 +9,7 @@ export interface HeroRefreshResult {
   matchedCount: number;
   notFoundCount: number;
   failedCount: number;
+  budgetSkipped: number;
 }
 
 export interface HeroSnapshotMetadata {

@@ -14,13 +14,7 @@ import { normalizeStubMovie } from './normalize';
 import { hashMovie } from './hash';
 import { slugifyStub } from '../../lib/slugify';
 import { RateLimiter, PHIMAPI_AGGREGATE_RPS, TMDB_AGGREGATE_RPS } from './throttle';
-
-// Free-plan-only governor (ADR-0002 Finding 2 / plan §2.2). 85,000, not
-// 100,000: leaves ~15% headroom for FTS writes (Phase 6), the Phase 4
-// recommendation-resolve step, and estimate error -- discovered the hard
-// way once already in this project's history (D1's undocumented param cap;
-// this time the margin is deliberate, not a retrofit).
-const MAX_ROWS_PER_DAY = 85_000;
+import { MAX_ROWS_PER_DAY } from './writeBudget';
 
 // Matches the production worker's shard fan-out pattern (worker/lib/home.js,
 // worker/lib/mirror.js) rather than inventing a new one.
@@ -52,7 +46,7 @@ function resolveRecentPageCap(env: Env): number {
 // syncOneMovie makes at most 5: KKPhim detail, one canonical-alias
 // re-fetch, then TMDB detail + season + recommendations.
 export const INSTANCE_SUBREQUEST_BUDGET = 50;
-const MAX_FETCHES_PER_SYNC = 5;
+export const MAX_FETCHES_PER_SYNC = 5;
 
 // Resolve budget (docs/plan-recommendation-d1-reads.md Phase 3): the
 // resolve-workflow analogue of syncBudgetForPages above. resolveOneGroup's
@@ -779,6 +773,13 @@ export interface ResolveGroupOutcome {
   // undercount. Local resolutions cost 0 (a D1 read only); every other path
   // starts with the 1-call KKPhim lookup and adds from there.
   externalCalls: number;
+  // D1 rows (index writes included) this group actually wrote -- Phase 2
+  // (docs/plan-free-tier-overrun.md 2.3): callers accumulate this into
+  // SyncStateRepository.addRowsWrittenToday. 0 on every retryable branch
+  // (nothing was written). markResolved/markAttempted always affect exactly
+  // `refCount` rows (their WHERE clause is the same target_slug IS NULL
+  // filter that produced refCount), at 3 rows each (1 row + 2 index).
+  rowsWritten: number;
 }
 
 /** One (target_tmdb_id, target_type) group's worth of the three-tier
@@ -813,22 +814,22 @@ export async function resolveOneGroup(
   const local = await repos.movie.getCanonicalTargetByTmdbRef(targetType, targetTmdbId);
   if (local) {
     await repos.recommendation.markResolved(targetTmdbId, targetType, local.slug);
-    return { kind: 'resolved_existing', externalCalls: 0 };
+    return { kind: 'resolved_existing', externalCalls: 0, rowsWritten: refCount * 3 };
   }
 
   const onKkphim = await clients.kkphim.getByTmdbRef(targetType, targetTmdbId);
-  if (onKkphim.kind === 'retryable_error') return { kind: 'retryable', externalCalls: 1 };
+  if (onKkphim.kind === 'retryable_error') return { kind: 'retryable', externalCalls: 1, rowsWritten: 0 };
   if (onKkphim.kind === 'found') {
     // Upper bound, not the actual count -- see ResolveGroupOutcome.
     const externalCalls = RESOLVE_MAX_CALLS_PER_GROUP;
     const synced = await syncOneMovie(env, onKkphim.data.movie.slug, clients, repos);
     if (synced.outcome !== 'written' && synced.outcome !== 'unchanged') {
-      return { kind: 'retryable', externalCalls };
+      return { kind: 'retryable', externalCalls, rowsWritten: 0 };
     }
     const target = await repos.movie.getBySlug(onKkphim.data.movie.slug);
-    if (!target) return { kind: 'retryable', externalCalls };
+    if (!target) return { kind: 'retryable', externalCalls, rowsWritten: synced.rowsWritten };
     await repos.recommendation.markResolved(targetTmdbId, targetType, target.slug);
-    return { kind: 'resolved_existing', externalCalls };
+    return { kind: 'resolved_existing', externalCalls, rowsWritten: synced.rowsWritten + refCount * 3 };
   }
 
   if (maxStubs > 0 && refCount >= STUB_MIN_REFCOUNT && stubCountRef.count < maxStubs) {
@@ -839,22 +840,22 @@ export async function resolveOneGroup(
       const slug = slugifyStub(rawTitle, targetType, targetTmdbId);
       const stub = normalizeStubMovie(slug, tmdbDetail.data, targetTmdbId, targetType);
       const hash = hashMovie(stub);
-      await repos.movie.upsertMany([{ movie: stub, hash }]);
+      const written = await repos.movie.upsertMany([{ movie: stub, hash }]);
       await repos.search.indexMovie(slug, stub.title, stub.originalTitle);
       await repos.recommendation.markResolved(targetTmdbId, targetType, slug);
       stubCountRef.count++;
       await repos.syncState.set(STUB_COUNT_KEY, String(stubCountRef.count));
-      return { kind: 'resolved_stub', externalCalls };
+      return { kind: 'resolved_stub', externalCalls, rowsWritten: written + refCount * 3 };
     }
-    if (tmdbDetail.kind === 'retryable_error') return { kind: 'retryable', externalCalls };
+    if (tmdbDetail.kind === 'retryable_error') return { kind: 'retryable', externalCalls, rowsWritten: 0 };
     // A successful TMDB lookup with no usable title still falls through to
     // overflow -- 2 calls were spent either way.
     await repos.recommendation.markAttempted(targetTmdbId, targetType);
-    return { kind: 'overflow', externalCalls };
+    return { kind: 'overflow', externalCalls, rowsWritten: refCount * 3 };
   }
 
   await repos.recommendation.markAttempted(targetTmdbId, targetType);
-  return { kind: 'overflow', externalCalls: 1 };
+  return { kind: 'overflow', externalCalls: 1, rowsWritten: refCount * 3 };
 }
 
 /** Phase 4 (plan §4, ADR-0002 Finding 3) -- the three-tier recommendation

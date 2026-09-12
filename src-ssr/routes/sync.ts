@@ -16,6 +16,9 @@ import { refreshHeroSnapshot } from '../services/sync/heroSnapshot';
 import { INCREMENTAL_STALE_SECONDS, HERO_STALE_SECONDS } from '../services/sync/dispatch';
 
 const FREE_PLAN_DAILY_REQUEST_LIMIT = 100_000;
+// D1's real hard cap (Free plan) -- distinct from writeBudget.ts's
+// MAX_ROWS_PER_DAY governor threshold (85,000), which trips before this.
+const D1_DAILY_ROW_WRITE_LIMIT = 100_000;
 
 function parseStoredJson(value: string | null): unknown {
   if (!value) return null;
@@ -162,6 +165,7 @@ syncRoute.get('/__sync/status', async (c) => {
       hero: heroAgeSeconds === null || heroAgeSeconds > HERO_STALE_SECONDS,
     },
     rowsWrittenToday: rowsToday,
+    rowsWrittenTodayNote: 'estimate; counts row+index writes from sync/hero/recommendation/stats paths only',
     backfillMode: c.env.BACKFILL_MODE ?? 'free',
     catalogMovieCount: catalogCount,
     stubMovieCount: stubCount,
@@ -185,6 +189,7 @@ syncRoute.get('/__sync/status', async (c) => {
       estimatedRequestsToday,
       freeplanDailyLimit: FREE_PLAN_DAILY_REQUEST_LIMIT,
       estimatedPercentUsed: Math.round((estimatedRequestsToday / FREE_PLAN_DAILY_REQUEST_LIMIT) * 1000) / 10,
+      rowsWrittenPercentUsed: Math.round((rowsToday / D1_DAILY_ROW_WRITE_LIMIT) * 1000) / 10,
     },
   });
 });

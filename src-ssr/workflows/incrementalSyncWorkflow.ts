@@ -9,6 +9,7 @@ import {
   type IncrementalSyncResult,
 } from '../services/sync/orchestrator';
 import { syncOneMovie } from '../services/sync/syncMovie';
+import { hasWriteBudget } from '../services/sync/writeBudget';
 
 /** Free-plan-safe replacement for orchestrator.ts's runIncrementalSync
  * SELF-fan-out shape (docs/plan-free-plan-migration.md Phase 3): one step
@@ -35,9 +36,15 @@ export class IncrementalSyncWorkflow extends WorkflowEntrypoint<Env> {
     let unchanged = 0;
     let failed = 0;
     let rowsWritten = 0;
+    // Phase 2 (docs/plan-free-tier-overrun.md 2.1/V1): this Workflow calls
+    // syncOneMovie directly rather than the governed syncSlugBatch, so it
+    // needs its own check. If the daily budget is already gone, skip the
+    // sync loop entirely -- deferred below then covers every discovered
+    // slug, so the next tick's scan finds them "unknown" again.
+    const budgetOk = await step.do('check-write-budget', () => hasWriteBudget(repos.syncState));
     // Deferred slugs are still "unknown" in D1, so the next tick's scan
     // returns them again.
-    const toSync = scan.slugs.slice(0, syncBudgetForPages(scan.pagesScanned));
+    const toSync = budgetOk ? scan.slugs.slice(0, syncBudgetForPages(scan.pagesScanned)) : [];
     const deferred = scan.slugs.length - toSync.length;
     for (const slug of toSync) {
       const result = await step.do(`sync-${slug}`, () => syncOneMovie(this.env, slug, clients, repos));
@@ -69,7 +76,11 @@ export class IncrementalSyncWorkflow extends WorkflowEntrypoint<Env> {
     // `written: 0` in typical runs), so this step is skipped far more often
     // than it runs.
     if (written > 0) {
-      await step.do('refresh-catalog-stats', () => repos.catalogStats.refresh());
+      rowsWritten += await step.do('refresh-catalog-stats', () => repos.catalogStats.refresh());
+    }
+
+    if (rowsWritten > 0) {
+      await step.do('record-rows-written', () => repos.syncState.addRowsWrittenToday(rowsWritten));
     }
 
     const result: IncrementalSyncResult = {

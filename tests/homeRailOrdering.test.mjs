@@ -73,7 +73,7 @@ test('trending always mirrors heroMovies, never the upstream_modified-ordered ra
   await hero.replaceSnapshot([{ rank: 1, tmdbId: 11, slug: 'hero-pick' }], {
     lastSuccessAt: 1_800_000_000,
     lastAttemptAt: 1_800_000_000,
-    result: { tmdbCount: 20, matchedCount: 1, notFoundCount: 19, failedCount: 0 },
+    result: { tmdbCount: 20, matchedCount: 1, notFoundCount: 19, failedCount: 0, budgetSkipped: 0 },
   });
 
   const homeData = await buildHomeData(db);

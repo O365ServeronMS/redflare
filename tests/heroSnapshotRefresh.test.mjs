@@ -6,6 +6,11 @@ import { refreshHeroSnapshot } from '../src-ssr/services/sync/heroSnapshot.ts';
 import { KkphimClient } from '../src-ssr/services/sync/kkphimClient.ts';
 import { TmdbClient } from '../src-ssr/services/sync/tmdbClient.ts';
 import { RateLimiter } from '../src-ssr/services/sync/throttle.ts';
+import { SyncStateRepository } from '../src-ssr/repositories/syncStateRepository.ts';
+import { MAX_ROWS_PER_DAY } from '../src-ssr/services/sync/writeBudget.ts';
+import { HeroSnapshotWorkflow } from '../src-ssr/workflows/heroSnapshotWorkflow.ts';
+
+const noopStep = { do: async (_name, fn) => fn() };
 
 const instances = [];
 const originalFetch = globalThis.fetch;
@@ -107,7 +112,7 @@ test('uses only the first 20 TMDB results and persists the seven valid KKPhim mo
   assert.deepEqual(result, {
     skipped: false, keptLastGood: false, fetched: 20, matched: 7, notFound: 13,
     filteredType: 0, filteredNoStream: 0, filteredNoBackdrop: 0, failed: 0, durationMs: result.durationMs,
-    tmdbCount: 20, matchedCount: 7, notFoundCount: 13, failedCount: 0,
+    tmdbCount: 20, matchedCount: 7, notFoundCount: 13, failedCount: 0, budgetSkipped: 0,
   });
   assert.deepEqual(lookedUp.sort((a, b) => a - b), Array.from({ length: 20 }, (_, index) => index + 1));
   // All seven are already catalog rows in D1 -- no re-sync (Free: 50 subrequests/instance).
@@ -206,6 +211,100 @@ test('syncs only candidates not already in D1 as that catalog movie', async () =
   assert.deepEqual(synced, ['brand-new']);
 });
 
+test('caps external subrequests at the Free-tier budget: candidates beyond the cap are budget_skipped, not failed', async () => {
+  // Free: 50 external subrequests per Workflow instance (docs/plan-free-tier-overrun.md Phase 1).
+  // 20 brand-new candidates would cost 1 (fetch-trending) + 20 * (1 kkphim lookup + 5 syncCanonical)
+  // = 121 if unbounded. Walking the budget down candidate by candidate: candidates 1-8 each cost 6
+  // (used reaches 7, 13, 19, 25, 31, 37, 43, 49); candidate 9 only has 1 call left after
+  // fetch-trending + 8 syncs, so its kkphim lookup happens (cost 1, used=50) but there's no room
+  // left for a syncCanonical (needs 5) and it is budget_skipped; candidates 10-20 have 0 calls
+  // left and are budget_skipped without even a kkphim lookup.
+  const { db, synced, deps } = await setup();
+  const lookedUp = [];
+  deps.syncCanonical = async (slug) => {
+    synced.push(slug);
+    const id = Number(slug.match(/\d+/)[0]);
+    await seedMovie(db, slug, id);
+    return { outcome: 'written' };
+  };
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.includes('/trending/movie/week')) {
+      return json({ results: Array.from({ length: 20 }, (_, index) => ({ id: index + 1, media_type: 'movie' })) });
+    }
+    const id = Number(value.match(/\/tmdb\/movie\/(\d+)/)?.[1]);
+    lookedUp.push(id);
+    return json(kkMovie(id, `new-${id}`));
+  };
+
+  const result = await refreshHeroSnapshot({}, { now: 6_000, dependencies: deps });
+  assert.equal(result.failed, 0);
+  assert.equal(result.matched, 8);
+  assert.equal(result.budgetSkipped, 12);
+  assert.equal(synced.length, 8);
+  assert.equal(lookedUp.length, 9);
+  // A budget cutoff must never drop the whole run -- the 8 matched candidates are still written.
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM hero_snapshot').first()).n, 8);
+});
+
+test('steady state: 20 candidates already in D1 need no syncCanonical calls and are never budget_skipped', async () => {
+  const { db, synced, deps } = await setup();
+  for (let id = 1; id <= 20; id++) await seedMovie(db, `film-${id}`, id);
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.includes('/trending/movie/week')) {
+      return json({ results: Array.from({ length: 20 }, (_, index) => ({ id: index + 1, media_type: 'movie' })) });
+    }
+    const id = Number(value.match(/\/tmdb\/movie\/(\d+)/)?.[1]);
+    return json(kkMovie(id, `film-${id}`));
+  };
+
+  const result = await refreshHeroSnapshot({}, { now: 7_000, dependencies: deps });
+  assert.equal(result.matched, 20);
+  assert.equal(result.budgetSkipped, 0);
+  assert.equal(result.failed, 0);
+  assert.deepEqual(synced, []);
+});
+
+test('budget_skipped candidates alone (0 failed) do not keep the prior snapshot -- the new one is still written', async () => {
+  const { db, hero, synced, deps } = await setup();
+  await seedMovie(db, 'old-good', 999);
+  await hero.replaceSnapshot([{ rank: 1, tmdbId: 999, slug: 'old-good' }], {
+    lastSuccessAt: 1_000,
+    lastAttemptAt: 1_000,
+    result: { tmdbCount: 1, matchedCount: 1, notFoundCount: 0, failedCount: 0, budgetSkipped: 0 },
+  });
+  deps.syncCanonical = async (slug) => {
+    synced.push(slug);
+    const id = Number(slug.match(/\d+/)[0]);
+    await seedMovie(db, slug, id);
+    return { outcome: 'written' };
+  };
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.includes('/trending/movie/week')) {
+      return json({ results: Array.from({ length: 9 }, (_, index) => ({ id: index + 1, media_type: 'movie' })) });
+    }
+    const id = Number(value.match(/\/tmdb\/movie\/(\d+)/)?.[1]);
+    return json(kkMovie(id, `new-${id}`));
+  };
+
+  const result = await refreshHeroSnapshot({}, { now: 8_000, dependencies: deps });
+  assert.equal(result.failed, 0);
+  assert.equal(result.matched, 8);
+  assert.equal(result.budgetSkipped, 1);
+  assert.equal(result.keptLastGood, false);
+  assert.deepEqual(await hero.getRefreshState(), {
+    lastSuccessAt: 8_000,
+    lastAttemptAt: 8_000,
+    lastResult: { tmdbCount: 9, matchedCount: 8, notFoundCount: 0, failedCount: 0, budgetSkipped: 1 },
+  });
+  assert.deepEqual(
+    (await db.prepare('SELECT slug FROM hero_snapshot').all()).results.map((row) => row.slug).sort(),
+    Array.from({ length: 8 }, (_, index) => `new-${index + 1}`).sort()
+  );
+});
+
 test('a KKPhim retryable error records the attempt but keeps the prior snapshot unchanged', async () => {
   const { db, hero, deps } = await setup();
   await seedMovie(db, 'last-good', 99);
@@ -213,7 +312,7 @@ test('a KKPhim retryable error records the attempt but keeps the prior snapshot 
   await hero.replaceSnapshot([{ rank: 9, tmdbId: 99, slug: 'last-good' }], {
     lastSuccessAt: 1_000,
     lastAttemptAt: 1_000,
-    result: { tmdbCount: 1, matchedCount: 1, notFoundCount: 0, failedCount: 0 },
+    result: { tmdbCount: 1, matchedCount: 1, notFoundCount: 0, failedCount: 0, budgetSkipped: 0 },
   });
   globalThis.fetch = async (url) => {
     const value = String(url);
@@ -229,7 +328,7 @@ test('a KKPhim retryable error records the attempt but keeps the prior snapshot 
   assert.deepEqual(await hero.getRefreshState(), {
     lastSuccessAt: 1_000,
     lastAttemptAt: 3_000,
-    lastResult: { tmdbCount: 2, matchedCount: 1, notFoundCount: 0, failedCount: 1 },
+    lastResult: { tmdbCount: 2, matchedCount: 1, notFoundCount: 0, failedCount: 1, budgetSkipped: 0 },
   });
 });
 
@@ -239,7 +338,7 @@ test('an invalid TMDB payload keeps the prior snapshot unchanged', async () => {
   await hero.replaceSnapshot([{ rank: 1, tmdbId: 99, slug: 'last-good' }], {
     lastSuccessAt: 1_000,
     lastAttemptAt: 1_000,
-    result: { tmdbCount: 1, matchedCount: 1, notFoundCount: 0, failedCount: 0 },
+    result: { tmdbCount: 1, matchedCount: 1, notFoundCount: 0, failedCount: 0, budgetSkipped: 0 },
   });
   globalThis.fetch = async (url) => String(url).includes('/trending/movie/week') ? json({ nope: [] }) : json({ status: false }, 404);
 
@@ -255,7 +354,7 @@ test('30-minute success gate makes no upstream request, while force bypasses it'
   await hero.replaceSnapshot([{ rank: 1, tmdbId: 99, slug: 'last-good' }], {
     lastSuccessAt: 2_000,
     lastAttemptAt: 2_000,
-    result: { tmdbCount: 1, matchedCount: 1, notFoundCount: 0, failedCount: 0 },
+    result: { tmdbCount: 1, matchedCount: 1, notFoundCount: 0, failedCount: 0, budgetSkipped: 0 },
   });
   let calls = 0;
   globalThis.fetch = async (url) => {
@@ -273,4 +372,34 @@ test('30-minute success gate makes no upstream request, while force bypasses it'
   assert.equal(forced.skipped, false);
   assert.equal(calls, 1);
   assert.deepEqual((await db.prepare('SELECT rank, slug FROM hero_snapshot').all()).results, []);
+});
+
+test('HeroSnapshotWorkflow: exhausted write budget skips the run before fetch-trending (no replaceSnapshot)', async () => {
+  const { db } = await setup();
+  await seedMovie(db, 'last-good', 99);
+  const hero = new HeroSnapshotRepository(db);
+  await hero.replaceSnapshot([{ rank: 1, tmdbId: 99, slug: 'last-good' }], {
+    lastSuccessAt: 1_000,
+    lastAttemptAt: 1_000,
+    result: { tmdbCount: 1, matchedCount: 1, notFoundCount: 0, failedCount: 0, budgetSkipped: 0 },
+  });
+  const syncState = new SyncStateRepository(db);
+  await syncState.addRowsWrittenToday(MAX_ROWS_PER_DAY);
+
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    return json({ results: [] });
+  };
+
+  const env = { DB: db, TMDB_API_TOKEN: 'test-token' };
+  const workflow = new HeroSnapshotWorkflow({}, env);
+  const result = await workflow.run({}, noopStep);
+
+  assert.deepEqual(result, { skipped: 'write_budget', matched: 0, failed: 0 });
+  assert.equal(fetchCalled, false);
+  assert.deepEqual(
+    (await db.prepare('SELECT rank, tmdb_id, slug FROM hero_snapshot').all()).results,
+    [{ rank: 1, tmdb_id: 99, slug: 'last-good' }]
+  );
 });
