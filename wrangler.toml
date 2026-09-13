@@ -104,7 +104,10 @@ database_id = "40c364b3-10a8-4d03-bd51-60debe94610a"
 # Phase 0) and BACKFILL_ENABLED is "false" below, so nothing currently
 # writes fast enough to need burst's bypass; steady-state D1 writes are the
 # few-hundred-to-few-thousand-rows/day the governor is sized for
-# (MAX_ROWS_PER_DAY = 85_000 in orchestrator.ts). Flip back to "burst" only
+# (MAX_ROWS_PER_DAY = 85_000 in services/sync/writeBudget.ts, checked by
+# every D1 write path -- hero snapshot, recommendation resolve/refresh,
+# catalog stats, and incremental sync, not just backfill). Flip back to
+# "burst" only
 # for a future large, time-boxed re-crawl, and only while actually on
 # Workers Paid -- burst has no governor at all, so it is not Free-plan-safe
 # on its own. Verify via /__sync/status rowsWrittenToday for a few days

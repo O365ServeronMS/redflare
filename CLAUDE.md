@@ -139,10 +139,15 @@ summarize the output.
 The scripts read `CRON_KEY` from the environment or from
 `~/.config/redflare/cron_key`.
 
-**Free-plan D1 budget:** 5M rows read/day. Once that's exceeded, D1 rejects
-every query until 00:00 UTC. Before triggering sync jobs or adding queries,
-see `docs/plan-incremental-sync-stall.md`. D1 also caps each query at 100
-bound parameters.
+**Free-plan D1 budget:** 5M rows read/day, 100k rows written/day, **500 MB
+storage per database** (5 GB is the account total, spread across up to 10
+databases — not a per-database cap), **50 D1 queries per Worker invocation**
+(Paid: 1,000), 100 bound parameters per query. Measured 2026-09-12:
+database_size 180 MiB (37.8% of the 500 MB cap), rows_read_24h 32.9%,
+rows_written_24h 86.7% (see `docs/state-free-tier-overrun.md` Phase 0). Once
+the rows-read cap is exceeded, D1 rejects every query until 00:00 UTC. Before
+triggering sync jobs or adding queries, see
+`docs/plan-incremental-sync-stall.md`.
 
 ## Caching
 

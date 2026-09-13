@@ -70,9 +70,9 @@ Bảng khởi điểm (có thể đã lỗi thời — verify):
 | Worker CPU | 10 ms/invocation |
 | Subrequests | 50 external/invocation (+ ~1.000 tới dịch vụ Cloudflare) |
 | Kết nối đồng thời | 6/invocation |
-| Cron Triggers | 5 cron/script |
+| Cron Triggers | 5 cron/**account** (không phải 5/script) |
 | Workflows | 50 external subrequest **cho cả instance** (không phải mỗi step), giới hạn số instance/ngày và concurrency riêng — tra kỹ |
-| D1 | 5.000.000 rows read/ngày, 100.000 rows written/ngày, 5 GB storage, 100 bound params/query |
+| D1 | 5.000.000 rows read/ngày, 100.000 rows written/ngày, **500 MB storage/database** (5 GB là tổng account, tối đa 10 database/account), **50 query/invocation** (Paid: 1.000), 100 bound params/query |
 | Static Assets | request tới asset tĩnh không tính vào quota Worker (verify) |
 | Workers Logs | có trần events/ngày trên Free |
 | Cache purge | có rate limit (~5 req/phút trên Free) |
@@ -146,7 +146,8 @@ Với từng Workflow trong `src-ssr/workflows/`:
   100k — margin có đủ không, và nó có chặn **mọi** đường ghi không, hay chỉ
   backfill? (Kiểm tra các đường ghi khác: hero snapshot, recommendation
   refresh/resolve, sync episodes.)
-- Ước lượng storage hiện tại so với 5 GB (Phần 2 lấy số thật).
+- Ước lượng storage hiện tại so với trần **500 MB/database** (không phải 5 GB
+  — đó là tổng account, tối đa 10 database) (Phần 2 lấy số thật).
 
 ### 1.6 Các bề mặt còn lại
 

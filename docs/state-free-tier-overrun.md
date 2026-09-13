@@ -133,5 +133,115 @@ Thực hiện đúng §1.1–1.4 của plan:
   `resolveCandidate` đổi chữ ký, `MAX_FETCHES_PER_SYNC` export).
 - `node scripts/rf-test.mjs all` → `OK: 18/18`.
 
-Chưa chạy `git commit`/`push` cho các thay đổi Phase 1 này trong phiên này —
+Phase 1 và Phase 2 đã gộp vào một commit (`17bc785`, "feat(sync): D1
+write-budget governor and hero-snapshot subrequest cap") — plan §5 bước 2 đề
+nghị tách riêng từng phase, nhưng đã gộp theo yêu cầu trực tiếp của chủ dự án.
+Chưa `push` — chờ xác nhận riêng cho bước deploy (Phase 5).
+
+## Phase 3 — Tài liệu (sửa V3)
+
+Thực hiện đúng mục tiêu V3 ("tài liệu ghi sai trần D1 và thiếu một giới
+hạn"), nhưng vị trí thực tế của các dòng sai khác với plan liệt kê ở một chỗ:
+plan nói "`README.md` mục 🤖 Luật dành cho AI agent / bảng ngân sách Free",
+nhưng README hiện không có bảng ngân sách Free nào ở mục đó (chỉ có luật code/
+design). Dòng ngân sách D1 thật sự nằm ở `CLAUDE.md` ("Free-plan D1 budget"),
+nên đã sửa ở đó thay vì README.
+
+- `CLAUDE.md`: dòng "Free-plan D1 budget" trước đây chỉ có "5M rows read/day"
+  + "100 bound parameters" — thêm **500 MB storage/database** (5 GB là tổng
+  account, tối đa 10 database — không phải trần từng database), **50 D1
+  query/invocation** (Paid: 1.000), và mốc đo thật 2026-09-12 (database_size
+  180 MiB = 37,8% trần; rows_read_24h 32,9%; rows_written_24h 86,7% — xem
+  Phase 0 ở trên).
+- `wrangler.toml`: comment ở `[vars] BACKFILL_MODE` đang trỏ
+  `MAX_ROWS_PER_DAY = 85_000 in orchestrator.ts` (đã dời sang
+  `writeBudget.ts` ở Phase 2) — sửa lại đường dẫn, và ghi rõ governor giờ bao
+  cả hero/recommendation-resolve/recommendation-refresh/catalog-stats, không
+  chỉ backfill.
+- `docs/audit-prompt-free-tier.md`: sửa 3 chỗ ở bảng khởi điểm Phần 0 và mục
+  1.5 — Cron Triggers "5 cron/script" → "5 cron/**account**"; D1 storage
+  "5 GB" → "**500 MB storage/database** (5 GB là tổng account, tối đa 10
+  database)"; thêm **50 query/invocation** (Paid 1.000) vào hàng D1; sửa nốt
+  câu "so với 5 GB" ở mục 1.5 thành "so với trần 500 MB/database".
+- `docs/state-free-tier-overrun.md`: mục này.
+
+**Verify:** `node scripts/rf-test.mjs all` → `OK: 18/18` (chỉ đổi
+tài liệu/comment, không đổi code nghiệp vụ nào — `build` + `git diff --check`
+sạch).
+
+Chưa chạy `git commit`/`push` cho các thay đổi Phase 3 này trong phiên này —
 chờ xác nhận trước khi commit.
+
+## Phase 4 — V4: đo request rồi trình chủ dự án quyết (KHÔNG code)
+
+**Bước 1 (lấy số request thật 7 ngày) vẫn KHÔNG làm được trong phiên này** —
+đúng như plan đã lường trước ("Phiên audit 2026-09-12 không có quyền này").
+Đã kiểm tra hai đường:
+
+- `npx wrangler whoami`: token OAuth hiện tại **không có scope Analytics**
+  (danh sách scope: account/user read, workers/workers_kv/workers_routes/
+  workers_scripts write, d1 write, zone read, … — không có
+  `Account Analytics: Read` hay tương đương).
+- MCP server `Cloudflare_Developer_Platform` (có tool
+  `workers_get_worker`/`d1_database_query`/…) yêu cầu authorize riêng qua
+  `claude mcp`/`/mcp` — phiên này không tương tác được để chạy OAuth flow.
+
+Không có cách nào khác để lấy request/ngày, tỉ lệ asset so với `/api/*`, hay
+cache hit rate từ phiên agent hiện tại mà không đoán số — nên **không tự bịa
+số**. Cần một trong hai:
+
+1. Chủ dự án authorize MCP `Cloudflare_Developer_Platform` (hoặc cấp token
+   mới có scope Analytics) để agent tự truy vấn GraphQL Analytics API; hoặc
+2. Chủ dự án tự lấy số từ dashboard Cloudflare (Workers & Pages → tên worker
+   → Metrics, khung 7 ngày) và dán lại: tổng request/ngày, request tới
+   asset tĩnh so với `/api/*`, cache hit rate.
+
+**Bước 2–4 (đối chiếu, trình 3 lựa chọn, ghi quyết định) đang chờ số thật ở
+bước 1** — chưa thể làm vì không có dữ liệu để đối chiếu với trần
+100.000 request/ngày. Khung 3 lựa chọn theo plan (chưa có số, chỉ nêu lại để
+tiện chọn khi có số):
+
+- **Giữ nguyên** `[cache] enabled = true` — nếu request/ngày còn xa trần.
+- **Giảm số asset mỗi pageview** — gộp font subset, lazy-load
+  `hls.js`/`artplayer` (theo plan ước tính `hls.light` ~332 KB +
+  `artplayer` ~140 KB đang nằm trong bundle chung) chỉ ở route xem phim.
+  Cần verify lại số KB thật từ `dist/` sau build trước khi trình, vì phiên
+  này chưa đo bundle size thật.
+- **Tắt `[cache] enabled`**, quay lại asset miễn phí — chấp nhận mọi `/api/*`
+  đều chạm Worker + D1 (tăng CPU/subrequest, đổi lại asset không tính quota
+  Worker).
+
+Không tự chọn phương án nào — theo đúng luật của plan, đây là quyết định của
+chủ dự án, không phải của agent.
+
+**Cập nhật 2026-09-13 — chủ dự án tự xác nhận số thật (không cần agent
+truy vấn GraphQL):** mọi chỉ số khác (Worker requests, CPU, subrequests,
+cache hit rate) **đều dưới trần**, không có tín hiệu nào cho thấy request
+layer đáng lo. Bằng chứng độc lập: email cảnh báo thật từ Cloudflare —
+
+> Your account has used 90% of the daily D1 free tier limit of 100000
+> rows_written. D1 requests will return errors if the limit is exceeded
+> before 2026-09-13 at 00:00:00 UTC.
+
+→ Xác nhận đúng chẩn đoán gốc của cả plan này: **điểm vượt/sát trần duy nhất
+là D1 rows_written**, không phải request/asset/cache. Vì vậy:
+
+- **Quyết định Phase 4**: giữ nguyên `[cache] enabled = true` (phương án 1) —
+  không cần giảm asset mỗi pageview, không cần tắt cache. Chữ ký duyệt: chủ
+  dự án, qua xác nhận trực tiếp trong hội thoại ngày 2026-09-13 (số liệu
+  request/CPU/cache đều dưới ngưỡng).
+- **Việc thật sự cần làm ngay là deploy Phase 1+2** (governor `writeBudget.ts`
+  + trần subrequest hero-snapshot) — đây chính là bản vá cho đúng sự cố email
+  này báo, nhưng tính đến giờ **vẫn đang nằm ở commit `17bc785` cục bộ, chưa
+  `push`**, nên production hiện tại **chưa có bản vá này** và vẫn đang phơi
+  ra rủi ro y hệt email cảnh báo (ghi hết 100k rows/ngày → D1 từ chối
+  **mọi** query, kể cả đọc, cho tới 00:00 UTC hôm sau).
+- Chưa rõ lúc viết dòng này (2026-09-13, sau mốc 00:00 UTC trong email) bộ
+  đếm rows_written đã reset theo ngày mới hay chưa, và liệu có request nào
+  đã thật sự bị D1 từ chối trong cửa sổ đó — không có quyền Analytics/CRON_KEY
+  trong phiên này để tra hồi cứu; nếu cần xác nhận có lỗi thật xảy ra hay
+  không, phải xem trực tiếp Cloudflare dashboard (Workers → Logs) hoặc
+  D1 → Metrics.
+
+Phase 4 xem như **xong** theo nghĩa "đo rồi trình chủ dự án quyết" — quyết
+định giữ nguyên cache, không mở plan riêng cho asset/cache.
