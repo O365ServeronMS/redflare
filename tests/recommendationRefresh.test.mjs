@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { afterEach, test } from 'node:test';
-import { Miniflare } from 'miniflare';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
 import { runRecommendationRefreshTick } from '../src-ssr/services/sync/recommendationRefresh.ts';
 import { RecommendationFreshnessRepository } from '../src-ssr/repositories/recommendationFreshnessRepository.ts';
@@ -20,11 +20,11 @@ afterEach(async () => {
 });
 
 async function setup() {
-  const mf = new Miniflare({
+  const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     script: 'export default { fetch() { return new Response("ok"); } };',
     d1Databases: { DB: crypto.randomUUID() },
-  });
+  }));
   instances.push(mf);
   const db = await mf.getD1Database('DB');
   await db.batch([
@@ -45,11 +45,11 @@ async function setup() {
 }
 
 async function setupFreshnessOnly() {
-  const mf = new Miniflare({
+  const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     script: 'export default { fetch() { return new Response("ok"); } };',
     d1Databases: { DB: crypto.randomUUID() },
-  });
+  }));
   instances.push(mf);
   const db = await mf.getD1Database('DB');
   await db.prepare('CREATE TABLE movie (slug TEXT PRIMARY KEY, tmdb_id INTEGER, tmdb_type TEXT, tier TEXT)').run();

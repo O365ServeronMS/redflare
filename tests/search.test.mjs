@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { afterEach, test } from 'node:test';
-import { Miniflare } from 'miniflare';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { SearchRepository, SEARCH_LIMIT, SEARCH_MAX_PAGES, buildTieredQueries, parseTerms, buildAliasMatch } from '../src-ssr/repositories/searchRepository.ts';
 import { apiRoute } from '../src-ssr/api/routes.ts';
 
@@ -13,11 +13,11 @@ const instances = [];
 afterEach(async () => Promise.all(instances.splice(0).map((mf) => mf.dispose())));
 
 async function setup() {
-  const mf = new Miniflare({
+  const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     script: 'export default { fetch() { return new Response("ok"); } };',
     d1Databases: { DB: crypto.randomUUID() },
-  });
+  }));
   instances.push(mf);
   const db = await mf.getD1Database('DB');
   for (const name of ['0005_ssr_schema.sql', '0007_fts_search.sql', '0009_actor_popularity.sql', '0014_upstream_modified.sql', '0015_search_alias.sql']) {

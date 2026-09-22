@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { afterEach, test } from 'node:test';
-import { Miniflare } from 'miniflare';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { apiRoute } from '../src-ssr/api/routes.ts';
 import { INCREMENTAL_STALE_SECONDS, HERO_STALE_SECONDS } from '../src-ssr/services/sync/dispatch.ts';
 
@@ -13,11 +13,11 @@ const instances = [];
 afterEach(async () => Promise.all(instances.splice(0).map((mf) => mf.dispose())));
 
 async function setup() {
-  const mf = new Miniflare({
+  const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     script: 'export default { fetch() { return new Response("ok"); } };',
     d1Databases: { DB: crypto.randomUUID() },
-  });
+  }));
   instances.push(mf);
   const db = await mf.getD1Database('DB');
   const sql = await readFile(new URL('../migrations/0005_ssr_schema.sql', import.meta.url), 'utf8');

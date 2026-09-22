@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { Miniflare } from 'miniflare';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { HeroSnapshotRepository } from '../src-ssr/repositories/heroSnapshotRepository.ts';
 import { refreshHeroSnapshot } from '../src-ssr/services/sync/heroSnapshot.ts';
 import { KkphimClient } from '../src-ssr/services/sync/kkphimClient.ts';
@@ -20,11 +20,11 @@ afterEach(async () => {
 });
 
 async function setup() {
-  const mf = new Miniflare({
+  const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     script: 'export default { fetch() { return new Response("ok"); } };',
     d1Databases: { DB: crypto.randomUUID() },
-  });
+  }));
   instances.push(mf);
   const db = await mf.getD1Database('DB');
   await db.batch([
