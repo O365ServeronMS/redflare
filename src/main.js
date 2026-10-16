@@ -221,9 +221,10 @@ async function renderHomePage() {
     errEl.style.textAlign = 'center';
     errEl.innerHTML = `
       <h2 style="margin-bottom:16px">Không thể tải dữ liệu</h2>
-      <p style="color:#888;margin-bottom:24px">${err.message}</p>
+      <p style="color:#888;margin-bottom:24px"></p>
       <button class="hero__btn hero__btn--primary">Thử lại</button>
     `;
+    errEl.querySelector('p').textContent = err.message;
     errEl.querySelector('button').addEventListener('click', () => location.reload());
     page.appendChild(errEl);
   }
@@ -307,6 +308,22 @@ function renderSearchPage({ query }) {
 // ─── Initialize ─────────────────────────────────────────
 mountGlobalUI();
 
+// ─── 404 Page ───────────────────────────────────────────
+function renderNotFoundPage() {
+  const page = getPageContainer();
+  const el = document.createElement('div');
+  el.className = 'container';
+  el.style.paddingTop = '120px';
+  el.style.textAlign = 'center';
+  el.innerHTML = `
+    <h2 style="margin-bottom:16px">Không tìm thấy trang</h2>
+    <p style="color:#888;margin-bottom:24px">Trang bạn tìm không tồn tại hoặc đã bị chuyển đi.</p>
+    <a href="/" class="hero__btn hero__btn--primary">Về trang chủ</a>
+  `;
+  page.appendChild(el);
+  renderFooter(page);
+}
+
 initRouter([
   { path: '/', handler: renderHomePage },
   { path: '/phim/:slug', handler: renderDetailPage },
@@ -314,4 +331,4 @@ initRouter([
   { path: '/the-loai/:slug', handler: renderGenrePage },
   { path: '/quoc-gia/:slug', handler: renderCountryPage },
   { path: '/tim-kiem', handler: renderSearchPage },
-]);
+], renderNotFoundPage);

@@ -4,14 +4,17 @@
  */
 
 let routes = [];
+let notFoundHandler = null;
 let currentCleanup = null;
 
 /**
  * Register routes. Each route has a pattern and handler.
  * Pattern uses :param syntax for dynamic segments.
  * @param {Array<{path: string, handler: function}>} routeDefs
+ * @param {function} notFound - handler for paths no route matches
  */
-export function initRouter(routeDefs) {
+export function initRouter(routeDefs, notFound) {
+  notFoundHandler = notFound;
   routes = routeDefs.map(({ path, handler }) => {
     // Convert path pattern to regex
     const paramNames = [];
@@ -103,16 +106,7 @@ function handleRoute() {
     }
   }
 
-  // 404 fallback — instead of redirecting silently, show error to help debug
-  console.error("Router 404: No route matched path", path);
-  document.body.innerHTML = `
-    <div style="padding: 50px; text-align: center; color: white;">
-      <h2>Lỗi Không Tìm Thấy Trang (404)</h2>
-      <p>Đường dẫn hiện tại: <strong>${path}</strong></p>
-      <p>Không khớp với bất kỳ Route nào.</p>
-      <a href="/" style="color: #e50914; text-decoration: underline; margin-top: 20px; display: inline-block;">Quay về trang chủ</a>
-    </div>
-  `;
+  runHandler(notFoundHandler, { params: {}, query });
 }
 
 function runHandler(handler, routeContext) {

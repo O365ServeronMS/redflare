@@ -193,7 +193,9 @@ export function renderPlayer(container, { embedUrl, m3u8Url, serverName, episode
 
   const infoText = document.createElement('h3');
   infoText.className = 'player__title';
-  infoText.innerHTML = `Đang phát: <span>${episodeName} (${serverName})</span>`;
+  const infoName = document.createElement('span');
+  infoName.textContent = `${episodeName} (${serverName})`;
+  infoText.append('Đang phát: ', infoName);
   header.appendChild(infoText);
 
   section.appendChild(header);
