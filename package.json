@@ -28,18 +28,19 @@
     "db:migrate": "wrangler d1 migrations apply redflare-db --remote"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "typescript": "^7.0.2",
-    "vite": "^8.3.0",
-    "wrangler": "^4.136.1"
+    "vite": "^8.3.4",
+    "wrangler": "^4.151.1"
   },
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
     "artplayer": "^5.4.0",
     "hls.js": "^1.7.3",
-    "hono": "^4.13.8"
+    "hono": "^4.13.13"
   },
   "allowScripts": {
-    "esbuild@0.28.1": true,
-    "workerd@1.20260921.1": true
+    "esbuild@0.28.2": true,
+    "workerd@1.20261012.1": true
   }
 }
