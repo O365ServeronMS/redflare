@@ -1,18 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { afterEach, test } from 'node:test';
-import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { newD1Miniflare } from './miniflareD1.mjs';
 import { HeroSnapshotRepository } from '../src-ssr/repositories/heroSnapshotRepository.ts';
 
 const instances = [];
 afterEach(async () => Promise.all(instances.splice(0).map((mf) => mf.dispose())));
 
 async function setup() {
-  const mf = new Miniflare(convertV4MiniflareOptions({
-    modules: true,
-    script: 'export default { fetch() { return new Response("ok"); } };',
-    d1Databases: { DB: crypto.randomUUID() },
-  }));
+  const mf = newD1Miniflare();
   instances.push(mf);
   const db = await mf.getD1Database('DB');
   await db.batch([

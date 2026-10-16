@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { afterEach, test } from 'node:test';
-import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { newD1Miniflare } from './miniflareD1.mjs';
 import { buildHomeData } from '../src-ssr/api/homeData.ts';
 import { HeroSnapshotRepository } from '../src-ssr/repositories/heroSnapshotRepository.ts';
 
@@ -16,11 +16,7 @@ const instances = [];
 afterEach(async () => Promise.all(instances.splice(0).map((mf) => mf.dispose())));
 
 async function setup() {
-  const mf = new Miniflare(convertV4MiniflareOptions({
-    modules: true,
-    script: 'export default { fetch() { return new Response("ok"); } };',
-    d1Databases: { DB: crypto.randomUUID() },
-  }));
+  const mf = newD1Miniflare();
   instances.push(mf);
   const db = await mf.getD1Database('DB');
   for (const name of ['0005_ssr_schema.sql', '0008_recommendation_resolve.sql', '0009_actor_popularity.sql', '0010_hero_snapshot.sql', '0014_upstream_modified.sql']) {

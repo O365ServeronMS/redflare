@@ -78,3 +78,13 @@ fix`.
 
 Deploy (merge vào `main`, `git push origin main`) cần xác nhận chủ dự án
 trước, theo đúng plan và theo quy tắc chung của repo (không tự push/deploy).
+
+## Follow-up 2026-10-17 — trả nợ kỹ thuật
+
+- `wrangler` 4.151.1, `hono` 4.13.13, `vite` 8.3.4, `compatibility_date`
+  2026-10-12 (khớp workerd; không có compat flag mới bật mặc định từ
+  2026-09-21). `npm audit`: 5 high (undici qua miniflare) → 0.
+- `esbuild` 0.28.2 khai báo thành devDependency, pin exact.
+- Test bỏ `convertV4MiniflareOptions()`: dùng chung helper
+  `tests/miniflareD1.mjs` (`newD1Miniflare()`, shape native miniflare 5).
+- 11 script `test:*` bundle-rồi-chạy gom về `scripts/run-bundled-test.mjs`.

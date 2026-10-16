@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { newD1Miniflare } from './miniflareD1.mjs';
 
 import { TmdbClient } from '../src-ssr/services/sync/tmdbClient.ts';
 import { RateLimiter } from '../src-ssr/services/sync/throttle.ts';
@@ -190,11 +190,7 @@ test('uses a verified TMDB override when the upstream record has no TMDB identit
 });
 
 async function setupResolver(maxStubs = '0') {
-  const mf = new Miniflare(convertV4MiniflareOptions({
-    modules: true,
-    script: 'export default { fetch() { return new Response("ok"); } };',
-    d1Databases: { DB: crypto.randomUUID() },
-  }));
+  const mf = newD1Miniflare();
   instances.push(mf);
   const db = await mf.getD1Database('DB');
   await db.batch([
